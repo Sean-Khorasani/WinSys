@@ -1,0 +1,8 @@
+# Vendored assets
+wintcp/webui/vendor/** linguist-vendored
+wintcp/webui/data/** linguist-vendored
+wintcp/webui/**/*.min.js -diff
+wintcp/webui/**/*.min.css -diff
+
+# Generated
+webui/*.gen.* linguist-generated

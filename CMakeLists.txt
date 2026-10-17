@@ -69,6 +69,8 @@ wintcp/src/TrayIcon.cpp
     wintcp/src/WebUi.h
     wintcp/src/WebMetrics.cpp
     wintcp/src/WebMetrics.h
+    wintcp/src/WebStatic.cpp
+    wintcp/src/WebStatic.h
     wintcp/src/ViewState.cpp
     wintcp/src/ViewState.h
     wintcp/src/DnsResolver.cpp

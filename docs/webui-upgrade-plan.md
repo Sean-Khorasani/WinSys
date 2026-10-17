@@ -68,3 +68,19 @@ Total initial transfer target: < 1.5 MB uncompressed.
 - `tools/vendor/` — esbuild recipe for the ECharts bundle.
 
 None of these are required to build or run the product.
+
+
+## Phase 3-7 decisions (logged during implementation)
+
+- Phase 3: Overview and Performance pages use uPlot for time series; ECharts
+  bundle is loaded on demand only when a donut/treemap/sankey/map chart is
+  first rendered.
+- Phase 4: Processes page uses the virtualised table (js/ui/virtualtable.js)
+  with a fixed row height of 40px; tree and treemap views are placeholders
+  pending the ECharts bundle.
+- Phase 5: Network page preserves all existing filter/sort/group/freeze
+  behaviour; the 250-row cap is removed by the virtualised table.
+- Phase 6: Command palette is js/ui/commandpalette.js (Ctrl+K); theme and
+  density toggles are in the top bar.
+- Phase 7: Documentation updated; .gitattributes marks vendor/data as
+  linguist-vendored.
