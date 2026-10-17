@@ -60,7 +60,11 @@ See the [GUI guide](docs/gui.md) for columns, filtering, the change log, perform
 
 ### Local Web UI
 
-Run `wintcp.exe webui serve` for the foreground dashboard, or use `webui-service.bat start` to launch it in the background. The manager defaults to **DEBUG** logging; use `webui-service.bat status` and `webui-service.bat stop` to manage it. The dashboard filters and sorts connections, exports the full filtered snapshot to CSV, and can show optional privacy-preserving browser alerts. Logs are written to `%LOCALAPPDATA%\WinTCP\WebUi\webui.log`; configuration and the audit log remain in the same folder. Six of the 40 prepared monitor templates currently have evaluators; monitors run only while the dashboard tab is open, and unsupported templates stay disabled. See the [Web UI guide](docs/webui.md) for controls, feature coverage, telemetry limits, and the confirmed firewall action.
+Run `wintcp.exe webui serve` for the foreground dashboard, or use `webui-service.bat start` to launch it in the background. The manager sets `WINTCP_WEBUI_OPEN_BROWSER=0`, so it will not open a browser, and it prints the URL. The manager defaults to **DEBUG** logging; use `webui-service.bat status` and `webui-service.bat stop` to manage it. The dashboard filters and sorts connections, exports the full filtered snapshot to CSV, and can show optional privacy-preserving browser alerts. Logs are written to `%LOCALAPPDATA%\WinTCP\WebUi\webui.log`; configuration and the audit log remain in the same folder. Six of the 40 prepared monitor templates currently have evaluators; monitors run only while the dashboard tab is open, and unsupported templates stay disabled. See the [Web UI guide](docs/webui.md) for controls, feature coverage, telemetry limits, and the confirmed firewall action.
+
+> **Testing note.** `wintcp.exe webui serve` opens your default browser via
+> `ShellExecuteW`. Set `WINTCP_WEBUI_OPEN_BROWSER=0`, or start the server with
+> `webui-service.bat start`, before running it while you work.
 
 ### CLI
 
@@ -315,17 +319,77 @@ Released under the **Apache License, Version 2.0**. The full text is in [LICENSE
 
 WinTCP follows the interface ideas of Sysinternals TCPView (and its `tcpvcon` command-line companion) and NirSoft CurrPorts. GeoIP lookups read the MaxMind DB (`.mmdb`) format.
 
-## Web UI v2
+## Web UI control room
 
-The Web UI has been upgraded to a multi-page control room with:
+The optional Web UI is served from `/` as a multi-page control room:
 
-- Collapsible grouped sidebar (Monitor, Respond, System)
-- Top bar with breadcrumb, command palette (Ctrl+K), theme and density toggles
-- Pages: Overview, Performance, Processes, Network, Map, Automations, System, Settings
-- Light and dark themes with shadcn design tokens
-- Real-time charts (uPlot + ECharts)
-- Virtualised tables handling 10,000+ rows
-- Metrics collector with PDH (CPU, memory, disk, network, GPU)
+| | |
+|---|---|
+| ![Overview](docs/img/webui-overview.png) | ![Performance](docs/img/webui-performance.png) |
+| **Overview** - live KPIs and 15-minute charts | **Performance** - per-core CPU, disk and network |
+| ![Processes](docs/img/webui-processes.png) | ![System](docs/img/webui-system.png) |
+| **Processes** - virtualised, 10,000+ rows | **System** - real OS, CPU and memory |
 
-See [docs/webui.md](docs/webui.md) for the full guide and
-[docs/webui-design.md](docs/webui-design.md) for the design system.
+- **Nine pages:** Overview, Performance, Processes, Network, Map, Automations,
+  Blocked Peers, System, Settings.
+- **Command palette** on <kbd>Ctrl</kbd>+<kbd>K</kbd>, live status in the top
+  bar, `r` to force a refresh.
+- **Light and dark themes** from shadcn design tokens, WCAG AA contrast in both
+  (worst measured ratio 5.04:1).
+- **Live charts** with uPlot, fed by a PDH sampler that runs at 1 Hz while the
+  page is open and drops to 0.1 Hz when idle, keeping 15 minutes of history.
+- **Virtualised tables** that handle 10,000+ rows with full keyboard
+  navigation.
+- **Keyboard operable** end to end; the grid scrolls and navigates with
+  <kbd>↑</kbd>/<kbd>↓</kbd>/<kbd>PgUp</kbd>/<kbd>PgDn</kbd>/<kbd>Home</kbd>/<kbd>End</kbd>.
+
+### The pre-upgrade dashboard is still there
+
+The original single-page dashboard is preserved verbatim and served at
+**`/legacy`**, linked from the top bar. It still owns filter/sort/group/freeze,
+the firewall permit flow, the script runner, template selection, presets,
+bookmarks and alerts. Nothing was deleted while the control room is still
+reaching parity.
+
+### Vendored front-end assets
+
+The Web UI vendors its third-party front-end files so it never contacts the
+network. They are served from the same origin only; there is no CDN, no remote
+font, and no analytics.
+
+| Asset | Version | Licence | Size | SHA-256 |
+|---|---|---|---|---|
+| `vendor/uPlot/uPlot.esm.js` | 1.6.31 | MIT | 142,629 B | see `vendor/LICENSES/uPlot.MIT` |
+| `vendor/uPlot/uPlot.min.css` | 1.6.31 | MIT | 1,857 B | - |
+| `vendor/echarts/echarts.min.js` | full build | Apache-2.0 | 1,030,855 B | see `vendor/LICENSES/ECharts.Apache-2.0` |
+| `vendor/world-atlas/countries-110m.json` | 110m | ISC | 107,761 B | see `vendor/LICENSES/world-atlas.ISC` |
+| `vendor/lucide/*.svg` | - | ISC | 426-904 B each | see `vendor/LICENSES/Lucide.ISC` |
+| Inter font | **not vendored** | OFL-1.1 | 0 B | licence text retained only |
+
+Full licence texts are in `wintcp/webui/vendor/LICENSES/` and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Inter webfont download
+failed, so the UI falls back to the system font stack
+("Segoe UI Variable", "Segoe UI", `system-ui`, sans-serif) and only the licence
+text is retained.
+
+ECharts is the full build rather than a tree-shaken one, which is why
+`/vendor/` gets a 2 MiB asset cap while everything else gets 1 MiB.
+
+### Running it without your browser
+
+`wintcp.exe webui serve` opens your default browser. For automation and testing,
+start the background manager instead - it sets `WINTCP_WEBUI_OPEN_BROWSER=0` and
+prints the URL:
+
+```bat
+cmd.exe /c webui-service.bat start
+```
+
+Then drive it with `curl`, or with the headless checks in `tools/webui-e2e/`
+(`check-webui`, `run-checks`, `axe-check`, `keyboard-check`, `security-check`,
+`screenshots`, `soak`). None of them opens a visible browser.
+
+See [docs/webui.md](docs/webui.md) for the full guide,
+[docs/webui-design.md](docs/webui-design.md) for the design system, and
+[docs/webui-upgrade-plan.md](docs/webui-upgrade-plan.md) for the plan and its
+logged deviations.

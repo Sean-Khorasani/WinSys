@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-17T23:19:45.100Z",
-  "url": "http://127.0.0.1:9416/",
+  "when": "2026-10-17T23:38:58.540Z",
+  "url": "http://127.0.0.1:19373/",
   "checks": [
     {
       "name": "Tab moves focus into the page",
@@ -45,7 +45,7 @@
     {
       "name": "End scrolls the grid to the last row",
       "pass": true,
-      "detail": "scrollTop=1371 of 1871"
+      "detail": "scrollTop=1335 of 1835"
     },
     {
       "name": "Home returns to the first row",

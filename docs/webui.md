@@ -14,6 +14,10 @@ wintcp.exe webui serve
 
 WinTCP binds an ephemeral port on **127.0.0.1 only**, prints the exact local URL, and asks Windows to open the default browser. If the browser does not open, copy the printed URL. The foreground process stops on **Ctrl+C**.
 
+Set `WINTCP_WEBUI_OPEN_BROWSER=0` (or `false`/`no`/`off`) to suppress the
+browser launch. Do this whenever you start the server for testing - otherwise it
+takes over your desktop. `webui-service.bat start` sets it for you.
+
 ### Background batch manager
 
 Keep `webui-service.bat` and its `webui-service.ps1` helper together in the repository root. Build `wintcp.exe`, then use:
@@ -32,7 +36,23 @@ The background manager writes timestamped UTC diagnostics to `%LOCALAPPDATA%\Win
 
 ## What is implemented
 
-The dashboard has three views:
+Two front ends are served side by side:
+
+- **`/` - the control room.** A nine-page dashboard with live KPIs, uPlot
+  time series, a virtualised process table, a command palette, and light/dark
+  themes. Listed page by page under [The control room](#the-control-room).
+- **`/legacy` - the pre-upgrade single-page dashboard**, preserved verbatim.
+  It still owns filter/sort/group/freeze, the permit flow, the script runner,
+  template selection, presets, bookmarks and alerts. Everything described in
+  the rest of this section - connection filtering and CSV export, browser
+  desktop alerts, the script workbench, the 40-template catalog, monitor
+  evaluators - lives there today.
+
+The control room is the upgrade's destination and the sections below that
+describe a capability still point at `/legacy` until the control room reaches
+parity. Nothing was deleted to make that true.
+
+The legacy dashboard's three views are:
 
 - **Overview:** current connection rows, process/PID counts, established TCP count, sampler status, and per-socket counter coverage. Filter and sort the full snapshot, then export all matching rows to CSV. A failed refresh keeps the last good rows visible but labels them stale.
 - **Automations:** a searchable catalog of 40 local CLI playbooks, separate browser-side monitor rules, thresholds and recent events, plus a script workbench for authoring, running, debugging, copying, importing, exporting and removing local scripts.
@@ -194,6 +214,7 @@ permit state, so a script can neither hang the service nor starve it:
 - Header/body and asset sizes are bounded; unsupported transfer encodings and content types are rejected; request read/write timeouts are set; connections close after one response.
 - Responses include `nosniff`, frame denial, a restrictive Content Security Policy, no-store caching, and no referrer policy. UI assets make no external requests.
 - The server is single-threaded and serializes requests. The snapshot call can take longer on machines with slow/unreadable sockets; the client surfaces errors rather than claiming a healthy sample.
+- A request handler can never terminate the server. `HandleRequest` runs behind a catch-all: an escaping exception returns 500 and is logged, rather than unwinding through the accept loop. This exists because one malformed query string (`/api/metrics/history?since=abc`) used to kill the process with an unhandled C++ exception.
 
 This is a local management interface, not a LAN service. Do not expose its port with a proxy or change the binding without a separate authentication, transport, and authorization design.
 
@@ -209,6 +230,7 @@ This is a local management interface, not a LAN service. Do not expose its port 
 | Manage automation content | All 40 scripts can be opened, edited into a managed copy, validated, copied/pasted, imported/exported as source, searched, run, debugged, and removed. Scripts and monitor rules are separate. |
 | Run and debug local scripts | A bounded parser executes commands through the sibling CLI with if/else, variable assignment/interpolation, step trace, variable inspection, and bounded stdout/stderr; no shell or cloud service is involved. |
 | Make enforcement explicit | T01 is notify-only by default; address-wide TCP blocking requires a shown dry-run plan, browser confirmation, an expiring one-time token, and audit writes. |
+| Serve the control room | 18 page/theme runs with zero console errors, zero CSP violations and zero failed requests; 18 axe audits with zero serious or critical findings; 13 keyboard checks; 46 security checks. Reports in `docs/img/`. |
 
 ## Known first-release limitations and next steps
 
@@ -220,37 +242,210 @@ This is a local management interface, not a LAN service. Do not expose its port 
 - Address-wide firewall response applies to outbound TCP only. It does not block UDP, close a live connection, or terminate a process.
 - The batch manager backgrounds the HTTP server but does not install a native Windows service or startup entry. The CLI script adapter uses the sibling `wintcp.exe`; copying the Web UI executable to another folder without that CLI sibling disables script execution, while the separate `wintcp-gui.exe` remains independent.
 
-See [`webui-design.md`](webui-design.md) for the design system, component catalogue, and extension guide, and [CLI reference](cli.md) for command syntax.
+## The control room
 
-## New API endpoints (v2)
+`/` serves the control room: a multi-page dashboard built from vanilla ES
+modules and plain CSS. `webui-design.md` documents the design system; this
+section documents what the pages actually show.
 
-The following read-only endpoints were added in the v2 upgrade:
+| Route | Page | Content |
+|---|---|---|
+| `#/` | Overview | Eight KPIs (CPU, memory, disk read/write, network in/out, endpoints, processes) and two live uPlot charts over the last 15 minutes. |
+| `#/performance` | Performance | Per-core CPU rail (24 bars on a typical machine) plus CPU/memory, disk and network time series. |
+| `#/processes` | Processes | Virtualised table of every process holding a TCP or UDP endpoint, with connection counts and a name/PID filter. Handles 10,000+ rows with a fixed row height. |
+| `#/network` | Network | Listener/peer breakdown by state, protocol and address family. |
+| `#/map` | Map | Peer geography from the GeoIP database. |
+| `#/automations` | Automations | The monitor rule list and the script workbench. |
+| `#/blocks` | Blocked Peers | The firewall rules WinTCP is applying. Editing goes through the permit flow. |
+| `#/system` | System | OS, CPU and memory from the registry and PDH, plus what this machine can and cannot report. |
+| `#/settings` | Settings | Theme, accent, density, units, refresh cadence, and the audit trail. |
+
+`Ctrl+K` opens the command palette; `r` and the refresh button force a poll.
+
+### The pre-upgrade dashboard at `/legacy`
+
+The upgrade replaced the original single-page dashboard. Its files were
+preserved verbatim under `webui/legacy/` and are served at **`/legacy`**, with
+a link in the top bar. That build still carries the features the control room
+has not yet reached - filter/sort/group/freeze on the connection table, the
+permit flow, the script runner, template selection, presets, bookmarks, and
+alerts. It is the strangler's fallback: nothing is lost while pages reach
+parity, and it is the reference for the semantics the control room must match.
+
+## API endpoints
+
+Every endpoint is `GET` unless it reuses the existing permit flow. All return
+JSON with `Cache-Control: no-store`, and `Connection: close`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | /api/capabilities | Elevation, PDH, GPU, GeoIP, ETW, traffic scan, DNS |
-| GET | /api/system/info | OS, CPU, memory, volumes, adapters |
-| GET | /api/metrics/catalog | Series ids, labels, units, kinds |
-| GET | /api/metrics/now | Latest metric values |
-| GET | /api/metrics/history?since=<unix>&max=<n> | Ring buffer history |
-| GET | /api/processes | Process list with connection counts |
-| GET | /api/network/summary | Counts by state, protocol, family, process |
-| GET | /api/geo/summary | Country and ASN aggregates |
+| GET | `/api/health` | Liveness. `{"ok":true,"bind":"127.0.0.1","version":"1"}` |
+| GET | `/api/connections` | Full snapshot. Optional single `filter` parameter. |
+| GET | `/api/templates` | The 40-template monitor/automation catalog. |
+| GET | `/api/config` | Persisted configuration (schema v2 or v3). |
+| POST | `/api/config` | Replace the configuration. Needs Origin + token. |
+| GET | `/api/audit` | Audit entries. |
+| POST | `/api/audit` | Append an audit entry. Needs Origin + token. |
+| POST | `/api/block/preview` | Preview a firewall block. Permit flow. |
+| POST | `/api/block/commit` | Commit a firewall block. Permit flow. |
+| GET | `/api/capabilities` | What THIS process can actually report. |
+| GET | `/api/system/info` | OS, CPU, memory, hostname, uptime. |
+| GET | `/api/metrics/catalog` | Series ids, labels, units, kinds. |
+| GET | `/api/metrics/now` | Latest sample, every catalogued series. |
+| GET | `/api/metrics/history?since=&max=&tier=` | Ring-buffer history. |
+| GET | `/api/processes` | Per-PID endpoint and listener counts. |
+| GET | `/api/network/summary` | Counts by state, protocol, family, process. |
+| GET | `/api/geo/summary` | Country and listener aggregates. |
 
-All endpoints return JSON with `Cache-Control: no-store`. Unknown values
-are `null` plus a `reason` field — never zero.
+### Unknown is never zero
 
-## Metrics collector
+Every value the sampler cannot produce is `null`, and every series carries a
+sibling `<series>.reason` string explaining why. A metric that is genuinely
+`0` reports `0` with a `null` reason, so "idle" and "unavailable" never look
+the same. `/api/system/info` follows the same rule: an unreadable
+`ProductName` is `null` with a `nameReason`, not an empty string.
+
+`/api/capabilities` reports the process's real state rather than a fixed
+assumption - `pdh`, `perCore`, `geoIp.configured` - with a `*Reason` string
+for each capability that is unavailable. The UI greys out what it cannot get
+and says why.
+
+### Sampler behaviour
 
 `WebMetrics.h/.cpp` runs on a background `CreateThread` (not `std::thread`,
-per the code comment in `WebUi.cpp`). It owns its own PDH query and samplers.
-Samples at 1 Hz while the UI polls, drops to idle after 60 s. Ring buffers:
-tier A 1 s x 900 points (15 min), tier B 10 s x 2160 points (6 h).
+matching the convention in `WebUi.cpp`). It owns its own PDH query; the accept
+loop only reads snapshots under the ring buffer's own mutex.
+
+- **Cadence.** 1 Hz while a client is polling. After 60 s with no
+  `GetLatest`/`GetHistory` call it drops to 0.1 Hz. Verified: 8 consecutive
+  samples at 1 s spacing with a client attached, 10 s spacing when idle.
+- **Ring buffer.** One tier: 900 samples, which is 15 minutes at 1 Hz.
+- **First sample.** Discarded. A freshly added PDH counter has no baseline, so
+  the first reading is not a real value. The same applies to the first sample
+  after a re-enumeration.
+- **Re-enumeration.** Wildcard counters are re-enumerated every 5 minutes, or
+  on demand. It used to be 30 s, which threw away a rate baseline every 30 s.
+- **Thread safety.** The counter vectors belong exclusively to the sampler
+  thread. `Reenumerate()` only raises a flag for it to act on; it must never
+  touch them itself.
+- **Per-core CPU.** Read with `PdhGetFormattedCounterArray`, sorted numerically
+  by `(group, core)` so the series order is stable across samples. `_Total` is
+  excluded. Note that PDH's reported byte count OVER-estimates the buffer, so
+  the reader allocates headroom and grows on `PDH_MORE_DATA`.
 
 ## Static asset handler
 
-`WebStatic.h/.cpp` serves files from `wintcp/webui/` with an allow-list of
-prefixes (`/js/`, `/css/`, `/vendor/`, `/fonts/`, `/data/`, `/img/`) and
-extensions (`.js`, `.mjs`, `.css`, `.json`, `.svg`, `.woff2`, `.png`, `.ico`,
-`.txt`). Path traversal, alternate data streams, and reserved device names
-are rejected. Per-file cap 1 MiB.
+`WebStatic.h/.cpp` serves files from `wintcp/webui/`.
+
+- **Allow-list.** Prefixes `/js/`, `/css/`, `/vendor/`, `/fonts/`, `/data/`,
+  `/img/`, `/legacy/`; extensions `.js .mjs .css .json .svg .woff2 .png .ico
+  .txt`. The route delegates the decision entirely to `IsSafeStaticPath`, so
+  the list cannot drift between the two files.
+- **Rejected paths answer 403, not 404.** A path under an allowed prefix that
+  fails validation is a rejection and is logged as one; a probe cannot tell
+  "no such asset" from "forbidden".
+- **Traversal.** `..`, backslashes, `:` (alternate data streams and
+  drive-qualified paths), reserved Windows device names, and components ending
+  in `.` or a space are all refused.
+- **Reparse points.** A symlink, junction or mount point inside `webui/` is
+  refused rather than resolved.
+- **Size cap.** 1 MiB, raised to 2 MiB for `/vendor/` only. The ECharts bundle
+  is 1,030,855 bytes, so the cap has to be raised for it; a tree-shaken build
+  would remove the exception.
+
+## Configuration
+
+`%LOCALAPPDATA%\WinTCP\WebUi\config.json`, schema **version 3**.
+
+Version 3 groups UI preferences under `preferences` and leaves every v2 key in
+place, so an existing v2 file keeps working with no migration step - the UI
+reads `preferences[key]` first and falls back to the bare v2 key.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `version` | number | `3` | Schema version. `2` is still read. |
+| `preferences.theme` | string | `"system"` | `system`, `light`, `dark`. |
+| `preferences.accent` | string | `"neutral"` | `neutral`, `blue`, `green`, `orange`, `rose`, `teal`. |
+| `preferences.density` | string | `"comfortable"` | `comfortable` or `compact`. |
+| `preferences.units` | string | `"iec"` | `iec` (KiB/MiB) or `si` (kB/MB). |
+| `refreshSeconds` | number | `5` | Browser poll cadence, clamped to 1-60. |
+| `desktopNotifications` | bool | `false` | Opt-in browser notifications. |
+| `rules`, `scripts`, `presets`, `bookmarks`, `view` | - | - | Unchanged v2 content. |
+
+Writing preferences is a `POST /api/config`, so it goes through the same
+Origin + token checks as every other mutation.
+
+## Content Security Policy
+
+Unchanged from before the upgrade, and not weakened:
+
+```
+default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self';
+img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+```
+
+No `unsafe-inline`, no `unsafe-eval`. There are no inline `<script>` or
+`<style>` elements and no `style=` attributes anywhere in the shipped markup;
+all behaviour comes from ES modules and all styling from stylesheets.
+
+`wintcp/webui/js/csp.js` installs a `securitypolicyviolation` listener that
+records every violation on `window.__wintcpCspViolations` and logs it as a
+console **error**. Adding a listener does not relax the policy; it makes a
+violation loud instead of silent. The end-to-end checks fail on any violation
+and on any console error.
+
+## Verifying the Web UI
+
+The dev-only harness lives in `tools/webui-e2e/` and needs Node plus
+`npx playwright install chromium`. None of it is needed to build or run the
+product.
+
+```bat
+cmd.exe /c webui-service.bat start
+REM the start command prints the URL; webui-service.bat sets
+REM WINTCP_WEBUI_OPEN_BROWSER=0 so it will not open your browser
+
+node tools\webui-e2e\check-webui.mjs
+node tools\webui-e2e\run-checks.mjs    --url http://127.0.0.1:PORT/
+node tools\webui-e2e\axe-check.mjs     --url http://127.0.0.1:PORT/
+node tools\webui-e2e\keyboard-check.mjs --url http://127.0.0.1:PORT/
+node tools\webui-e2e\security-check.mjs --url http://127.0.0.1:PORT/
+node tools\webui-e2e\screenshots.mjs   --url http://127.0.0.1:PORT/ [--all]
+node tools\webui-e2e\soak.mjs          --url http://127.0.0.1:PORT/ --minutes 10
+```
+
+Each writes a JSON report to `docs/img/`. `check-webui.mjs` parses every
+shipped module as an ES module; `node --check` on a bare `.js` does not work
+for this tree, because Node parses it as CommonJS where top-level `import` is
+itself an error and the reported line number is meaningless. It caught a
+committed `id="page"` inside an object literal, which no other gate could see.
+
+`contrast.mjs` measures WCAG contrast by letting the browser resolve each
+colour through a 1x1 canvas before computing luminance. axe-core's own
+`color-contrast` rule is disabled in `axe-check.mjs`: Chrome returns `oklch()`
+from `getComputedStyle`, axe's parser only understands `rgb()`/hex, and it
+therefore measures the wrong background - 18 false "serious" findings before
+it was disabled.
+
+## Known limitations
+
+- **Feature parity is partial.** `/legacy` still carries filter/sort/group/
+  freeze, the permit flow, the script runner, template selection, presets,
+  bookmarks and alerts. Those are not yet in the control room.
+- **The Processes page derives rows from the connection store**, not by
+  enumerating processes. A process with no open endpoint does not appear.
+- **Tree and Treemap views are disabled** in Processes.
+- **Traffic is not scanned in the Web UI.** The per-socket `SIO_TCP_INFO` scan
+  wedges under polling (see `ConnectionsJson` in `WebUi.cpp`), so the traffic
+  column reads `-` here while the CLI and GUI still show it.
+- **ECharts is the full build**, 1,030,855 bytes, against a 450 KB target.
+  It forces the 2 MiB vendor cap. No donut/treemap/sankey/map chart is wired
+  yet.
+- **GPU counters are not collected.** `/api/capabilities` reports `gpu:false`.
+- **Tier B (6 h) history is not implemented.** Only the 900-sample tier exists.
+- **The Inter font is not vendored**; the UI uses the system font stack.
+
+See [`webui-design.md`](webui-design.md) for the design system, component
+catalogue, and extension guide; [`webui-upgrade-plan.md`](webui-upgrade-plan.md)
+for the plan and logged deviations; and [CLI reference](cli.md) for command
+syntax.

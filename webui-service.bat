@@ -39,5 +39,6 @@ echo   webui-service.bat start [DEBUG^|INFO^|WARN^|ERROR]
 echo   webui-service.bat status
 echo   webui-service.bat stop
 echo.
-echo start defaults to DEBUG. Logs: %%LOCALAPPDATA%%\WinTCP\WebUi\webui.log
+echo Uses build-fast\wintcp.exe (the fast-build output).
+echo Logs: %%LOCALAPPDATA%%\WinTCP\WebUi\webui.log
 exit /b %USAGE_EXIT%

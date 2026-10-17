@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-17T23:19:10.826Z",
-  "url": "http://127.0.0.1:9416/",
+  "when": "2026-10-17T23:38:24.243Z",
+  "url": "http://127.0.0.1:19373/",
   "pages": [
     {
       "theme": "light",
@@ -868,7 +868,7 @@
       "name": "Performance",
       "violations": [],
       "contrast": {
-        "checked": 107,
+        "checked": 95,
         "failures": 0,
         "worst": [
           {

@@ -88,6 +88,7 @@ function Test-ManagedProcess {
 
 function Get-WebUiExe {
     $candidates = @(
+        (Join-Path $script:Root 'build-fast\wintcp.exe'),
         (Join-Path $script:Root 'build\wintcp.exe'),
         (Join-Path $script:Root 'wintcp.exe')
     )

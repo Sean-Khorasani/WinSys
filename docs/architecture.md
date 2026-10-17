@@ -253,16 +253,117 @@ There is deliberately no hex window. `HexTextWindow.*` was the view behind the G
 
 `wintcp-dev.exe` links the *same* product sources as `wintcp.exe`, minus `main.cpp`. That is the point: a test that exercised a copy of the logic would prove nothing.
 
-## Web UI metrics thread
+## Web UI server and metrics thread
 
-The Web UI metrics collector (`WebMetrics.h/.cpp`) runs on a background
-`CreateThread` worker (not `std::thread`, per the code comment). It owns its
-own PDH query and sampler objects, and stores samples in bounded ring buffers.
-The main thread reads snapshots under a short lock. The sequential HTTP server
-is never blocked by the sampler.
+### The accept loop is inline and sequential
 
-## Web UI static handler
+`RunWebUiServer` creates the loopback listener, then starts `WebUiAcceptLoop`
+on its own thread and does nothing but wait for the stop event. Connections are
+served **inline, one at a time**, in the accept loop. That is deliberate: a
+worker thread per connection was *measured* to wedge the accept loop under a
+burst of concurrent requests - the server stopped answering entirely while the
+process stayed alive. The sequential server is also why there is no SSE/push
+channel: a long-lived stream would block the loop, so the browser polls.
 
-`WebStatic.h/.cpp` is the safe static file handler. It validates paths against
-an allow-list of prefixes and extensions, rejects path traversal, alternate
-data streams, and reserved device names, and enforces a 1 MiB per-file cap.
+Every handler must therefore return in milliseconds from cached data
+(constraint C-8). Measured on the test machine: 9-28 ms per request, including
+`/api/connections` on a machine with ~300 endpoints.
+
+Because a handler is the last thing between a bad request and a dead server,
+`ServeClient` calls `HandleRequest` inside a catch-all. An escaping C++
+exception returns 500 and is logged. That is not decoration: a single malformed
+query string (`/api/metrics/history?since=abc`) used to throw
+`std::invalid_argument` out of `std::stoull`, unwind through the accept loop
+and terminate the process with `0xE06D7363` and a minidump.
+
+The accept loop ends in `ExitProcess(0)` rather than `WSACleanup()`. The
+per-socket traffic sampler spawns detached `WSAIoctl(SIO_TCP_INFO)` probe
+threads that can wedge holding the process-wide Winsock lock, which makes
+`closesocket()` and the exit `WSACleanup()` block forever so the loop never
+reaches its stop check. `ExitProcess` reaps every thread at once, which is the
+whole point of a stop.
+
+### The metrics sampler
+
+`WebMetrics.h/.cpp` runs on a background `CreateThread` worker (not
+`std::thread`, matching the convention in `WebUi.cpp`). It owns its own PDH
+query and its counter handles.
+
+| Rule | Why |
+|---|---|
+| The counter vectors belong **exclusively** to the sampler thread | `Reenumerate()` is callable from a request thread, so it may only raise a flag; the sampler performs the re-enumeration between samples. It used to mutate those vectors directly, racing `CollectSample()` on the same memory. |
+| The first sample after a re-enumeration is discarded | Removing and re-adding a PDH counter throws away its rate baseline, so the next reading is not a real value. |
+| Re-enumerate every 5 minutes, not 30 s | At 30 s the baseline was destroyed twice a minute and every rate series carried a null artifact. |
+| 1 Hz while a client polls, 0.1 Hz after 60 s idle | A sampler that never sleeps is a permanent tax. `lastAccessMs_` is atomic because request threads write it and the sampler reads it. |
+| Per-core CPU via `PdhGetFormattedCounterArray` | A wildcard counter read as a single value returns nothing. Instances are sorted numerically by `(group, core)` so the series order is stable, and `_Total` is excluded. |
+| PDH's byte count is an **over-estimate** | The reader allocates headroom and grows on `PDH_MORE_DATA`. Sizing the buffer at exactly `count * sizeof(item)` fails with `PDH_MORE_DATA` forever. |
+
+Ring buffer: one tier, 900 samples, which is 15 minutes at 1 Hz. Reads go
+through the buffer's own mutex, so the accept loop is never blocked by the
+sampler.
+
+### Static handler
+
+`WebStatic.h/.cpp` validates paths against an allow-list of prefixes
+(`/js/`, `/css/`, `/vendor/`, `/fonts/`, `/data/`, `/img/`, `/legacy/`) and
+extensions, rejects path traversal, alternate data streams, reserved device
+names, and reparse points, and enforces a per-file cap (1 MiB; 2 MiB for
+`/vendor/` only).
+
+It is the **single** gate. The route in `WebUi.cpp` delegates the whole
+decision to `IsSafeStaticPath` and keeps no copy of the list - the two copies
+had already drifted, which is how every `/js/`, `/css/`, `/vendor/` and
+`/data/` asset answered 404 and the dashboard rendered with no CSS and no JS.
+`IsRejectedStaticPath` splits "under a prefix but refused" (403, logged as a
+rejection) from "not a static path" (404).
+
+### Front-end structure
+
+Vanilla ES modules, no build step, no framework. `wintcp/webui/`:
+
+```text
+index.html          thin shell: token meta tag, module script, app shell div
+app.css             entry that @imports css/*.css
+app.js              (the pre-upgrade dashboard; served at /legacy/app.js)
+legacy/             the pre-upgrade dashboard, preserved verbatim
+css/                tokens.css (shadcn), base, components, pages
+js/
+  main.js           router + poller + chrome; the shell
+  csp.js            securitypolicyviolation reporter
+  h.js              createElement + textContent; the only DOM helper
+  icons.js          Lucide paths, returned as real DOM elements
+  router.js poller.js store.js api.js format.js
+  ui/               button, badge, card, table, dialog, toast,
+                    virtualtable, commandpalette
+  charts/           timeseries (uPlot), echarts, sparkline, map, ...
+  pages/            one module per route
+  legacy/           automation parser, monitors, audit, bookmarks, presets
+vendor/             third-party assets (see THIRD_PARTY_NOTICES.md)
+```
+
+Three rules the front end follows, each of which was broken at some point and
+is now load-bearing:
+
+- **`icon()` returns elements, not markup.** `h()` renders a string as a text
+  node, so returning markup made every icon display as literal `<svg>` source.
+- **Icons are embedded inline.** No `/vendor/lucide/*.svg` fetches, which is
+  also why the CSP needs no relaxation.
+- **Every value reaches the DOM through `textContent`.** There is no
+  `innerHTML` on any path that carries data.
+
+The pages re-render on a poll, so two things had to be fixed for the result to
+be usable: a render is skipped when the page's data has not changed, and focus
+is captured and restored across a rebuild that does happen. A virtualised grid
+also has to *reuse* its row nodes - tearing them down and rebuilding on every
+scroll is what dropped keyboard focus to `<body>` and made
+<kbd>End</kbd> then <kbd>Home</kbd> do nothing.
+
+### Verifying it
+
+`tools/webui-e2e/` is dev-only and needs nothing from the product. Start the
+server with `webui-service.bat start` (which sets
+`WINTCP_WEBUI_OPEN_BROWSER=0`, unlike `wintcp.exe webui serve`, which opens
+the user's browser) and run the headless checks. `check-webui.mjs` parses every
+shipped module as an ES module, because `node --check` on a bare `.js` treats
+it as CommonJS - where top-level `import` is itself an error and the reported
+line number is meaningless.

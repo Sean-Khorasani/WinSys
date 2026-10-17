@@ -539,7 +539,18 @@ try {
     $assetTarget = Join-Path $Build 'webui'
     if (-not (Test-Path -LiteralPath $assetSource)) { Die 3 "missing Web UI assets at wintcp\webui" }
     New-Item -ItemType Directory -Force -Path $assetTarget | Out-Null
-    Get-ChildItem -LiteralPath $assetSource -File | Copy-Item -Destination $assetTarget -Force
+    # Copy recursively (subdirectories: css/, js/, vendor/, data/).
+    # The old -File flag copied only top-level files, so the module-based
+    # app's /css/tokens.css and /js/main.js were missing from build-fast.
+    Get-ChildItem -LiteralPath $assetSource -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($assetSource.Length)
+        $dest = Join-Path $assetTarget $rel
+        $destDir = Split-Path -Parent $dest
+        if (-not (Test-Path -LiteralPath $destDir)) {
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+        }
+        Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+    }
     $stateHash | Set-Content -LiteralPath $StateFile -NoNewline
     $elapsed = ((Get-Date) - $StartTime).TotalSeconds
     $kb = [math]::Round((Get-Item -LiteralPath $ProdExe).Length / 1KB)

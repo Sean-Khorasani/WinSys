@@ -160,6 +160,16 @@ if errorlevel 1 (
     echo ERROR: the development binary failed to build.
     exit /b 1
 )
+
+REM ---- Copy to the shared build-fast folder --------------------------------
+REM The webui-service uses build-fast\wintcp.exe; keep it current with the
+REM full build so both paths serve the same binary.
+if not exist build-fast md build-fast
+copy /Y "build\wintcp.exe" "build-fast\wintcp.exe" >nul
+copy /Y "build\wintcp-gui.exe" "build-fast\wintcp-gui.exe" >nul
+copy /Y "build\dev\wintcp-dev.exe" "build-fast\dev\wintcp-dev.exe" 2>nul
+xcopy /E /I /Y "build\webui" "build-fast\webui" >nul
+
 endlocal
 exit /b 0
 
