@@ -29,6 +29,7 @@ void CheckT29Evaluator(TestResult& r);  // T29 high-RTT evaluator (Monitors.h)
 
 namespace wintcp {
 void CheckPrintIpv4(TestResult& r);  // IPv4 byte-order regression (BUG-1)
+void CheckWebStatic(TestResult& r);  // Static path validator (T-1)
 }  // namespace wintcp
 
 #include "ColumnsWin.h"   // profile masks
@@ -102,6 +103,7 @@ void CheckPrintIpv4(TestResult& r);  // IPv4 byte-order regression (BUG-1)
 #include "GeoIp.h"         // synthetic-database lookups (geoip.* checks)
 #include "EtwTraffic.h"     // ClassifyNetworkEvent/Payload + GUIDs
 #include "SocketTraffic.h"  // fallback accumulator
+#include "WebStatic.h"       // static path validator (T-1)
 #include "Utils.h"
 #include "ProcessInfo.h"  // ProcessResolver bench stage [E] (pid dedup gate)
 
@@ -9988,6 +9990,7 @@ static const unsigned char kClientHello[] = {
     CheckIniFile(r);
     CheckDnsCache(r);
     CheckPrintIpv4(r);
+    CheckWebStatic(r);
     CheckEmptyState(r);
     CheckProcessTree(r);
     CheckKillTree(r);
@@ -10010,6 +10013,55 @@ static const unsigned char kClientHello[] = {
     r.output += FormatCheckAreas(r.checkArea);
     r.output += "\r\n";
     return r;
+}
+
+
+// WebStatic path validator tests (T-1)
+void CheckWebStatic(TestResult& r) {
+    // Safe paths
+    Check(r, "static.safe-js", IsSafeStaticPath("/js/main.js"));
+    Check(r, "static.safe-css", IsSafeStaticPath("/css/app.css"));
+    Check(r, "static.safe-vendor", IsSafeStaticPath("/vendor/uPlot/uPlot.esm.js"));
+    Check(r, "static.safe-data", IsSafeStaticPath("/data/countries.json"));
+
+    // Path traversal
+    Check(r, "static.reject-traversal", !IsSafeStaticPath("/js/../../../etc/passwd"));
+    Check(r, "static.reject-traversal2", !IsSafeStaticPath("/css/..%2f..%2fetc"));
+
+    // Backslash
+    Check(r, "static.reject-backslash", !IsSafeStaticPath("/js/..\\..\\etc"));
+
+    // Drive letters / ADS
+    Check(r, "static.reject-drive", !IsSafeStaticPath("/js/C:\\Windows"));
+    Check(r, "static.reject-ads", !IsSafeStaticPath("/js/file.txt:stream"));
+
+    // Reserved names
+    Check(r, "static.reject-con", !IsSafeStaticPath("/js/CON.js"));
+    Check(r, "static.reject-nul", !IsSafeStaticPath("/js/NUL.txt"));
+    Check(r, "static.reject-com1", !IsSafeStaticPath("/js/COM1.js"));
+
+    // Trailing dots/spaces
+    Check(r, "static.reject-trailing-dot", !IsSafeStaticPath("/js/file."));
+    Check(r, "static.reject-trailing-space", !IsSafeStaticPath("/js/file "));
+
+    // Disallowed extensions
+    Check(r, "static.reject-exe", !IsSafeStaticPath("/js/malware.exe"));
+    Check(r, "static.reject-dll", !IsSafeStaticPath("/js/evil.dll"));
+
+    // Disallowed prefixes
+    Check(r, "static.reject-root", !IsSafeStaticPath("/etc/passwd"));
+    Check(r, "static.reject-api", !IsSafeStaticPath("/api/connections"));
+
+    // MIME types
+    Check(r, "static.mime-js", std::string(StaticMimeType(".js")) == "text/javascript; charset=utf-8");
+    Check(r, "static.mime-css", std::string(StaticMimeType(".css")) == "text/css; charset=utf-8");
+    Check(r, "static.mime-json", std::string(StaticMimeType(".json")) == "application/json; charset=utf-8");
+    Check(r, "static.mime-svg", std::string(StaticMimeType(".svg")) == "image/svg+xml");
+    Check(r, "static.mime-woff2", std::string(StaticMimeType(".woff2")) == "font/woff2");
+
+    // Size caps
+    Check(r, "static.cap-vendor", StaticMaxBytesFor("/vendor/echarts/echarts.min.js") == 2 * 1024 * 1024);
+    Check(r, "static.cap-js", StaticMaxBytesFor("/js/main.js") == 1024 * 1024);
 }
 
 // ---- bench -----------------------------------------------------------------
