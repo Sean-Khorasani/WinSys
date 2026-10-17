@@ -808,17 +808,47 @@ std::string CapabilitiesJson(ServerContext& context) {
     return out.str();
 }
 
-std::string SystemInfoJson() {
+std::string SystemInfoJson(ServerContext& context) {
+    // Return real system info from the metrics collector and store.
+    (void)context;  // reserved for future use (e.g. GeoIP database info)
     std::ostringstream out;
-    out << "{\"os\":{\"name\":" << JsonQuote("Windows 11 Pro")
-        << ",\"version\":" << JsonQuote("10.0.22631")
-        << ",\"build\":\"22631\",\"architecture\":\"x64\"}"
-        << ",\"hostname\":" << JsonQuote("localhost")
-        << ",\"uptime\":" << JsonQuote("2d 5h 30m")
-        << ",\"cpu\":{\"model\":" << JsonQuote("Intel(R) Core(TM) i7-12700")
-        << ",\"cores\":12,\"threads\":20,\"mhz\":2100}"
-        << ",\"memory\":{\"installed\":17179869184}"
-        << ",\"gpu\":[],\"volumes\":[],\"adapters\":[],\"power\":{\"battery\":false}}";
+    out << "{";
+
+    // OS info from registry would go here; for now use the computer name
+    // and a placeholder that the front end can enrich.
+    char computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD nameLen = MAX_COMPUTERNAME_LENGTH + 1;
+    ::GetComputerNameA(computerName, &nameLen);
+    out << "\"hostname\":" << JsonQuote(computerName) << ",";
+
+    // Uptime from GetTickCount64
+    ULONGLONG uptimeMs = ::GetTickCount64();
+    ULONGLONG uptimeSec = uptimeMs / 1000;
+    ULONGLONG days = uptimeSec / 86400;
+    ULONGLONG hours = (uptimeSec % 86400) / 3600;
+    ULONGLONG mins = (uptimeSec % 3600) / 60;
+    out << "\"uptime\":\"" << days << "d " << hours << "h " << mins << "m\",";
+
+    // CPU count
+    SYSTEM_INFO si = {};
+    ::GetSystemInfo(&si);
+    out << "\"cpu\":{\"cores\":" << si.dwNumberOfProcessors
+        << ",\"threads\":" << si.dwNumberOfProcessors
+        << ",\"architecture\":\"x64\"},";
+
+    // Memory from GlobalMemoryStatusEx
+    MEMORYSTATUSEX mem = {};
+    mem.dwLength = sizeof(mem);
+    if (::GlobalMemoryStatusEx(&mem)) {
+        out << "\"memory\":{\"installed\":" << mem.ullTotalPhys
+            << ",\"available\":" << mem.ullAvailPhys
+            << ",\"used\":" << (mem.ullTotalPhys - mem.ullAvailPhys)
+            << ",\"pct\":" << mem.dwMemoryLoad << "}";
+    } else {
+        out << "\"memory\":{\"installed\":0,\"available\":0,\"used\":0,\"pct\":0}";
+    }
+
+    out << "}";
     return out.str();
 }
 
@@ -904,10 +934,38 @@ std::string ProcessesJson(ServerContext& context) {
     return out.str();
 }
 
-std::string NetworkSummaryJson() {
+std::string NetworkSummaryJson(ServerContext& context) {
     std::lock_guard<std::mutex> lock(g_storeMutex);
+    std::map<std::string, int> byState, byProto, byFamily, byProcess;
+    int loopback = 0, lan = 0, wildcard = 0;
+    for (size_t i = 0; i < context.store.View().size(); ++i) {
+        const Connection* row = context.store.ViewRow(i);
+        if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
+        byState[WideToUtf8(row->keys.stateLabel.empty() ? L"UNKNOWN" : row->keys.stateLabel)]++;
+        byProto[row->identity.protocol == IPPROTO_TCP ? "TCP" : "UDP"]++;
+        byFamily[row->identity.family == AF_INET6 ? "IPv6" : "IPv4"]++;
+        byProcess[row->display.processName.empty() ? "unknown" : std::string("PROC")]++;
+        if (row->identity.protocol == IPPROTO_TCP && row->keys.stateLabel == L"LISTENING") {
+            const std::wstring& local = row->display.localAddress;
+            if (local == L"0.0.0.0" || local == L"::" || local == L"*") wildcard++;
+            else if (local == L"127.0.0.1" || local == L"::1") loopback++;
+            else lan++;
+        }
+    }
     std::ostringstream out;
-    out << "{\"byState\":{},\"byProto\":{},\"byFamily\":{},\"byProcess\":{},\"listeners\":{\"loopback\":0,\"lan\":0,\"wildcard\":0}}";
+    out << "{\"byState\":{";
+    bool first = true;
+    for (const auto& kv : byState) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
+    out << "},\"byProto\":{";
+    first = true;
+    for (const auto& kv : byProto) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
+    out << "},\"byFamily\":{";
+    first = true;
+    for (const auto& kv : byFamily) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
+    out << "},\"byProcess\":{";
+    first = true;
+    for (const auto& kv : byProcess) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
+    out << "},\"listeners\":{\"loopback\":" << loopback << ",\"lan\":" << lan << ",\"wildcard\":" << wildcard << "}}";
     return out.str();
 }
 
@@ -1427,7 +1485,7 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         return response;
     }
     if (path == "/api/system/info") {
-        response.body = SystemInfoJson();
+        response.body = SystemInfoJson(context);
         return response;
     }
     if (path == "/api/metrics/catalog") {
@@ -1447,7 +1505,7 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         return response;
     }
     if (path == "/api/network/summary") {
-        response.body = NetworkSummaryJson();
+        response.body = NetworkSummaryJson(context);
         return response;
     }
     if (path == "/api/geo/summary") {
