@@ -41,6 +41,7 @@
 #include "SocketTraffic.h"
 #include "Utils.h"
 #include "WebMetrics.h"
+#include "WebStatic.h"
 #include "WebUi.h"
 
 namespace wintcp {
@@ -1463,6 +1464,49 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         if (!ReadAsset(context, file, &response.body)) {
             response.status = 404;
             response.body = "Not found";
+        }
+        return response;
+    }
+    // Static assets: /js/*, /css/*, /vendor/*, /data/*, /img/*, /fonts/*
+    // Validated by WebStatic; served from the webui directory.
+    if (path.size() > 1 && path[0] == '/' &&
+        (path.rfind("/js/", 0) == 0 || path.rfind("/css/", 0) == 0 ||
+         path.rfind("/vendor/", 0) == 0 || path.rfind("/data/", 0) == 0 ||
+         path.rfind("/img/", 0) == 0 || path.rfind("/fonts/", 0) == 0)) {
+        if (!IsSafeStaticPath(path)) {
+            response.status = 403;
+            response.body = "Forbidden";
+            return response;
+        }
+        // Map the URL path to a file in the webui directory.
+        std::wstring relative;
+        if (!Utf8ToWide(path.substr(1), &relative)) {
+            response.status = 400;
+            response.body = "Bad request";
+            return response;
+        }
+        // Replace forward slashes with backslashes for Windows.
+        for (auto& ch : relative) { if (ch == L'/') ch = L'\\'; }
+        std::wstring fullPath = context.executableDirectory + L"\\webui\\" + relative;
+        // Check file size against the cap.
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        if (::GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &fad)) {
+            ULONGLONG fileSize = (static_cast<ULONGLONG>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            if (fileSize > StaticMaxBytesFor(path)) {
+                response.status = 413;
+                response.body = "File too large";
+                return response;
+            }
+        }
+        if (!ReadAsset(context, fullPath.c_str(), &response.body)) {
+            response.status = 404;
+            response.body = "Not found";
+            return response;
+        }
+        // Set the correct MIME type.
+        size_t dot = path.rfind('.');
+        if (dot != std::string::npos) {
+            response.contentType = StaticMimeType(path.substr(dot));
         }
         return response;
     }
