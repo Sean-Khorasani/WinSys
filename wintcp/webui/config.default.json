@@ -1,0 +1,2 @@
+{"version":2,"theme":"system","refreshSeconds":5,"desktopNotifications":false,"rules":[],"scripts":[],"presets":[],"bookmarks":[],"view":{"protocol":"all","state":"all","groupByProcess":false,"frozen":false,"columns":["process","pid","proto","local","remote","state","traffic"]}}
+
