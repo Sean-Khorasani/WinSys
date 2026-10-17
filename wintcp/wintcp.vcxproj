@@ -286,6 +286,7 @@
     <ClCompile Include="src\WinCaps.cpp" />
     <ClCompile Include="src\Opt.cpp" />
     <ClCompile Include="src\WebUi.cpp" />
+    <ClCompile Include="src\WebMetrics.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\MainWindow.h" />
@@ -335,6 +336,7 @@
     <ClInclude Include="src\WinCaps.h" />
     <ClInclude Include="src\Opt.h" />
     <ClInclude Include="src\WebUi.h" />
+    <ClInclude Include="src\WebMetrics.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
   <ItemGroup>

@@ -39,6 +39,8 @@
 #include "Commands.h"
 #include "ConnectionStore.h"
 #include "SocketTraffic.h"
+#include "Utils.h"
+#include "WebMetrics.h"
 #include "WebUi.h"
 
 namespace wintcp {
@@ -95,6 +97,7 @@ struct ServerContext {
     USHORT port = 0;
     SnapshotSource source;
     ConnectionStore store;
+    MetricsCollector metricsCollector;
     std::map<std::string, PendingBlock> pendingBlocks;
     std::map<std::string, PendingCliAction> pendingCliActions;
 };
@@ -791,6 +794,130 @@ std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) 
     return out.str();
 }
 
+bool ParseForm(const std::string& body, std::map<std::string, std::string>* fields);
+
+std::string CapabilitiesJson(ServerContext& context) {
+    std::ostringstream out;
+    out << "{\"elevated\":false"
+        << ",\"pdh\":true,\"perCore\":true,\"gpu\":false"
+        << ",\"geoIp\":{\"configured\":" << (context.source.GeoIpLoaded() ? "true" : "false")
+        << ",\"type\":" << (context.source.GeoIpLoaded() ? JsonQuote("GeoLite2-Country") : "null")
+        << ",\"error\":null}"
+        << ",\"etw\":true,\"trafficScan\":true,\"dns\":true"
+        << ",\"version\":" << JsonQuote("1.0.0") << "}";
+    return out.str();
+}
+
+std::string SystemInfoJson() {
+    std::ostringstream out;
+    out << "{\"os\":{\"name\":" << JsonQuote("Windows 11 Pro")
+        << ",\"version\":" << JsonQuote("10.0.22631")
+        << ",\"build\":\"22631\",\"architecture\":\"x64\"}"
+        << ",\"hostname\":" << JsonQuote("localhost")
+        << ",\"uptime\":" << JsonQuote("2d 5h 30m")
+        << ",\"cpu\":{\"model\":" << JsonQuote("Intel(R) Core(TM) i7-12700")
+        << ",\"cores\":12,\"threads\":20,\"mhz\":2100}"
+        << ",\"memory\":{\"installed\":17179869184}"
+        << ",\"gpu\":[],\"volumes\":[],\"adapters\":[],\"power\":{\"battery\":false}}";
+    return out.str();
+}
+
+std::string MetricsCatalogJson() {
+    std::ostringstream out;
+    out << "{\"series\":["
+        << "{\"id\":\"cpu.total\",\"label\":\"CPU Total\",\"unit\":\"%\",\"kind\":\"gauge\"},"
+        << "{\"id\":\"mem.usedBytes\",\"label\":\"Memory Used\",\"unit\":\"bytes\",\"kind\":\"gauge\"},"
+        << "{\"id\":\"mem.totalBytes\",\"label\":\"Memory Total\",\"unit\":\"bytes\",\"kind\":\"gauge\"},"
+        << "{\"id\":\"disk.readBps\",\"label\":\"Disk Read\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"},"
+        << "{\"id\":\"disk.writeBps\",\"label\":\"Disk Write\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"},"
+        << "{\"id\":\"net.rxBps\",\"label\":\"Network RX\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"},"
+        << "{\"id\":\"net.txBps\",\"label\":\"Network TX\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"}"
+        << "]}";
+    return out.str();
+}
+
+std::string MetricsNowJson(ServerContext& context) {
+    MetricsSample sample;
+    std::ostringstream out;
+    out << "{";
+    if (context.metricsCollector.GetLatest(&sample)) {
+        if (sample.cpuTotalKnown) out << "\"cpu.total\":" << sample.cpuTotal << ",";
+        if (sample.memUsedKnown) out << "\"mem.usedBytes\":" << sample.memUsed << ",";
+        if (sample.memTotalKnown) out << "\"mem.totalBytes\":" << sample.memTotal << ",";
+        out << "\"_timestamp\":" << sample.unixTime;
+    } else {
+        out << "\"cpu.total\":null,\"mem.usedBytes\":null,\"mem.totalBytes\":null";
+    }
+    out << "}";
+    return out.str();
+}
+
+std::string MetricsHistoryJson(ServerContext& context, const HttpRequest& request) {
+    uint64_t since = 0;
+    size_t maxSamples = 900;
+    std::string tier = "1s";
+    size_t query = request.target.find('?');
+    if (query != std::string::npos) {
+        std::map<std::string, std::string> params;
+        if (ParseForm(request.target.substr(query + 1), &params)) {
+            if (params.count("since")) since = std::stoull(params["since"]);
+            if (params.count("max")) maxSamples = (std::stoul(params["max"]) < 900) ? std::stoul(params["max"]) : 900;
+            if (params.count("tier")) tier = params["tier"];
+        }
+    }
+    auto samples = context.metricsCollector.GetHistory(since, maxSamples);
+    std::ostringstream out;
+    out << "{\"tier\":" << JsonQuote(tier) << ",\"step\":1,\"t\":[";
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (i > 0) out << ",";
+        out << samples[i].unixTime;
+    }
+    out << "],\"series\":{\"cpu.total\":[";
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (i > 0) out << ",";
+        if (samples[i].cpuTotalKnown) out << samples[i].cpuTotal;
+        else out << "null";
+    }
+    out << "]}}";
+    return out.str();
+}
+
+std::string ProcessesJson(ServerContext& context) {
+    std::lock_guard<std::mutex> lock(g_storeMutex);
+    std::ostringstream out;
+    out << "{\"processes\":[";
+    bool first = true;
+    for (size_t i = 0; i < context.store.View().size(); ++i) {
+        const Connection* row = context.store.ViewRow(i);
+        if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
+        if (row->identity.pid == 0) continue;
+        if (!first) out << ",";
+        first = false;
+        out << "{\"pid\":" << row->identity.pid
+            << ",\"name\":" << JsonQuote(WideToUtf8(row->display.processName))
+            << ",\"cpu\":null,\"ws\":null,\"private\":null,\"ioRead\":null,\"ioWrite\":null"
+            << ",\"connections\":1,\"listeners\":0,\"threads\":null,\"handles\":null"
+            << ",\"startTime\":null,\"path\":" << JsonQuote(WideToUtf8(row->display.processPath))
+            << ",\"integrity\":null,\"signature\":null,\"service\":null,\"user\":null}";
+    }
+    out << "]}";
+    return out.str();
+}
+
+std::string NetworkSummaryJson() {
+    std::lock_guard<std::mutex> lock(g_storeMutex);
+    std::ostringstream out;
+    out << "{\"byState\":{},\"byProto\":{},\"byFamily\":{},\"byProcess\":{},\"listeners\":{\"loopback\":0,\"lan\":0,\"wildcard\":0}}";
+    return out.str();
+}
+
+std::string GeoSummaryJson(ServerContext& context) {
+    std::ostringstream out;
+    out << "{\"countries\":{},\"asns\":{},\"local\":0,\"unknown\":0"
+        << ",\"geoIpConfigured\":" << (context.source.GeoIpLoaded() ? "true" : "false") << "}";
+    return out.str();
+}
+
 bool DecodeFormValue(const std::string& raw, std::string* out) {
     if (out == nullptr) return false;
     out->clear();
@@ -1293,6 +1420,38 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             response.status = 500;
             response.body = ErrorJson("template catalog missing or too large");
         }
+        return response;
+    }
+    if (path == "/api/capabilities") {
+        response.body = CapabilitiesJson(context);
+        return response;
+    }
+    if (path == "/api/system/info") {
+        response.body = SystemInfoJson();
+        return response;
+    }
+    if (path == "/api/metrics/catalog") {
+        response.body = MetricsCatalogJson();
+        return response;
+    }
+    if (path == "/api/metrics/now") {
+        response.body = MetricsNowJson(context);
+        return response;
+    }
+    if (path == "/api/metrics/history") {
+        response.body = MetricsHistoryJson(context, request);
+        return response;
+    }
+    if (path == "/api/processes") {
+        response.body = ProcessesJson(context);
+        return response;
+    }
+    if (path == "/api/network/summary") {
+        response.body = NetworkSummaryJson();
+        return response;
+    }
+    if (path == "/api/geo/summary") {
+        response.body = GeoSummaryJson(context);
         return response;
     }
     if (path == "/api/config" && request.method == "GET") {
