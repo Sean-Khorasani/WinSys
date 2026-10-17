@@ -107,7 +107,7 @@ async function mountCharts(page) {
   const hosts = [
     { sel: "#perf-chart", series: [
       { key: "cpu.total", label: "CPU %" },
-      { key: "memMiB", label: "Memory (MiB)" },
+      { key: "memMiB", label: "Memory (MiB)", scale: "mem" },
     ] },
     { sel: "#perf-disk", series: [
       { key: "disk.readBps", label: "Read" },

@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-17T23:03:48.624Z",
-  "url": "http://127.0.0.1:58226/",
+  "when": "2026-10-17T23:19:10.826Z",
+  "url": "http://127.0.0.1:9416/",
   "pages": [
     {
       "theme": "light",
@@ -8,7 +8,7 @@
       "name": "Overview",
       "violations": [],
       "contrast": {
-        "checked": 50,
+        "checked": 56,
         "failures": 0,
         "worst": [
           {
@@ -73,7 +73,7 @@
           },
           {
             "selector": "div.kpi-label",
-            "text": "Disk Read",
+            "text": "Disk read",
             "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
@@ -86,7 +86,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 21
     },
     {
       "theme": "light",
@@ -94,7 +94,7 @@
       "name": "Performance",
       "violations": [],
       "contrast": {
-        "checked": 36,
+        "checked": 107,
         "failures": 0,
         "worst": [
           {
@@ -123,7 +123,7 @@
           },
           {
             "selector": "p.page-description",
-            "text": "CPU, memory, disk, and network utilization",
+            "text": "CPU, memory, disk, and network utilisation",
             "fontSizePx": 14,
             "fontWeight": 400,
             "isLargeText": false,
@@ -134,45 +134,45 @@
             "passes": true
           },
           {
-            "selector": "a.sidebar-item.is-active",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
-            "fontSizePx": 14,
+            "selector": "div.core-index",
+            "text": "0",
+            "fontSizePx": 12,
             "fontWeight": 400,
             "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
             "required": 4.5,
             "passes": true
           },
           {
-            "selector": "span.sidebar-label",
-            "text": "Performance",
-            "fontSizePx": 14,
+            "selector": "div.core-index",
+            "text": "1",
+            "fontSizePx": 12,
             "fontWeight": 400,
             "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
             "required": 4.5,
             "passes": true
           },
           {
-            "selector": "span.sidebar-label",
-            "text": "WinTCP",
-            "fontSizePx": 16,
-            "fontWeight": 600,
+            "selector": "div.core-index",
+            "text": "2",
+            "fontSizePx": 12,
+            "fontWeight": 400,
             "isLargeText": false,
-            "foreground": "rgb(10, 10, 10)",
-            "background": "rgb(250, 250, 250)",
-            "ratio": 18.97,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
             "required": 4.5,
             "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 23
     },
     {
       "theme": "light",
@@ -180,7 +180,7 @@
       "name": "Processes",
       "violations": [],
       "contrast": {
-        "checked": 99,
+        "checked": 86,
         "failures": 0,
         "worst": [
           {
@@ -266,7 +266,7 @@
       "name": "Network",
       "violations": [],
       "contrast": {
-        "checked": 160,
+        "checked": 147,
         "failures": 0,
         "worst": [
           {
@@ -352,7 +352,7 @@
       "name": "Map",
       "violations": [],
       "contrast": {
-        "checked": 37,
+        "checked": 24,
         "failures": 0,
         "worst": [
           {
@@ -392,18 +392,6 @@
             "passes": true
           },
           {
-            "selector": "a.sidebar-item.is-active",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
-            "fontSizePx": 14,
-            "fontWeight": 400,
-            "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
-            "required": 4.5,
-            "passes": true
-          },
-          {
             "selector": "span.sidebar-label",
             "text": "Map",
             "fontSizePx": 14,
@@ -426,11 +414,23 @@
             "ratio": 18.97,
             "required": 4.5,
             "passes": true
+          },
+          {
+            "selector": "div.sidebar-group-label",
+            "text": "Monitor",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(10, 10, 10)",
+            "background": "rgb(250, 250, 250)",
+            "ratio": 18.97,
+            "required": 4.5,
+            "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 18
     },
     {
       "theme": "light",
@@ -438,7 +438,7 @@
       "name": "Automations",
       "violations": [],
       "contrast": {
-        "checked": 40,
+        "checked": 27,
         "failures": 0,
         "worst": [
           {
@@ -516,7 +516,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 20
+      "passes": 21
     },
     {
       "theme": "light",
@@ -524,7 +524,7 @@
       "name": "Blocked Peers",
       "violations": [],
       "contrast": {
-        "checked": 38,
+        "checked": 25,
         "failures": 0,
         "worst": [
           {
@@ -576,8 +576,8 @@
             "passes": true
           },
           {
-            "selector": "a.sidebar-item.is-active",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "selector": "span.sidebar-label",
+            "text": "Blocked Peers",
             "fontSizePx": 14,
             "fontWeight": 400,
             "isLargeText": false,
@@ -589,20 +589,20 @@
           },
           {
             "selector": "span.sidebar-label",
-            "text": "Blocked Peers",
-            "fontSizePx": 14,
-            "fontWeight": 400,
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
             "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
+            "foreground": "rgb(10, 10, 10)",
+            "background": "rgb(250, 250, 250)",
+            "ratio": 18.97,
             "required": 4.5,
             "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 18
     },
     {
       "theme": "light",
@@ -610,7 +610,7 @@
       "name": "System",
       "violations": [],
       "contrast": {
-        "checked": 78,
+        "checked": 65,
         "failures": 0,
         "worst": [
           {
@@ -650,18 +650,6 @@
             "passes": true
           },
           {
-            "selector": "a.sidebar-item.is-active",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
-            "fontSizePx": 14,
-            "fontWeight": 400,
-            "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
-            "required": 4.5,
-            "passes": true
-          },
-          {
             "selector": "span.sidebar-label",
             "text": "System",
             "fontSizePx": 14,
@@ -684,11 +672,23 @@
             "ratio": 18.97,
             "required": 4.5,
             "passes": true
+          },
+          {
+            "selector": "div.sidebar-group-label",
+            "text": "Monitor",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(10, 10, 10)",
+            "background": "rgb(250, 250, 250)",
+            "ratio": 18.97,
+            "required": 4.5,
+            "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 19
+      "passes": 20
     },
     {
       "theme": "light",
@@ -696,7 +696,7 @@
       "name": "Settings",
       "violations": [],
       "contrast": {
-        "checked": 59,
+        "checked": 46,
         "failures": 0,
         "worst": [
           {
@@ -774,7 +774,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 19
+      "passes": 20
     },
     {
       "theme": "dark",
@@ -782,7 +782,7 @@
       "name": "Overview",
       "violations": [],
       "contrast": {
-        "checked": 50,
+        "checked": 56,
         "failures": 0,
         "worst": [
           {
@@ -811,7 +811,7 @@
           },
           {
             "selector": "div.kpi-label",
-            "text": "Disk Read",
+            "text": "Disk read",
             "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
@@ -823,7 +823,7 @@
           },
           {
             "selector": "div.kpi-label",
-            "text": "Network RX",
+            "text": "Disk write",
             "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
@@ -835,7 +835,7 @@
           },
           {
             "selector": "div.kpi-label",
-            "text": "Connections",
+            "text": "Network in",
             "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
@@ -847,7 +847,7 @@
           },
           {
             "selector": "div.kpi-label",
-            "text": "Processes",
+            "text": "Network out",
             "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
@@ -860,7 +860,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 21
     },
     {
       "theme": "dark",
@@ -868,85 +868,85 @@
       "name": "Performance",
       "violations": [],
       "contrast": {
-        "checked": 36,
+        "checked": 107,
         "failures": 0,
         "worst": [
           {
-            "selector": "a",
-            "text": "WinTCP",
-            "fontSizePx": 14,
-            "fontWeight": 400,
-            "isLargeText": false,
-            "foreground": "rgb(161, 161, 161)",
-            "background": "rgb(10, 10, 10)",
-            "ratio": 7.66,
-            "required": 4.5,
-            "passes": true
-          },
-          {
-            "selector": "span.breadcrumb-sep",
-            "text": "/",
-            "fontSizePx": 14,
-            "fontWeight": 400,
-            "isLargeText": false,
-            "foreground": "rgb(161, 161, 161)",
-            "background": "rgb(10, 10, 10)",
-            "ratio": 7.66,
-            "required": 4.5,
-            "passes": true
-          },
-          {
-            "selector": "p.page-description",
-            "text": "CPU, memory, disk, and network utilization",
-            "fontSizePx": 14,
-            "fontWeight": 400,
-            "isLargeText": false,
-            "foreground": "rgb(161, 161, 161)",
-            "background": "rgb(10, 10, 10)",
-            "ratio": 7.66,
-            "required": 4.5,
-            "passes": true
-          },
-          {
-            "selector": "span.sidebar-label",
-            "text": "WinTCP",
-            "fontSizePx": 16,
-            "fontWeight": 600,
-            "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
-            "required": 4.5,
-            "passes": true
-          },
-          {
-            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
-            "fontSizePx": 13,
-            "fontWeight": 500,
-            "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
-            "required": 4.5,
-            "passes": true
-          },
-          {
-            "selector": "div.sidebar-group-label",
-            "text": "Monitor",
+            "selector": "div.core-index",
+            "text": "0",
             "fontSizePx": 12,
-            "fontWeight": 500,
+            "fontWeight": 400,
             "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
+            "foreground": "rgb(161, 161, 161)",
             "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.core-index",
+            "text": "1",
+            "fontSizePx": 12,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.core-index",
+            "text": "2",
+            "fontSizePx": 12,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.core-index",
+            "text": "3",
+            "fontSizePx": 12,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.core-index",
+            "text": "4",
+            "fontSizePx": 12,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.core-index",
+            "text": "5",
+            "fontSizePx": 12,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
             "required": 4.5,
             "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 23
     },
     {
       "theme": "dark",
@@ -954,7 +954,7 @@
       "name": "Processes",
       "violations": [],
       "contrast": {
-        "checked": 99,
+        "checked": 86,
         "failures": 0,
         "worst": [
           {
@@ -1040,7 +1040,7 @@
       "name": "Network",
       "violations": [],
       "contrast": {
-        "checked": 160,
+        "checked": 147,
         "failures": 0,
         "worst": [
           {
@@ -1126,7 +1126,7 @@
       "name": "Map",
       "violations": [],
       "contrast": {
-        "checked": 37,
+        "checked": 24,
         "failures": 0,
         "worst": [
           {
@@ -1178,18 +1178,6 @@
             "passes": true
           },
           {
-            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
-            "fontSizePx": 13,
-            "fontWeight": 500,
-            "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
-            "required": 4.5,
-            "passes": true
-          },
-          {
             "selector": "div.sidebar-group-label",
             "text": "Monitor",
             "fontSizePx": 12,
@@ -1200,11 +1188,23 @@
             "ratio": 17.18,
             "required": 4.5,
             "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "Overview",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 18
     },
     {
       "theme": "dark",
@@ -1212,7 +1212,7 @@
       "name": "Automations",
       "violations": [],
       "contrast": {
-        "checked": 40,
+        "checked": 27,
         "failures": 0,
         "worst": [
           {
@@ -1290,7 +1290,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 20
+      "passes": 21
     },
     {
       "theme": "dark",
@@ -1298,7 +1298,7 @@
       "name": "Blocked Peers",
       "violations": [],
       "contrast": {
-        "checked": 38,
+        "checked": 25,
         "failures": 0,
         "worst": [
           {
@@ -1362,9 +1362,9 @@
             "passes": true
           },
           {
-            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
-            "fontSizePx": 13,
+            "selector": "div.sidebar-group-label",
+            "text": "Monitor",
+            "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
             "foreground": "rgb(250, 250, 250)",
@@ -1376,7 +1376,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 17
+      "passes": 18
     },
     {
       "theme": "dark",
@@ -1384,7 +1384,7 @@
       "name": "System",
       "violations": [],
       "contrast": {
-        "checked": 78,
+        "checked": 65,
         "failures": 0,
         "worst": [
           {
@@ -1436,18 +1436,6 @@
             "passes": true
           },
           {
-            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
-            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
-            "fontSizePx": 13,
-            "fontWeight": 500,
-            "isLargeText": false,
-            "foreground": "rgb(250, 250, 250)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 17.18,
-            "required": 4.5,
-            "passes": true
-          },
-          {
             "selector": "div.sidebar-group-label",
             "text": "Monitor",
             "fontSizePx": 12,
@@ -1458,11 +1446,23 @@
             "ratio": 17.18,
             "required": 4.5,
             "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "Overview",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 19
+      "passes": 20
     },
     {
       "theme": "dark",
@@ -1470,7 +1470,7 @@
       "name": "Settings",
       "violations": [],
       "contrast": {
-        "checked": 59,
+        "checked": 46,
         "failures": 0,
         "worst": [
           {
@@ -1548,7 +1548,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 19
+      "passes": 20
     }
   ]
 }

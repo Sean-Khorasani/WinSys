@@ -135,7 +135,9 @@ async function mountCharts(page) {
       data: { t, values: { "cpu.total": values["cpu.total"], memoryMiB: toMiB(values["mem.usedBytes"]) } },
       series: [
         { key: "cpu.total", label: "CPU %" },
-        { key: "memoryMiB", label: "Memory (MiB)" },
+        // Own axis: memory in MiB is three orders of magnitude away from a
+        // percentage, so on a shared axis the CPU line is flat on the baseline.
+        { key: "memoryMiB", label: "Memory (MiB)", scale: "mem" },
       ],
     }));
   } catch (err) {

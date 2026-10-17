@@ -262,14 +262,20 @@ void MetricsCollector::Run() {
         skipNextSample_ = false;
 
         // Idle cadence (C-8: a sampler that never sleeps is a permanent tax).
+        //
+        // 1 s while something is watching, 10 s once idle. The original loop
+        // slept 100 ms between samples, which is 10 Hz: 900 ring-buffer slots
+        // (the documented 15 minutes at 1 Hz) were gone in 90 seconds, and the
+        // "1 s x 900" tier in the plan was silently a "100 ms x 900" tier.
         const uint64_t idleTimeout = idleTimeoutMs_.load();
         const uint64_t sinceAccess = loopStartMs - lastAccessMs_.load();
         const bool idle = !keepCollectingWhileIdle_.load() && idleTimeout > 0 &&
                           sinceAccess > idleTimeout;
-        const DWORD stepMs = idle ? 1000 : 100;   // 0.1 Hz idle, 1 Hz active
-        for (DWORD waited = 0; waited < stepMs; waited += 100) {
+        const DWORD stepMs = idle ? 10000 : 1000;
+        const ULONGLONG stepEnd = ::GetTickCount64() + stepMs;
+        while (::GetTickCount64() < stepEnd) {
             if (stopRequested_.load()) break;
-            ::Sleep(100);
+            ::Sleep(50);
         }
     }
 }

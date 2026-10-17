@@ -60,48 +60,68 @@ export function chartPalette() {
   };
 }
 
-function baseOptions(up, height, seriesDefs) {
+// Build uPlot options for a set of series defs.
+//
+// A def may name a `scale`. Anything without one shares the left-hand axis; a
+// def with `scale: "x"` gets its own right-hand axis. This is not cosmetic: CPU
+// (0-100) plotted against memory (30,000 MiB) on one axis flattens the CPU line
+// onto the baseline and makes the chart useless.
+function baseOptions(height, seriesDefs) {
   const palette = chartPalette();
-  const options = {
+
+  // Collect the extra scales, preserving first-seen order.
+  const extraScales = [];
+  for (const def of seriesDefs) {
+    if (def.scale && !extraScales.includes(def.scale)) extraScales.push(def.scale);
+  }
+
+  const scales = { x: { time: true } };
+  for (const name of extraScales) scales[name] = {};
+
+  const axisCommon = {
+    stroke: palette.axis,
+    grid: { stroke: palette.grid, width: 1 },
+    ticks: { stroke: palette.grid },
+    font: "11px system-ui, sans-serif",
+  };
+  const axes = [
+    { ...axisCommon, ticks: { ...axisCommon.ticks, show: false } },
+    { ...axisCommon },
+  ];
+  extraScales.forEach((name, i) => {
+    // First extra scale goes on the right; any further ones are stacked left.
+    const side = i === 0 ? 1 : 0;
+    axes.push({
+      ...axisCommon,
+      scale: name,
+      side,
+      // Only the first extra axis on a side gets a grid, or the plot fills with
+      // overlapping lines.
+      grid: i === 0 ? axisCommon.grid : { stroke: palette.grid, width: 0 },
+      ticks: { ...axisCommon.ticks, show: i === 0 },
+    });
+  });
+
+  return {
     width: 600,
     height,
-    // Transparent background: the card behind the canvas supplies it, so a
-    // theme change does not need the canvas repainted to match.
-    plugins: [],
-    legend: { show: true },
+    legend: { show: seriesDefs.length > 1 },
     cursor: { drag: { x: false, y: false } },
-    scales: {
-      x: { time: true },
-      y: { auto: true },
-    },
-    axes: [
-      {
-        stroke: palette.axis,
-        grid: { stroke: palette.grid, width: 1 },
-        ticks: { stroke: palette.grid },
-        font: "11px system-ui, sans-serif",
-      },
-      {
-        stroke: palette.axis,
-        grid: { stroke: palette.grid, width: 1 },
-        ticks: { stroke: palette.grid },
-        font: "11px system-ui, sans-serif",
-      },
-    ],
+    scales,
+    axes,
+    // A null sample stays null: uPlot draws a gap, so "no data" is visibly
+    // different from a flat line at zero (C-6).
     series: [
-      {},
+      { label: "" },
       ...seriesDefs.map((def, i) => ({
         label: def.label,
-        // Null (not 0) for an unavailable sample, so uPlot draws a gap and the
-        // reader can tell "no data" from "idle".
-        value: def.value ?? ((self, raw) => raw),
+        ...(def.scale ? { scale: def.scale } : {}),
         stroke: def.stroke || palette.series[i % palette.series.length],
         width: 1.5,
         points: { show: false },
       })),
     ],
   };
-  return options;
 }
 
 /**
@@ -122,14 +142,26 @@ export async function createTimeseries(container, opts = {}) {
 
   const defs = opts.series || [];
   const data = buildData(opts.data, defs);
-  const options = baseOptions(up, opts.height || 200, defs);
-  const chart = new up(el, options, data);
+  const options = baseOptions(opts.height || 200, defs);
+  // uPlot's signature is new uPlot(opts, data, target) - the ELEMENT IS LAST.
+  // Passing it first is a TypeError deep inside the constructor ("then is not a
+  // function"), because the third argument is expected to be either an element
+  // or an on-ready callback.
+  const chart = new up(options, data, el);
 
   // uPlot writes the canvas size once. Everything that can change the box has to
   // push a new size, or the chart is stretched / clipped.
+  //
+  // BOTH dimensions must be supplied. setSize({ width }) makes uPlot re-derive
+  // height, and it re-derives it as 0 here - the canvas ends up with a real
+  // width and a zero-height backing store, so nothing is ever painted and the
+  // chart shows only its legend.
   const resize = () => {
     const width = el.clientWidth;
-    if (width > 0 && Math.abs(width - chart.width) > 1) chart.setSize({ width });
+    const height = el.clientHeight || opts.height || 200;
+    if (width > 0 && (Math.abs(width - chart.width) > 1 || chart.height !== height)) {
+      chart.setSize({ width, height });
+    }
   };
   const observer = new ResizeObserver(resize);
   observer.observe(el);

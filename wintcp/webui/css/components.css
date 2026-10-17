@@ -539,6 +539,18 @@
   height: 100%;
   min-height: 12rem;
 }
+/* The live uPlot host. Its height is set inline per chart, so it must not also
+   inherit a stretching parent: uPlot writes the canvas size once and never
+   corrects it, so an auto-height wrapper leaves the plot at its fallback size
+   and the legend ends up floating in an empty box. */
+.chart-host {
+  position: relative;
+  width: 100%;
+  min-height: 12rem;
+}
+.chart-host > canvas { display: block; }
+/* uPlot's legend sits on its own row; keep it inside the card. */
+.u-legend { font-size: 0.75rem; }
 .chart-header {
   display: flex;
   align-items: center;
@@ -587,7 +599,15 @@
   font-weight: 600;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  /* "400.1 KiB/s" must not wrap to two lines and double the card's height;
+     let the value shrink instead of breaking. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+/* The em-dash placeholder for an unavailable reading, with the endpoint's
+   reason on hover. */
+.kpi-value-unavailable { color: var(--muted-foreground); }
 .kpi-delta {
   display: flex;
   align-items: center;
