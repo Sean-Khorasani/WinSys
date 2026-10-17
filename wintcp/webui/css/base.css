@@ -1,0 +1,104 @@
+/* base.css - Reset, typography, focus rings */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  font-family: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--foreground);
+  background: var(--background);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+/* Typography scale */
+h1 { font-size: 1.5rem; font-weight: 600; line-height: 1.2; }
+h2 { font-size: 1.25rem; font-weight: 600; line-height: 1.3; }
+h3 { font-size: 1rem; font-weight: 600; line-height: 1.4; }
+h4 { font-size: 0.875rem; font-weight: 600; line-height: 1.4; }
+
+p { font-size: 0.875rem; line-height: 1.5; }
+small { font-size: 0.75rem; line-height: 1.4; }
+
+/* Monospace for IDs and paths */
+code, .mono, kbd {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 0.8125rem;
+}
+
+/* Numbers */
+.num, [data-num] {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Focus rings */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Unicode and RTL safety */
+[dir="auto"], [dir="rtl"], .unicode-safe {
+  unicode-bidi: plaintext;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+
+/* Selection */
+::selection {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+/* Utility classes */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabular { font-variant-numeric: tabular-nums; }
