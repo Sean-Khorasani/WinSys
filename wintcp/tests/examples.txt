@@ -1,0 +1,146 @@
+bookmark export --out %TEMP%\rmc_bookmarks.json --force
+bookmark export --out %TEMP%\rmc_bookmarks.json --force
+bookmark import --in %TEMP%\rmc_bookmarks.json
+bookmark import --in %TEMP%\rmc_bookmarks.json --yes
+preset export --out %TEMP%\rmc_presets.json --force
+preset export --out %TEMP%\rmc_presets.json --force
+preset import --in %TEMP%\rmc_presets.json
+preset import --in %TEMP%\rmc_presets.json --yes
+list --filter "process:AnyDesk.exe state:estab" --columns pid,process,local,remote,rport,state
+close --select "pid:5168 remote:107.155.105.90" --dry-run
+kill --select "local:port:49665" --dry-run
+kill --select "ipv4: local:port:49665" --dry-run
+kill --pid 999999
+kill --pid 999999 --dry-run
+killtree --pid 999999 ;expect=2
+killtree --pid 999999 --dry-run ;expect=2
+killtree --pid 999999 --yes ;expect=2
+# L2310: documented as ALWAYS refused (exit 2) - cli.md says so, because PID 4
+# owns no real image. Without the ;expect= annotation this line could not be
+# gated at all: an rc of 2 is exactly what this harness reads as a rejection.
+kill --pid 4 ;expect=2
+block --select "remote:20.47.110.73 state:estab" --dry-run
+blocks
+blocks --list
+blocks --list --format json
+block --rule --address 203.0.113.7 --remote-ports 443 --dry-run
+block --rule --inbound --address 203.0.113.0/24 --proto tcp --dry-run
+block --rule --address * --process C:\Windows\System32\svchost.exe --proto tcp --remote-ports 443 --dry-run
+# These two are documented as REFUSED (exit 2), so ;expect=2 is required or the
+# harness reads them as rejections: cli.md explains why each is refused, and an
+# example that shows a refusal is only useful if the refusal is still happening.
+block --rule --address 1.2.3.4 --proto any --remote-ports 443 ;expect=2
+block --rule --proto sctp --address 1.2.3.4 ;expect=2
+block --rule --allow --address * --process C:\a\b.exe --dry-run
+unblock --address 20.47.110.73 --port 443 --dry-run
+list --group --traffic --sort nettotal --desc --limit 4 --columns pid,process,nettotal,rx,tx
+list --group --traffic --sort tx --desc --limit 4 --columns pid,process,tx,rx
+list --group --traffic --filter "tx:1KB" --sort tx --desc --columns pid,process,tx
+list --group --traffic --filter "tx:500GB" --columns pid,process,tx
+list --group --traffic --filter "process:svchost.exe" --sort tx --desc --limit 3 --columns pid,process,tx --watch 1 --count 2
+list --traffic --watch 2 --count 4 --sort bandwidth --desc --limit 3 --columns pid,process,remote,rport,bandwidth
+geoip info --db GeoLite2-Country.mmdb
+list --db GeoLite2-Country.mmdb --filter "country:US" --columns remote,country,process --limit 3
+list --db GeoLite2-Country.mmdb --filter "country:US" --quiet && echo us-traffic
+list --dns --db GeoLite2-Country.mmdb --traffic --filter "state:estab" --limit 4 --columns remote,host,country,process,nettotal
+geoip info --db GeoLite2-ASN.mmdb
+list --db GeoLite2-Country.mmdb --asn-db GeoLite2-ASN.mmdb --filter "asn:google" --columns remote,country,process --limit 3
+list --db GeoLite2-Country.mmdb --asn-db GeoLite2-ASN.mmdb --filter "asn:15169-20000" --columns remote,country,process --limit 3
+list --db GeoLite2-Country.mmdb --asn-db GeoLite2-ASN.mmdb --filter "asn:" --columns remote,country,process --limit 3
+details --select "process:AnyDesk.exe state:estab" --asn-db GeoLite2-ASN.mmdb
+list --dns --traffic --filter "state:estab" --limit 4 --columns remote,host,process,nettotal
+list --dns --dns-timeout 5000 --filter "state:estab" --limit 4 --columns remote,host,process
+details --select "process:AnyDesk.exe state:estab" --traffic --dns
+list --watch 1 --changes --event appear,state --count 4
+list --watch 2 --changes --filter "proto:tcp" --count 5
+list --filter "port:443" --quiet
+list --watch 1 --changes --event appear --count 3 --filter "proto:tcp state:estab"
+list --filter "process:cloudflared.exe" --columns pid,process,local,remote,rport,state --limit 2
+capture --select "pid:22180" --dry-run
+capture --select "proto:tcp state:estab" --dry-run
+capture --select "pid:22180" --text --dir b --dry-run
+capture --select "pid:22180" --out "c:\tmp\stream.pcapng" --dry-run
+capture --select "pid:22180" --bin --out "c:\tmp\stream.bin" --dry-run
+capture --select "pid:22180" --filter 203.0.113.7 --dry-run
+list --filter "state:listen lport:445" --columns process,path,pid,local,state
+list --filter "state:listen exclude:127." --sort lport --columns pid,process,lport,local --limit 8
+list --filter "proto:udp" --columns process,pid,local,lport,proto --limit 5
+list --filter "proto:ipv6" --columns proto,process,local,lport,state --limit 5
+ps --sort cpu --limit 4
+ps --filter "proto:udp" --sort conns --limit 3
+stat
+stat --format json
+list --filter "lport:49600-49700 exclude:127." --sort lport --columns pid,process,lport,local --limit 8
+list --filter "local:port:49665" --columns pid,process,local,lport,state
+list --filter "note:""corporate dns""" --columns remote,rport,pinned --limit 3
+bookmark add --address 64.59.150.137 --port 53 --tag 3 --note "corporate dns resolver"
+bookmark note --address 64.59.150.137 --port 53 --note "confirmed with netops"
+bookmark colour --address 64.59.150.137 --port 53 --tag 1
+bookmark list --format json
+list --filter "note:confirmed" --columns remote,rport,pinned --limit 3
+bookmark remove --address 64.59.150.137 --port 53
+preset save --name rmcheck --filter "port:443" --sort pid
+preset list
+preset show --name rmcheck
+preset apply --name rmcheck --limit 10 --columns pid,process,remote,rport
+preset save --name rmcheck --filter "port:80"
+preset save --name rmcheck --filter "port:80" --force
+preset delete --name rmcheck
+export --out %TEMP%\rmc_a.csv --filter "tcp: state:listen" --force
+export --out %TEMP%\rmc_a.tsv --format tsv --columns proto,pid,process,state --force
+export --out %TEMP%\rmc_b.csv --group --traffic --sort nettotal --desc --force
+export --out %TEMP%\rmc_c.csv --quiet --force
+# L2310: the documented answer here IS exit 2, and cli.md prints that
+# number. Same reason: gateable only with the annotation.
+export --out %TEMP%\l2310_changes.csv --changes ;expect=2
+list --format json --columns proto,local,lport,remote,rport,state,pid,process --limit 2
+list --format json --columns full --limit 1
+list --format jsonl --columns proto,local,lport,remote,rport,state,pid,process --limit 2
+list --watch 1 --count 2 --limit 2 --format jsonl
+list --filter "state:listen exclude:127." --quiet
+list --group --traffic --filter "tx:1GB" --quiet
+ps --sort mem --limit 1 --quiet
+# `bench` moved out of the product on 2026-10-02 and now lives in
+# wintcp-tests.exe. It is no longer a documented wintcp.exe command, so
+# asserting it here would assert a rejection.
+#
+# Note the `#`, not `REM`: examples.ps1 skips lines starting with `#` only.
+# Three `REM` lines here were executed as commands and the harness rejected all
+# three with "unexpected argument" - which is exactly what it is for.
+list --watch 2 --changes --event appear,state --format json --count 3
+list --traffic --sort duration --desc --limit 4 --columns pid,process,remote,rport,duration
+list --traffic --filter "duration:1h" --sort duration --desc --limit 4 --columns pid,process,remote,rport,duration
+list --traffic --sort rtt --desc --limit 4 --columns process,remote,rport,rtt,minrtt,cwnd,retrans
+list --traffic --filter "rtt:100" --columns process,rtt,cwnd
+list --traffic --filter "retrans:1KB" --columns process,retrans
+list --traffic --watch 1 --count 3 --filter "state:estab" --columns process,bandwidth,procspeed --limit 8
+list --traffic --interval 1 --count 2 --columns process,bandwidth --limit 3
+list --traffic --group --sort procspeed --desc --limit 6 --columns pid,process,procspeed
+# F5.1 / F5.2 / F5.3: the parent, integrity and signature columns, and the
+# filters that read them. `--signatures` is in the list because Authenticode
+# verification is opt-in - without it the signature cell is an em-dash, and a
+# documented command must show the switch that makes it mean something.
+list --columns pid,process,ppid,integrity --limit 5
+list --signatures --columns process,integrity,signature --limit 5
+list --signatures --filter "integrity:high" --columns process,integrity --limit 5
+list --signatures --filter "signed:" --columns process,signature --limit 5
+list --filter "parent:services" --columns process,ppid --limit 5
+list --signatures --sort signature --desc --columns process,signature --limit 5
+version
+# The `help` verb is read-only and is what both the README and the CLI
+# reference open with, so it belongs in the documented set.
+help
+help list
+help details
+alert rule list
+alert rule add --rule-name example --rule-address 198.51.100.
+alert rule remove --rule-name example
+# The four event-toggle pairs. Each line sets then restores the default so the
+# gate leaves HKCU\Software\WinTCP as it found it; the pair exists because the
+# switches were once rejected by the verb allow-list (missing -- prefixes in
+# kVerbSwitches) while fully implemented, and nothing here noticed.
+alert --off-rst --off-closed ;expect=0
+alert --on-rst --on-closed ;expect=0
+webui --help
+monitor list
+help monitor
