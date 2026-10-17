@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{D3B86C22-2474-49F5-92D0-1809405A67A4}</ProjectGuid>
+    <RootNamespace>wintcp_gui</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>wintcp-gui</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\ide\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\build\ide\$(Platform)\$(Configuration)\wintcp-gui-obj\</IntDir>
+    <GenerateManifest>false</GenerateManifest>
+    <TargetName>wintcp-gui</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus /guard:cf %(AdditionalOptions)</AdditionalOptions>
+      <!-- /guard:cf above is load-bearing (the flags are not optional).
+           UseDebugLibraries=true defaults Edit-and-Continue debug info to
+           /ZI, and /ZI + /guard:cf is cl error D8016, so the Debug
+           configurations never compiled. ProgramDatabase (/Zi) keeps the
+           mandated guard flag and still debugs. -->
+      <DebugInformationFormat Condition="'$(Configuration)'=='Debug'">ProgramDatabase</DebugInformationFormat>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <FunctionLevelLinking Condition="'$(Configuration)'=='Release'">true</FunctionLevelLinking>
+      <IntrinsicFunctions Condition="'$(Configuration)'=='Release'">true</IntrinsicFunctions>
+      <Optimization Condition="'$(Configuration)'=='Release'">MinSpace</Optimization>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateManifest>false</GenerateManifest>
+      <EnableControlFlowGuard>true</EnableControlFlowGuard>
+      <AdditionalDependencies>iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
+      <AdditionalOptions>/MANIFEST:NO %(AdditionalOptions)</AdditionalOptions>
+      <EnableCOMDATFolding Condition="'$(Configuration)'=='Release'">true</EnableCOMDATFolding>
+      <OptimizeReferences Condition="'$(Configuration)'=='Release'">true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\GuiMain.cpp" />
+    <ClCompile Include="src\MainWindow.cpp" />
+    <ClCompile Include="src\TcpTable.cpp" />
+    <ClCompile Include="src\RowEnrichment.cpp" />
+    <ClCompile Include="src\ListViewColumns.cpp" />
+    <ClCompile Include="src\ConnectionsList.cpp" />
+    <ClCompile Include="src\ConnectionsListOwner.cpp" />
+    <ClCompile Include="src\AlertMonitor.cpp" />
+    <ClCompile Include="src\ViewPresets.cpp" />
+    <ClCompile Include="src\BookmarkActions.cpp" />
+    <ClCompile Include="src\TrayIcon.cpp" />
+    <ClCompile Include="src\ProcessInfo.cpp" />
+    <ClCompile Include="src\Utils.cpp" />
+    <ClCompile Include="src\ConnectionStore.cpp" />
+    <ClCompile Include="src\RefreshEngine.cpp" />
+    <ClCompile Include="src\Snapshot.cpp" />
+    <ClCompile Include="src\ViewState.cpp" />
+    <ClCompile Include="src\SysStats.cpp" />
+    <ClCompile Include="src\Commands.cpp" />
+    <!-- CliCommands.cpp is deliberately absent: it is the CLI verb layer, its
+         only includers are Cli.cpp and main.cpp (both excluded here), and it
+         references Monitors.cpp symbols that this project does not link. It
+         survived Release builds only because /OPT:REF discarded the
+         unreferenced TU; the Debug configurations (/OPT:NOREF) failed with
+         LNK2019 on MonitorDef::Validate and friends. Do not re-add it. -->
+    <ClCompile Include="src\WebUi.cpp" />
+    <ClCompile Include="src\DnsResolver.cpp" />
+    <ClCompile Include="src\DnsCache.cpp" />
+    <ClCompile Include="src\Settings.cpp" />
+    <ClCompile Include="src\DetailsDialog.cpp" />
+    <ClCompile Include="src\DetailModel.cpp" />
+    <ClCompile Include="src\Pcapng.cpp" />
+    <ClCompile Include="src\TcpReasm.cpp" />
+    <ClCompile Include="src\StreamCapture.cpp" />
+    <ClCompile Include="src\TlsDecode.cpp" />
+    <ClCompile Include="src\Elevate.cpp" />
+    <ClCompile Include="src\Alerts.cpp" />
+    <ClCompile Include="src\TypeToJump.cpp" />
+    <ClCompile Include="src\Grouping.cpp" />
+    <ClCompile Include="src\Freeze.cpp" />
+    <ClCompile Include="src\BuildInfo.cpp" />
+    <ClCompile Include="src\PromptDialog.cpp" />
+    <ClCompile Include="src\ChartExport.cpp" />
+    <ClCompile Include="src\ChangeLogWindow.cpp" />
+    <ClCompile Include="src\Presets.cpp" />
+    <ClCompile Include="src\Bookmarks.cpp" />
+    <ClCompile Include="src\GeoIp.cpp" />
+    <ClCompile Include="src\BlockConn.cpp" />
+    <ClCompile Include="src\BlockedPeersDialog.cpp" />
+    <ClCompile Include="src\BookmarkFile.cpp" />
+    <ClCompile Include="src\PresetFile.cpp" />
+    <ClCompile Include="src\IniFile.cpp" />
+    <ClCompile Include="src\EmptyStateActions.cpp" />
+    <ClCompile Include="src\ProcessTree.cpp" />
+    <ClCompile Include="src\ProcessTreeView.cpp" />
+    <ClCompile Include="src\RowAccessible.cpp" />
+    <ClCompile Include="src\Sha256.cpp" />
+    <ClCompile Include="src\ExposureScore.cpp" />
+    <ClCompile Include="src\EtwTraffic.cpp" />
+    <ClCompile Include="src\SocketTraffic.cpp" />
+    <ClCompile Include="src\ProcStats.cpp" />
+    <ClCompile Include="src\ChartsWindow.cpp" />
+    <ClCompile Include="src\FontCache.cpp" />
+    <ClCompile Include="src\CrashDump.cpp" />
+    <ClCompile Include="src\WinCaps.cpp" />
+    <ClCompile Include="src\Opt.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\wintcp.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>
