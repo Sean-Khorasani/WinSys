@@ -970,8 +970,25 @@ std::string NetworkSummaryJson(ServerContext& context) {
 }
 
 std::string GeoSummaryJson(ServerContext& context) {
+    std::lock_guard<std::mutex> lock(g_storeMutex);
+    std::map<std::string, int> countries;
+    int local = 0, unknown = 0;
+    for (size_t i = 0; i < context.store.View().size(); ++i) {
+        const Connection* row = context.store.ViewRow(i);
+        if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
+        if (row->identity.family != AF_INET) continue;
+        uint32_t addr = ntohl(row->identity.remote4.S_un.S_addr);
+        if (!IsGlobalUnicastV4(addr)) { local++; continue; }
+        std::wstring cc = context.source.GeoIpLoaded()
+            ? context.source.GeoIpLookupV4(addr) : L"";
+        if (cc.empty()) unknown++;
+        else countries[WideToUtf8(cc)]++;
+    }
     std::ostringstream out;
-    out << "{\"countries\":{},\"asns\":{},\"local\":0,\"unknown\":0"
+    out << "{\"countries\":{";
+    bool first = true;
+    for (const auto& kv : countries) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
+    out << "},\"asns\":{},\"local\":" << local << ",\"unknown\":" << unknown
         << ",\"geoIpConfigured\":" << (context.source.GeoIpLoaded() ? "true" : "false") << "}";
     return out.str();
 }

@@ -110,6 +110,9 @@ public:
     // own message instead of being reported as "enumeration failed".
     bool LoadGeoIp(const wchar_t* path, std::wstring* error);
     bool GeoIpLoaded() const;
+    // Look up a country code for a host-order IPv4 address.
+    // Returns empty when no database is loaded or the address is not global.
+    std::wstring GeoIpLookupV4(uint32_t hostOrderAddr) const;
     // Version / record count, for `wintcp geoip info` and the About box.
     std::wstring GeoIpDescription() const;
 

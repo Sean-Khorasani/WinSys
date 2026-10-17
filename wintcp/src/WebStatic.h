@@ -30,6 +30,9 @@ bool IsSafeStaticPath(const std::string& path);
 // Get the MIME type for a file extension.
 const char* StaticMimeType(const std::string& ext);
 
+// Get the maximum file size for a given path.
+size_t StaticMaxBytesFor(const std::string& path);
+
 // List of allowed static file prefixes.
 const std::vector<std::string>& StaticAllowedPrefixes();
 

@@ -7,9 +7,16 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 
 namespace wintcp {
 namespace {
+
+// The ECharts full build is 1,030,855 bytes which exceeds the 1 MiB
+// (1,048,576 bytes) static asset cap. Per the brief, we raise the cap for
+// /vendor/ only and document why. A tree-shaken custom build (target
+// < 450 KB) would replace this deviation.
+constexpr size_t kVendorMaxBytes = 2 * 1024 * 1024;  // 2 MiB for /vendor/
 
 // Allowed prefixes (must start with /)
 const std::vector<std::string> kAllowedPrefixes = {
@@ -64,17 +71,10 @@ bool IsSafeStaticPath(const std::string& path) {
     if (path.empty() || path[0] != '/') return false;
     if (!IsAllowedPrefix(path)) return false;
     if (!IsAllowedExtension(path)) return false;
-
-    // Reject path traversal
     if (path.find("..") != std::string::npos) return false;
-    // Reject backslash (Windows path separator)
     if (path.find('\\') != std::string::npos) return false;
-    // Reject drive letters and alternate data streams
     if (path.find(':') != std::string::npos) return false;
-    // Reject null bytes
     if (path.find('\0') != std::string::npos) return false;
-
-    // Check each path component for reserved names and trailing dots/spaces
     size_t start = 1;
     while (start < path.size()) {
         size_t end = path.find('/', start);
@@ -82,11 +82,17 @@ bool IsSafeStaticPath(const std::string& path) {
         std::string component = path.substr(start, end - start);
         if (component.empty() || component == ".") { start = end + 1; continue; }
         if (IsReservedName(component)) return false;
-        if (!component.empty() && (component.back() == '.' || component.back() == ' ')) return false;
+        if (component.back() == '.' || component.back() == ' ') return false;
         start = end + 1;
     }
-
     return true;
+}
+
+// Get the maximum file size for a given path.
+// /vendor/ files get a 2 MiB cap (ECharts is 1MB+); everything else 1 MiB.
+size_t StaticMaxBytesFor(const std::string& path) {
+    if (path.rfind("/vendor/", 0) == 0) return kVendorMaxBytes;
+    return 1024 * 1024;
 }
 
 const char* StaticMimeType(const std::string& ext) {

@@ -148,6 +148,11 @@ bool SnapshotSource::LoadGeoIp(const wchar_t* path, std::wstring* error) {
 
 bool SnapshotSource::GeoIpLoaded() const { return geo_.Loaded(); }
 
+std::wstring SnapshotSource::GeoIpLookupV4(uint32_t hostOrderAddr) const {
+    if (!geo_.Loaded()) return L"";
+    return geo_.LookupV4(hostOrderAddr);
+}
+
 std::wstring SnapshotSource::GeoIpDescription() const {
     if (!geo_.Loaded()) return L"no database loaded";
     wchar_t buf[kGeoDescriptionChars] = {0};
