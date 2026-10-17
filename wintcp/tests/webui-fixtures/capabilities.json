@@ -1,0 +1,15 @@
+{
+  "elevated": true,
+  "pdh": true,
+  "perCore": true,
+  "gpu": false,
+  "geoIp": {
+    "configured": false,
+    "type": null,
+    "error": "No database configured"
+  },
+  "etw": true,
+  "trafficScan": true,
+  "dns": true,
+  "version": "1.0.0"
+}

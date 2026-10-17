@@ -1,0 +1,40 @@
+{
+  "os": {
+    "name": "Windows 11 Pro",
+    "version": "10.0.22631",
+    "build": "22631",
+    "architecture": "x64"
+  },
+  "hostname": "DESKTOP-TEST",
+  "uptime": "2d 5h 30m",
+  "cpu": {
+    "model": "Intel(R) Core(TM) i7-12700",
+    "cores": 12,
+    "threads": 20,
+    "mhz": 2100
+  },
+  "memory": {
+    "installed": 17179869184
+  },
+  "gpu": [],
+  "volumes": [
+    {
+      "letter": "C:",
+      "label": "System",
+      "filesystem": "NTFS",
+      "total": 536870912000,
+      "free": 107374182400
+    }
+  ],
+  "adapters": [
+    {
+      "name": "Ethernet",
+      "ipv4": "192.168.1.10",
+      "ipv6": "fe80::1",
+      "speed": 1000000000
+    }
+  ],
+  "power": {
+    "battery": false
+  }
+}

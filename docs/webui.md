@@ -220,4 +220,4 @@ This is a local management interface, not a LAN service. Do not expose its port 
 - Address-wide firewall response applies to outbound TCP only. It does not block UDP, close a live connection, or terminate a process.
 - The batch manager backgrounds the HTTP server but does not install a native Windows service or startup entry. The CLI script adapter uses the sibling `wintcp.exe`; copying the Web UI executable to another folder without that CLI sibling disables script execution, while the separate `wintcp-gui.exe` remains independent.
 
-See [`gui-webui-design.md`](gui-webui-design.md) for the product requirement analysis and launch architecture, and [CLI reference](cli.md) for command syntax.
+See [`webui-design.md`](webui-design.md) for the design system, component catalogue, and extension guide, and [CLI reference](cli.md) for command syntax.

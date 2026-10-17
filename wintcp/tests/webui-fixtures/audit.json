@@ -1,0 +1,14 @@
+{
+  "records": [
+    {
+      "ts": "2026-10-17T12:00:00Z",
+      "action": "startup",
+      "detail": "Web UI service started"
+    },
+    {
+      "ts": "2026-10-17T12:00:01Z",
+      "action": "config",
+      "detail": "Configuration loaded"
+    }
+  ]
+}

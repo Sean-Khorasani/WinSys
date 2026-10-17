@@ -1,0 +1,31 @@
+{
+  "byState": {
+    "ESTABLISHED": 4,
+    "LISTENING": 3,
+    "TIME_WAIT": 1,
+    "CLOSED": 0
+  },
+  "byProto": {
+    "TCPv4": 6,
+    "TCPv6": 1,
+    "UDPv4": 1,
+    "UDPv6": 1
+  },
+  "byFamily": {
+    "IPv4": 7,
+    "IPv6": 2
+  },
+  "byProcess": {
+    "chrome.exe": 2,
+    "firefox.exe": 2,
+    "svchost.exe": 3,
+    "lsass.exe": 1,
+    "teams.exe": 1,
+    "dns.exe": 1
+  },
+  "listeners": {
+    "loopback": 1,
+    "lan": 0,
+    "wildcard": 2
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "countries": {
+    "US": 3,
+    "DE": 1,
+    "AU": 1
+  },
+  "asns": {
+    "AS15169": 2,
+    "AS13335": 1
+  },
+  "local": 2,
+  "unknown": 1,
+  "geoIpConfigured": false
+}

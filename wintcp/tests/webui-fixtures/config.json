@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "refreshSeconds": 2,
+  "desktopNotifications": false,
+  "theme": "system",
+  "rules": [],
+  "scripts": []
+}

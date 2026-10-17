@@ -40,28 +40,6 @@ constexpr size_t kIpv6AddrBytes = 16;
 // overruns in any case.
 constexpr size_t kUnknownStateChars = 48;
 
-// Printable rendering of an IPv4 address stored in network byte order.
-//
-// The body is wintcp::FormatIpv4Opt (Opt.cpp): digit-table emitters straight
-// into a wide buffer, instead of an InetNtopW call per cell. Every row has
-// two addresses, the view rebuilds on every refresh, and the address column
-// is one of the hottest cells in the table.
-//
-// A/B bench, same source: 7.91x (229 ns -> 29 ns). The differential tests
-// compare it against ::InetNtopW over the boundaries, the all-zero and
-// all-ones cases, and a sweep of the full 32-bit space at fixed stride.
-// The fallback string is kept for a caller that passes an unformattable
-// address, which the emitters cannot actually produce.
-std::wstring PrintIpv4(DWORD addrNetworkOrder) {
-    const unsigned char addr[4] = {
-        static_cast<unsigned char>((addrNetworkOrder >> 24) & 0xFF),
-        static_cast<unsigned char>((addrNetworkOrder >> 16) & 0xFF),
-        static_cast<unsigned char>((addrNetworkOrder >> 8) & 0xFF),
-        static_cast<unsigned char>(addrNetworkOrder & 0xFF),
-    };
-    return FormatIpv4Opt(addr);
-}
-
 // Printable rendering of a 16-byte IPv6 address, with the numeric scope id
 // appended for link-local addresses: "fe80::1%12". The append RULE lives in
 // Ipv6ScopeSuffix (Utils.h) because the socket scan must spell it identically:
@@ -148,6 +126,19 @@ void FinishRow(Connection& info) {
 }
 
 }  // namespace
+
+// Printable rendering of an IPv4 address stored in network byte order.
+// Declared in TcpTable.h so unit tests can call it directly.
+std::wstring PrintIpv4(DWORD addrNetworkOrder) {
+    const DWORD hostOrder = ::ntohl(addrNetworkOrder);
+    const unsigned char addr[4] = {
+        static_cast<unsigned char>((hostOrder >> 24) & 0xFF),
+        static_cast<unsigned char>((hostOrder >> 16) & 0xFF),
+        static_cast<unsigned char>((hostOrder >> 8) & 0xFF),
+        static_cast<unsigned char>(hostOrder & 0xFF),
+    };
+    return FormatIpv4Opt(addr);
+}
 
 std::wstring TcpStateToString(DWORD state) {
     switch (state) {

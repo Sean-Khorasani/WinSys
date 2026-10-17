@@ -27,6 +27,10 @@ void CheckT06Evaluator(TestResult& r);  // T06 new-peer evaluator (Monitors.h)
 void CheckT29Evaluator(TestResult& r);  // T29 high-RTT evaluator (Monitors.h)
 }  // namespace wintcp
 
+namespace wintcp {
+void CheckPrintIpv4(TestResult& r);  // IPv4 byte-order regression (BUG-1)
+}  // namespace wintcp
+
 #include "ColumnsWin.h"   // profile masks
 #include "FontCache.h"
 
@@ -905,6 +909,8 @@ void CheckSyntheticGeoIp(TestResult& r) {
                              "geoip.reject-node-count-0", "node_count = 0");
 }
 
+
+
 // The same tree walk, data section and metadata machinery, holding ASN records.
 // Deliberately separate from CheckSyntheticGeoIp rather than folded into it: the
 // two databases differ in RECORD SHAPE, and a check that cannot tell which kind
@@ -1156,6 +1162,34 @@ bool ValidUtf16(const std::wstring& s) {
 }
 
 }  // namespace
+
+// PrintIpv4 regression: the old code extracted octets MSB-first from a
+// network-order DWORD, which on little-endian reverses them (127.0.0.1
+// rendered as "1.0.0.127"). Differential test against InetNtopW.
+void CheckPrintIpv4(TestResult& r) {
+    // Network-order DWORD values (what MIB_TCPROW.dwLocalAddr etc. contain).
+    struct { DWORD netOrder; const wchar_t* expected; } cases[] = {
+        {0x0100007Fu, L"127.0.0.1"},      // loopback
+        {0x08080808u, L"8.8.8.8"},        // Google DNS
+        {0x01010101u, L"1.1.1.1"},        // Cloudflare
+        {0x0101A8C0u, L"192.168.1.1"},    // RFC1918
+        {0x00000000u, L"0.0.0.0"},        // all-zero
+        {0xFFFFFFFFu, L"255.255.255.255"}, // all-ones
+        {0x04030201u, L"1.2.3.4"},        // sequential
+        {0x01020304u, L"4.3.2.1"},        // reverse sequential
+        {0x22D8B85Du, L"93.184.216.34"},  // example.com
+    };
+    for (const auto& tc : cases) {
+        const std::wstring got = PrintIpv4(tc.netOrder);
+        wchar_t ref[64] = {};
+        DWORD netOrder = tc.netOrder;
+        ::InetNtopW(AF_INET, &netOrder, ref, 64);
+        const bool ok = (got == tc.expected) && (got == ref);
+        Check(r, "ipv4.print", ok,
+              ("got=" + WideToUtf8(got) + " want=" + WideToUtf8(tc.expected) +
+               " inet=" + WideToUtf8(ref)));
+    }
+}
 
 // ---- selftest --------------------------------------------------------------
 
@@ -9953,6 +9987,7 @@ static const unsigned char kClientHello[] = {
     CheckPresetFile(r);
     CheckIniFile(r);
     CheckDnsCache(r);
+    CheckPrintIpv4(r);
     CheckEmptyState(r);
     CheckProcessTree(r);
     CheckKillTree(r);

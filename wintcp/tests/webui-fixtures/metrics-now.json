@@ -1,0 +1,10 @@
+{
+  "cpu.total": 25.5,
+  "cpu.core.0": 30.0,
+  "mem.usedBytes": 8589934592,
+  "mem.totalBytes": 17179869184,
+  "disk.readBps": 1048576,
+  "disk.writeBps": 524288,
+  "net.rxBps": 2097152,
+  "net.txBps": 1048576
+}

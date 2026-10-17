@@ -1,0 +1,52 @@
+{
+  "series": [
+    {
+      "id": "cpu.total",
+      "label": "CPU Total",
+      "unit": "%",
+      "kind": "gauge"
+    },
+    {
+      "id": "cpu.core.0",
+      "label": "CPU Core 0",
+      "unit": "%",
+      "kind": "gauge"
+    },
+    {
+      "id": "mem.usedBytes",
+      "label": "Memory Used",
+      "unit": "bytes",
+      "kind": "gauge"
+    },
+    {
+      "id": "mem.totalBytes",
+      "label": "Memory Total",
+      "unit": "bytes",
+      "kind": "gauge"
+    },
+    {
+      "id": "disk.readBps",
+      "label": "Disk Read",
+      "unit": "bytes/s",
+      "kind": "gauge"
+    },
+    {
+      "id": "disk.writeBps",
+      "label": "Disk Write",
+      "unit": "bytes/s",
+      "kind": "gauge"
+    },
+    {
+      "id": "net.rxBps",
+      "label": "Network RX",
+      "unit": "bytes/s",
+      "kind": "gauge"
+    },
+    {
+      "id": "net.txBps",
+      "label": "Network TX",
+      "unit": "bytes/s",
+      "kind": "gauge"
+    }
+  ]
+}

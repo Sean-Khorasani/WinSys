@@ -1,0 +1,282 @@
+[
+  {
+    "id": "T01",
+    "name": "Template 1",
+    "description": "Automation template 1",
+    "category": "monitor",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T02",
+    "name": "Template 2",
+    "description": "Automation template 2",
+    "category": "monitor",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T03",
+    "name": "Template 3",
+    "description": "Automation template 3",
+    "category": "monitor",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T04",
+    "name": "Template 4",
+    "description": "Automation template 4",
+    "category": "monitor",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T05",
+    "name": "Template 5",
+    "description": "Automation template 5",
+    "category": "monitor",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T06",
+    "name": "Template 6",
+    "description": "Automation template 6",
+    "category": "monitor",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T07",
+    "name": "Template 7",
+    "description": "Automation template 7",
+    "category": "monitor",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T08",
+    "name": "Template 8",
+    "description": "Automation template 8",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T09",
+    "name": "Template 9",
+    "description": "Automation template 9",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T10",
+    "name": "Template 10",
+    "description": "Automation template 10",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T11",
+    "name": "Template 11",
+    "description": "Automation template 11",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T12",
+    "name": "Template 12",
+    "description": "Automation template 12",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T13",
+    "name": "Template 13",
+    "description": "Automation template 13",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T14",
+    "name": "Template 14",
+    "description": "Automation template 14",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T15",
+    "name": "Template 15",
+    "description": "Automation template 15",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T16",
+    "name": "Template 16",
+    "description": "Automation template 16",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T17",
+    "name": "Template 17",
+    "description": "Automation template 17",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T18",
+    "name": "Template 18",
+    "description": "Automation template 18",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T19",
+    "name": "Template 19",
+    "description": "Automation template 19",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T20",
+    "name": "Template 20",
+    "description": "Automation template 20",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T21",
+    "name": "Template 21",
+    "description": "Automation template 21",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T22",
+    "name": "Template 22",
+    "description": "Automation template 22",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T23",
+    "name": "Template 23",
+    "description": "Automation template 23",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T24",
+    "name": "Template 24",
+    "description": "Automation template 24",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T25",
+    "name": "Template 25",
+    "description": "Automation template 25",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T26",
+    "name": "Template 26",
+    "description": "Automation template 26",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T27",
+    "name": "Template 27",
+    "description": "Automation template 27",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T28",
+    "name": "Template 28",
+    "description": "Automation template 28",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T29",
+    "name": "Template 29",
+    "description": "Automation template 29",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T30",
+    "name": "Template 30",
+    "description": "Automation template 30",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T31",
+    "name": "Template 31",
+    "description": "Automation template 31",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T32",
+    "name": "Template 32",
+    "description": "Automation template 32",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T33",
+    "name": "Template 33",
+    "description": "Automation template 33",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T34",
+    "name": "Template 34",
+    "description": "Automation template 34",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T35",
+    "name": "Template 35",
+    "description": "Automation template 35",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T36",
+    "name": "Template 36",
+    "description": "Automation template 36",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T37",
+    "name": "Template 37",
+    "description": "Automation template 37",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T38",
+    "name": "Template 38",
+    "description": "Automation template 38",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T39",
+    "name": "Template 39",
+    "description": "Automation template 39",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  },
+  {
+    "id": "T40",
+    "name": "Template 40",
+    "description": "Automation template 40",
+    "category": "playbook",
+    "script": "# WinTCP Script v1\nlet r = list --format json --limit 25\nif r.exitCode == 0\n  print \"Captured ${r.stdout}\"\nelse\n  print \"CLI error: ${r.stderr}\"\nend\n"
+  }
+]

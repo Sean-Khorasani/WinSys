@@ -1,0 +1,115 @@
+{
+  "timestamp": "2026-10-17T12:00:00Z",
+  "rows": [
+    {
+      "id": 1,
+      "process": "chrome.exe",
+      "pid": 1234,
+      "proto": "TCPv4",
+      "local": "192.168.1.10:51752",
+      "remote": "142.250.80.46:443",
+      "state": "ESTABLISHED",
+      "socketRxBytes": 1024000,
+      "socketTxBytes": 512000,
+      "rttMs": 25
+    },
+    {
+      "id": 2,
+      "process": "chrome.exe",
+      "pid": 1234,
+      "proto": "TCPv4",
+      "local": "192.168.1.10:51753",
+      "remote": "142.250.80.46:443",
+      "state": "ESTABLISHED",
+      "socketRxBytes": 2048000,
+      "socketTxBytes": 1024000,
+      "rttMs": 30
+    },
+    {
+      "id": 3,
+      "process": "svchost.exe",
+      "pid": 888,
+      "proto": "TCPv4",
+      "local": "0.0.0.0:445",
+      "remote": "*:*",
+      "state": "LISTENING"
+    },
+    {
+      "id": 4,
+      "process": "svchost.exe",
+      "pid": 888,
+      "proto": "TCPv4",
+      "local": "0.0.0.0:135",
+      "remote": "*:*",
+      "state": "LISTENING"
+    },
+    {
+      "id": 5,
+      "process": "lsass.exe",
+      "pid": 676,
+      "proto": "TCPv4",
+      "local": "127.0.0.1:4588",
+      "remote": "*:*",
+      "state": "LISTENING"
+    },
+    {
+      "id": 6,
+      "process": "firefox.exe",
+      "pid": 5678,
+      "proto": "TCPv6",
+      "local": "[2001:db8::1]:51754",
+      "remote": "[2606:4700::1111]:443",
+      "state": "ESTABLISHED",
+      "socketRxBytes": 4096000,
+      "socketTxBytes": 2048000,
+      "rttMs": 15
+    },
+    {
+      "id": 7,
+      "process": "firefox.exe",
+      "pid": 5678,
+      "proto": "UDPv6",
+      "local": "[::]:5353",
+      "remote": "*:*",
+      "state": ""
+    },
+    {
+      "id": 8,
+      "process": "dns.exe",
+      "pid": 1234,
+      "proto": "UDPv4",
+      "local": "0.0.0.0:5353",
+      "remote": "*:*",
+      "state": ""
+    },
+    {
+      "id": 9,
+      "process": "teams.exe",
+      "pid": 9999,
+      "proto": "TCPv4",
+      "local": "192.168.1.10:51755",
+      "remote": "13.107.4.40:443",
+      "state": "ESTABLISHED",
+      "socketRxBytes": 8192000,
+      "socketTxBytes": 4096000,
+      "rttMs": 50
+    },
+    {
+      "id": 10,
+      "process": "svchost.exe",
+      "pid": 888,
+      "proto": "TCPv4",
+      "local": "192.168.1.10:49665",
+      "remote": "203.0.113.9:443",
+      "state": "TIME_WAIT",
+      "socketRxBytes": 102400,
+      "socketTxBytes": 51200
+    }
+  ],
+  "metadata": {
+    "samplerAvailable": true,
+    "trafficCoverage": 0.75,
+    "scanFailures": 0,
+    "timeouts": 0
+  }
+}

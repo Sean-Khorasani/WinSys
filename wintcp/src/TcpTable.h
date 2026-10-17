@@ -29,6 +29,9 @@ namespace wintcp {
 // Unknown values produce L"UNKNOWN(<n>)".
 std::wstring TcpStateToString(DWORD state);
 
+// Format a network-order IPv4 address as dotted decimal (e.g. L"127.0.0.1").
+std::wstring PrintIpv4(DWORD addrNetworkOrder);
+
 // Enumerate every TCP and UDP endpoint (IPv4 + IPv6) on the local machine
 // into 'out' (Connection rows: identity, ports, state, pid, display strings;
 // process/service/hostname fields are left empty for the caller to fill).
