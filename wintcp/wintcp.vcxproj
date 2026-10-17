@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{B4E8C9D2-3F5A-4B6C-8D7E-9F0A1B2C3D4E}</ProjectGuid>
+    <RootNamespace>wintcp</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>wintcp</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <PropertyGroup Label="UserMacros" />
+  <!-- IDE output goes under build\ide\<Platform>\<Config>\ so it does not clash with the project build's build\wintcp.exe -->
+  <!-- Use ProjectDir-relative paths so both .sln and direct .vcxproj builds land in the same folder. -->
+  <!-- GenerateManifest=false as a global property (not just Link metadata): the app manifest
+       is already embedded via wintcp.rc (RT_MANIFEST id 1). Letting the linker auto-generate
+       a second manifest causes CVT1100/LNK1123 duplicate-manifest failures. -->
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\ide\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\build\ide\$(Platform)\$(Configuration)\obj\</IntDir>
+    <GenerateManifest>false</GenerateManifest>
+  </PropertyGroup>
+  <!-- Console, not Windows, in all four configs below: the entry point is wmain
+       (see src/main.cpp), so <SubSystem>Windows</SubSystem> fails the link with
+       LNK2001 "unresolved external symbol WinMain" - and a WINDOWS exe hands an
+       interactive prompt back early, so CLI output lands on top of it. This must
+       stay in step with the project build's /SUBSYSTEM:CONSOLE. -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <!-- The CRT: /MT, stated explicitly. MSBuild's default is
+           MultiThreadedDLL (/MD), which produced a Release binary importing
+           MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll - absent on a
+           clean machine, and a loader-raised "code execution cannot proceed"
+           dialog before any WinTCP code runs. For a diagnostic tool copied onto
+           machines you do not administer, no prerequisite is the right call.
+           MultiThreadedDebug for the Debug configurations; writing
+           "MultiThreaded" flat would break them. -->
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <SupportJustMyCode>true</SupportJustMyCode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateManifest>false</GenerateManifest>
+      <EnableControlFlowGuard>true</EnableControlFlowGuard>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <!-- The CRT: /MT, stated explicitly. MSBuild's default is
+           MultiThreadedDLL (/MD), which produced a Release binary importing
+           MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll - absent on a
+           clean machine, and a loader-raised "code execution cannot proceed"
+           dialog before any WinTCP code runs. For a diagnostic tool copied onto
+           machines you do not administer, no prerequisite is the right call.
+           MultiThreadedDebug for the Debug configurations; writing
+           "MultiThreaded" flat would break them. -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus /Gy /GF /Os %(AdditionalOptions)</AdditionalOptions>
+      <SupportJustMyCode>true</SupportJustMyCode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateManifest>false</GenerateManifest>
+      <EnableControlFlowGuard>true</EnableControlFlowGuard>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <!-- The CRT: /MT, stated explicitly. MSBuild's default is
+           MultiThreadedDLL (/MD), which produced a Release binary importing
+           MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll - absent on a
+           clean machine, and a loader-raised "code execution cannot proceed"
+           dialog before any WinTCP code runs. For a diagnostic tool copied onto
+           machines you do not administer, no prerequisite is the right call.
+           MultiThreadedDebug for the Debug configurations; writing
+           "MultiThreaded" flat would break them. -->
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <SupportJustMyCode>true</SupportJustMyCode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateManifest>false</GenerateManifest>
+      <EnableControlFlowGuard>true</EnableControlFlowGuard>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <!-- The CRT: /MT, stated explicitly. MSBuild's default is
+           MultiThreadedDLL (/MD), which produced a Release binary importing
+           MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll - absent on a
+           clean machine, and a loader-raised "code execution cannot proceed"
+           dialog before any WinTCP code runs. For a diagnostic tool copied onto
+           machines you do not administer, no prerequisite is the right call.
+           MultiThreadedDebug for the Debug configurations; writing
+           "MultiThreaded" flat would break them. -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus /Gy /GF /Os %(AdditionalOptions)</AdditionalOptions>
+      <SupportJustMyCode>true</SupportJustMyCode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateManifest>false</GenerateManifest>
+      <EnableControlFlowGuard>true</EnableControlFlowGuard>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\MainWindow.cpp" />
+    <ClCompile Include="src\SocketTraffic.cpp" />
+    <ClCompile Include="src\TcpTable.cpp" />
+  <ClCompile Include="src\RowEnrichment.cpp" />
+  <ClCompile Include="src\ListViewColumns.cpp" />
+  <ClCompile Include="src\ConnectionsList.cpp" />
+  <ClCompile Include="src\ConnectionsListOwner.cpp" />
+  <ClCompile Include="src\AlertMonitor.cpp" />
+  <ClCompile Include="src\ViewPresets.cpp" />
+  <ClCompile Include="src\BookmarkActions.cpp" />
+  <ClCompile Include="src\TrayIcon.cpp" />
+    <ClCompile Include="src\ProcessInfo.cpp" />
+    <ClCompile Include="src\Utils.cpp" />
+    <ClCompile Include="src\ConnectionStore.cpp" />
+    <ClCompile Include="src\RefreshEngine.cpp" />
+    <ClCompile Include="src\Snapshot.cpp" />
+    <ClCompile Include="src\SysStats.cpp" />
+    <ClCompile Include="src\Commands.cpp" />
+    <ClCompile Include="src\CliCommands.cpp" />
+    <ClCompile Include="src\Script.cpp" />
+    <ClCompile Include="src\Monitors.cpp" />
+    <ClCompile Include="src\Notify.cpp" />
+    <ClCompile Include="src\ViewState.cpp" />
+    <ClCompile Include="src\DnsResolver.cpp" />
+    <ClCompile Include="src\DnsCache.cpp" />
+    <ClCompile Include="src\Settings.cpp" />
+    
+    
+    <ClCompile Include="src\BlockConn.cpp" />
+    <ClCompile Include="src\BlockedPeersDialog.cpp" />
+    <ClCompile Include="src\BookmarkFile.cpp" />
+    <ClCompile Include="src\PresetFile.cpp" />
+    <ClCompile Include="src\IniFile.cpp" />
+    <ClCompile Include="src\EmptyStateActions.cpp" />
+    <ClCompile Include="src\ProcessTree.cpp" />
+    <ClCompile Include="src\ProcessTreeView.cpp" />
+    <ClCompile Include="src\RowAccessible.cpp" />
+    <ClCompile Include="src\Sha256.cpp" />
+    <ClCompile Include="src\ExposureScore.cpp" />
+    <ClInclude Include="src\ExposureScore.h" />
+    <ClInclude Include="src\Sha256.h" />
+    <ClInclude Include="src\ProcessTree.h" />
+    <ClInclude Include="src\ProcessTreeView.h" />
+    <ClInclude Include="src\RowAccessible.h" />
+    <ClInclude Include="src\Theme.h" />
+    <ClInclude Include="src\EmptyStateActions.h" />
+    <ClInclude Include="src\IniFile.h" />
+    <ClInclude Include="src\PresetFile.h" />
+    <ClInclude Include="src\BookmarkFile.h" />
+    <ClInclude Include="src\BlockedPeersDialog.h" />
+    <ClCompile Include="src\GeoIp.cpp" />
+    <ClCompile Include="src\Elevate.cpp" />
+    <ClCompile Include="src\Pcapng.cpp" />
+    
+    
+    <ClCompile Include="src\Presets.cpp" />
+    <ClCompile Include="src\Bookmarks.cpp" />
+    <ClCompile Include="src\Grouping.cpp" />
+    <ClCompile Include="src\Freeze.cpp" />
+    <ClCompile Include="src\BuildInfo.cpp" />
+    <ClCompile Include="src\PromptDialog.cpp" />
+    <ClCompile Include="src\ChartExport.cpp" />
+    <ClCompile Include="src\ChangeLogWindow.cpp" />
+    <!-- These four were implemented and listed in the project build and
+         CMakeLists.txt but were NEVER added here, so the .vcxproj failed to
+         LINK with 13 unresolved externals - including the DetailsDialog
+         destructor and the whole type-to-jump and capture modules. Found by
+         building all three paths rather than only the .bat. -->
+    <ClCompile Include="src\DetailsDialog.cpp" />
+    <ClCompile Include="src\DetailModel.cpp" />
+    <ClCompile Include="src\TypeToJump.cpp" />
+    <ClCompile Include="src\StreamCapture.cpp" />
+    <ClCompile Include="src\TlsDecode.cpp" />
+    <ClCompile Include="src\Alerts.cpp" />
+    <ClCompile Include="src\TcpReasm.cpp" />
+    <ClCompile Include="src\Cli.cpp" />
+    <ClCompile Include="src\EtwTraffic.cpp" />
+    <ClCompile Include="src\ProcStats.cpp" />
+    <ClCompile Include="src\ChartsWindow.cpp" />
+  <ClCompile Include="src\FontCache.cpp" />
+    <ClCompile Include="src\CrashDump.cpp" />
+    <ClCompile Include="src\WinCaps.cpp" />
+    <ClCompile Include="src\Opt.cpp" />
+    <ClCompile Include="src\WebUi.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\MainWindow.h" />
+    <ClInclude Include="src\TcpTable.h" />
+    <ClInclude Include="src\ProcessInfo.h" />
+    <ClInclude Include="src\Utils.h" />
+    <ClInclude Include="src\Connection.h" />
+    <ClInclude Include="src\Columns.h" />
+    <ClInclude Include="src\Version.h" />
+    <ClInclude Include="src\EtwTrafficTypes.h" />
+    <ClInclude Include="src\ConnectionStore.h" />
+    <ClInclude Include="src\RefreshEngine.h" />
+    <ClInclude Include="src\Snapshot.h" />
+    <ClInclude Include="src\SysStats.h" />
+    <ClInclude Include="src\Commands.h" />
+    <ClInclude Include="src\CliCommands.h" />
+    <ClInclude Include="src\Monitors.h" />
+    <ClInclude Include="src\ViewState.h" />
+    <ClInclude Include="src\DnsResolver.h" />
+    <ClInclude Include="src\DnsCache.h" />
+    <ClInclude Include="src\Settings.h" />
+    
+    
+    <ClInclude Include="src\BlockConn.h" />
+    <ClInclude Include="src\GeoIp.h" />
+    <ClInclude Include="src\Elevate.h" />
+    <ClInclude Include="src\Pcapng.h" />
+    
+    
+    <ClInclude Include="src\Presets.h" />
+    <ClInclude Include="src\Bookmarks.h" />
+    <ClInclude Include="src\Grouping.h" />
+    <ClInclude Include="src\Freeze.h" />
+    <ClInclude Include="src\BuildInfo.h" />
+    <ClInclude Include="src\PromptDialog.h" />
+    <ClInclude Include="src\ChartExport.h" />
+    <ClInclude Include="src\ChangeLogWindow.h" />
+    <ClInclude Include="src\TcpReasm.h" />
+    <ClInclude Include="src\TlsDecode.h" />
+    <ClInclude Include="src\DetailModel.h" />
+    <ClInclude Include="src\Cli.h" />
+    <ClInclude Include="src\EtwTraffic.h" />
+    <ClInclude Include="src\ProcStats.h" />
+    <ClInclude Include="src\ChartsWindow.h" />
+  <ClInclude Include="src\FontCache.h" />
+    <ClInclude Include="src\CrashDump.h" />
+    <ClInclude Include="src\WinCaps.h" />
+    <ClInclude Include="src\Opt.h" />
+    <ClInclude Include="src\WebUi.h" />
+    <ClInclude Include="src\resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\wintcp.rc" />
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <PostBuildEvent>
+      <Command>if not exist "$(OutDir)webui" md "$(OutDir)webui" &amp; xcopy /E /I /Y "$(ProjectDir)webui\*" "$(OutDir)webui\" &gt;nul</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <Image Include="res\app.ico" />
+    <None Include="res\wintcp.manifest" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>
