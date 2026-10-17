@@ -1,0 +1,208 @@
+// wintcp.rc
+// Resources: app icon, embedded manifest, main menu, version info.
+
+#include <windows.h>
+#include "resource.h"
+// Single source of truth for the version. rc.exe preprocesses plain text,
+// so the macros below come straight from Version.h - the .rc cannot drift
+// from the About box any more.
+#include "Version.h"
+
+// Icon (res/app.ico). Fallback in code handles a missing icon gracefully,
+// but the file is shipped with the project.
+IDI_APP ICON "..\\res\\app.ico"
+
+// Embedded application manifest (ComCtl32 v6 visual styles, DPI aware).
+// CREATEPROCESS_MANIFEST_RESOURCE_ID (1) + RT_MANIFEST (24).
+1 RT_MANIFEST "..\\res\\wintcp.manifest"
+
+// Main menu (also mirrored by toolbar buttons / context menu in code).
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Refresh\tF5",        IDM_FILE_REFRESH
+        MENUITEM "&Export...\tCtrl+E",   IDM_FILE_EXPORT
+        MENUITEM "&Log changes to file...",      IDM_FILE_CHANGELOG
+        MENUITEM "Change &log window...",  IDM_FILE_CHANGELOG_WIN
+        MENUITEM SEPARATOR
+        MENUITEM "&Save view as preset...\tCtrl+S", IDM_FILE_PRESET_SAVE
+        MENUITEM "&Load preset...",      IDM_FILE_PRESET_LOAD
+        MENUITEM "Delete &preset...",    IDM_FILE_PRESET_DELETE
+        MENUITEM SEPARATOR
+        MENUITEM "&Bookmarks...",        IDM_FILE_BOOKMARKS
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",                IDM_FILE_EXIT
+    END
+    POPUP "&Filter"
+    BEGIN
+        MENUITEM "&All connections",   IDM_QFILTER_ALL
+        MENUITEM "&TCP",              IDM_QFILTER_TCP
+        MENUITEM "&UDP",              IDM_QFILTER_UDP
+        MENUITEM "&Listeners",        IDM_QFILTER_LISTEN
+        MENUITEM "&Established",      IDM_QFILTER_ESTAB
+        MENUITEM "M&ine",             IDM_QFILTER_MINE
+        MENUITEM SEPARATOR
+        ; G29: this never opened a dialog - it just focuses the filter box -
+        ; so the ellipsis (which promises one) and the F3 tag (which the
+        ; accelerator table never owned) are gone. F3 stays free for find-next.
+        MENUITEM "Focus custom &filter",    IDM_QFILTER_CLEAR
+    END
+    POPUP "&View"
+    BEGIN
+        MENUITEM "&Auto-refresh",        IDM_VIEW_AUTOREFRESH
+        MENUITEM "R&esolve hostnames",   IDM_VIEW_RESOLVE
+        MENUITEM "Alwa&ys on top",       IDM_VIEW_TOPMOST
+        MENUITEM "Tray &icon (minimize to tray)", IDM_VIEW_TRAY
+        MENUITEM "Per-PID &traffic counters (ETW, admin)", IDM_VIEW_TRAFFIC
+        MENUITEM "&GeoIP database (.mmdb)...", IDM_VIEW_GEOIP
+        MENUITEM "Blocked &peers...",    IDM_VIEW_BLOCKED
+        MENUITEM "Ta&ble diagnostics...", IDM_VIEW_FIX_EMPTY
+        ; G28: a mangled column layout (mask/order/widths/sort/filter all
+        ; persist) recovers here instead of via the registry.
+        MENUITEM "&Reset columns && layout", IDM_VIEW_RESET_LAYOUT
+    MENUITEM "ASN &database (.mmdb)...", IDM_VIEW_ASNIP
+        MENUITEM "Performa&nce graphs...", IDM_VIEW_CHARTS
+        MENUITEM SEPARATOR
+        MENUITEM "&Preserve selection on refresh", IDM_VIEW_PRESERVE_SEL
+        MENUITEM SEPARATOR
+        MENUITEM "&Freeze view\tF6",     IDM_VIEW_FREEZE
+        MENUITEM "&Group rows by process\tF7", IDM_VIEW_GROUP
+        ; Roadmap: the process tree is a MODE of the main window (a tree
+        ; control where the list view is), not a dialog - hence no ellipsis -
+        ; and like Group/Freeze it carries a check mark while it is on.
+        MENUITEM "Process &tree", IDM_VIEW_PROCESSTREE
+        POPUP "Column &profile"
+        BEGIN
+            MENUITEM "&Default",         IDM_PROFILE_DEFAULT
+            MENUITEM "Mi&nimal",         IDM_PROFILE_MINIMAL
+            MENUITEM "&Network",         IDM_PROFILE_NETWORK
+            MENUITEM "&Security",        IDM_PROFILE_SECURITY
+            MENUITEM "Per&formance",     IDM_PROFILE_PERFORMANCE
+            MENUITEM "Show &diagnostics", IDM_PROFILE_DIAGNOSTICS
+        END
+        POPUP "Col&umns"
+        BEGIN
+            MENUITEM "&Process",          IDM_COL_PROCESS
+            MENUITEM "&CPU usage",        IDM_COL_CPU
+            MENUITEM "&Traffic",          IDM_COL_TRAFFIC
+            MENUITEM "Pr&otocol",         IDM_COL_PROTO
+            MENUITEM "&Local address",    IDM_COL_LOCAL
+            MENUITEM "Local p&ort",       IDM_COL_LPORT
+            MENUITEM "&Remote address",   IDM_COL_REMOTE
+            MENUITEM "Remote por&t",      IDM_COL_RPORT
+            MENUITEM "St&ate",            IDM_COL_STATE
+            MENUITEM "P&ID",              IDM_COL_PID
+            MENUITEM "&Service",          IDM_COL_SERVICE
+            MENUITEM "Host&name",         IDM_COL_HOST
+            MENUITEM "Pat&h",             IDM_COL_PATH
+            MENUITEM SEPARATOR
+            MENUITEM "D&uration",         IDM_COL_DURATION
+            MENUITEM "Speed",             IDM_COL_BANDWIDTH
+            MENUITEM "Process rate",        IDM_COL_GROUPRATE
+            MENUITEM SEPARATOR
+            // The four `ss -i` columns, in the order `ss -i` prints them, and
+            // in the same adjacency kDisplayOrder uses: a current RTT beside
+            // its best-ever value beside the window it is measured against is
+            // the relationship a reader is looking for.
+            MENUITEM "RTT",               IDM_COL_RTT
+            MENUITEM "Min RTT",           IDM_COL_MINRTT
+            MENUITEM "C&wnd",             IDM_COL_CWND
+            MENUITEM "Retrans",           IDM_COL_RETRANS
+            MENUITEM SEPARATOR
+            MENUITEM "&TLS",              IDM_COL_TLS
+            MENUITEM "C&ountry",          IDM_COL_COUNTRY
+            MENUITEM "&Bookmarks",        IDM_COL_PINNED
+            MENUITEM "Note",              IDM_COL_NOTE
+            MENUITEM SEPARATOR
+            MENUITEM "Par&ent process",   IDM_COL_PPID
+            MENUITEM "&Integrity",        IDM_COL_INTEGRITY
+            MENUITEM "&Signature",        IDM_COL_SIGNATURE
+            MENUITEM SEPARATOR
+            MENUITEM "&Memory",           IDM_COL_MEM
+            MENUITEM "Di&sk I/O",         IDM_COL_DISK
+            MENUITEM "&Received (net)",   IDM_COL_RX
+            MENUITEM "Sent (&net)",       IDM_COL_TX
+            MENUITEM "Net &total",        IDM_COL_NETTOTAL
+        END
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Copy selected\tCtrl+C", IDM_CTX_COPY_SELECTED
+        MENUITEM "Copy &all",              IDM_CTX_COPY_ALL
+        MENUITEM SEPARATOR
+        MENUITEM "Select &all\tCtrl+A",    IDM_EDIT_SELECTALL
+        MENUITEM "&Focus filter\tCtrl+F",  IDM_EDIT_FOCUSFILTER
+        MENUITEM "Clear &filter\tEsc",     IDM_EDIT_CLEARFILTER
+    END
+    POPUP "P&rocess"
+    BEGIN
+        MENUITEM "&Block connection",            IDM_BLOCK_CONNECTION
+        ; G19: Del closes the SELECTED CONNECTION (the row's own action);
+        ; ending the process behind it moved to Ctrl+Del, which has to be
+        ; deliberate - a stray keypress must not end a process.
+        MENUITEM "&Graceful close (WM_CLOSE)\tCtrl+Del", IDM_CTX_KILL_PROCESS
+        MENUITEM "Close &connection\tDel",            IDM_CTX_CLOSE_CONNECTION
+        MENUITEM SEPARATOR
+        MENUITEM "&Open file location",          IDM_OPEN_FILE_LOCATION
+        ; NOTE: no backticks in this file's comments - rc.exe rejects 0x60 as
+        ; an unknown character and fails the whole resource compile.
+        MENUITEM SEPARATOR
+        MENUITEM "&Details...",                  IDM_CTX_DETAILS
+        MENUITEM SEPARATOR
+        MENUITEM "&Bookmark this connection",    IDM_CTX_BOOKMARK
+        MENUITEM "&Edit bookmark note...",       IDM_CTX_NOTE
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&Keyboard shortcuts\tF1",  IDM_HELP_SHORTCUTS
+        MENUITEM SEPARATOR
+        MENUITEM "&About WinTCP...",         IDM_HELP_ABOUT
+    END
+END
+
+IDR_ACCEL ACCELERATORS
+BEGIN
+    VK_F5,      IDM_FILE_REFRESH, VIRTKEY
+    VK_F1,      IDM_HELP_SHORTCUTS, VIRTKEY ; 7.6 shortcut sheet
+    VK_F6,      IDM_VIEW_FREEZE,  VIRTKEY   ; 5.5 pause/freeze
+    VK_F7,      IDM_VIEW_GROUP,   VIRTKEY   ; 5.1 group by process
+    "C",        IDM_CTX_COPY_SELECTED, VIRTKEY, CONTROL
+    "S",        IDM_FILE_PRESET_SAVE, VIRTKEY, CONTROL ; 9.4.8: menu promised Ctrl+S, accel was missing
+    "A",        IDM_EDIT_SELECTALL,     VIRTKEY, CONTROL
+    "F",        IDM_EDIT_FOCUSFILTER,   VIRTKEY, CONTROL
+    "E",        IDM_FILE_EXPORT,        VIRTKEY, CONTROL
+     VK_DELETE,  IDM_CTX_CLOSE_CONNECTION,   VIRTKEY ; G19: Del closes the selected connection (the row's own action), not the process behind it - killing a process from an accidental keypress is the one irreversible thing here, so it moved to Ctrl+Del, which has to be deliberate.
+     VK_DELETE,  IDM_CTX_KILL_PROCESS,       VIRTKEY, CONTROL ; G19: Ctrl+Del kills the process.
+     VK_ESCAPE,  IDM_EDIT_CLEARFILTER,   VIRTKEY
+     VK_MULTIPLY,IDM_CTX_BOOKMARK,       VIRTKEY ; 9.4.8: asterisk (*) toggles a bookmark on the selected row (5.3)
+END
+
+// Version information shown in Explorer -> Properties -> Details.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     WINTCP_VERSION_MAJOR,WINTCP_VERSION_MINOR,WINTCP_VERSION_PATCH,0
+ PRODUCTVERSION  WINTCP_VERSION_MAJOR,WINTCP_VERSION_MINOR,WINTCP_VERSION_PATCH,0
+ FILEFLAGSMASK   0x3fL
+ FILEFLAGS       0x0L
+ FILEOS          VOS_NT_WINDOWS32
+ FILETYPE        VFT_APP
+ FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "WinTCP"
+            VALUE "FileDescription",  "WinTCP - list all TCP connections with their processes"
+            VALUE "FileVersion",      WINTCP_VERSION_STRING
+            VALUE "InternalName",     "wintcp"
+            VALUE "OriginalFilename", "wintcp.exe"
+            VALUE "ProductName",      "WinTCP"
+            VALUE "ProductVersion",   WINTCP_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
