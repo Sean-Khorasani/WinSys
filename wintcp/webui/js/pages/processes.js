@@ -1,6 +1,6 @@
 // pages/processes.js - Processes page
 import { h } from "../h.js";
-import { table, thead, tbody, tr, th, td } from "../ui/table.js";
+import { createVirtualTable } from "../ui/virtualtable.js";
 
 export async function renderProcesses(page, store) {
   page.innerHTML = "";
@@ -18,17 +18,28 @@ export async function renderProcesses(page, store) {
         ),
         h("input", { class: "input", type: "search", placeholder: "Filter processes...", style: "max-width: 20rem" }),
       ),
-      h("div", { class: "table-container" },
-        table({},
-          thead({},
-            tr({},
-              th({}, "Name"), th({}, "PID"), th({}, "CPU %"),
-              th({}, "Memory"), th({}, "I/O"), th({}, "Connections"),
-            ),
-          ),
-          tbody({ id: "proc-rows" }),
-        ),
-      ),
+      h("div", { id: "proc-table-container" }),
     ),
   );
+
+  const container = page.querySelector("#proc-table-container");
+  const conns = store.get().connections || [];
+  const byPid = {};
+  for (const c of conns) {
+    if (!byPid[c.pid]) byPid[c.pid] = { pid: c.pid, name: c.process || "-", connections: 0 };
+    byPid[c.pid].connections++;
+  }
+  const rows = Object.values(byPid);
+
+  const vt = createVirtualTable(container, {
+    columns: [
+      { key: "name", label: "Name", width: 2 },
+      { key: "pid", label: "PID", width: 1 },
+      { key: "connections", label: "Connections", width: 1 },
+    ],
+    rowHeight: 36,
+    height: 500,
+  });
+
+  vt.updateRows(rows);
 }

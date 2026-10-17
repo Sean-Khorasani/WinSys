@@ -252,3 +252,17 @@ There is deliberately no hex window. `HexTextWindow.*` was the view behind the G
 | `d2probe.cpp` | the measurement probe behind `kProbeWorkers` - **not a gate** |
 
 `wintcp-dev.exe` links the *same* product sources as `wintcp.exe`, minus `main.cpp`. That is the point: a test that exercised a copy of the logic would prove nothing.
+
+## Web UI metrics thread
+
+The Web UI metrics collector (`WebMetrics.h/.cpp`) runs on a background
+`CreateThread` worker (not `std::thread`, per the code comment). It owns its
+own PDH query and sampler objects, and stores samples in bounded ring buffers.
+The main thread reads snapshots under a short lock. The sequential HTTP server
+is never blocked by the sampler.
+
+## Web UI static handler
+
+`WebStatic.h/.cpp` is the safe static file handler. It validates paths against
+an allow-list of prefixes and extensions, rejects path traversal, alternate
+data streams, and reserved device names, and enforces a 1 MiB per-file cap.

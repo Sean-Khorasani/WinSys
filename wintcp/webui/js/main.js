@@ -15,6 +15,7 @@ import { renderMap } from "./pages/map.js";
 import { renderAutomations } from "./pages/automations.js";
 import { renderSystem } from "./pages/system.js";
 import { renderSettings } from "./pages/settings.js";
+import { createCommandPalette } from "./ui/commandpalette.js";
 
 // Global store
 export const store = createStore({
@@ -208,6 +209,18 @@ function init() {
 
   // Start router
   startRouter();
+
+  // Command palette
+  const palette = createCommandPalette([
+    { label: "Go to Overview", icon: "home", handler: () => navigate("/") },
+    { label: "Go to Performance", icon: "activity", handler: () => navigate("/performance") },
+    { label: "Go to Processes", icon: "layers", handler: () => navigate("/processes") },
+    { label: "Go to Network", icon: "network", handler: () => navigate("/network") },
+    { label: "Go to Map", icon: "globe", handler: () => navigate("/map") },
+    { label: "Go to Automations", icon: "zap", handler: () => navigate("/automations") },
+    { label: "Go to System", icon: "server", handler: () => navigate("/system") },
+    { label: "Go to Settings", icon: "settings", handler: () => navigate("/settings") },
+  ]);
 
   // Start poller
   const poller = createPoller(async () => {

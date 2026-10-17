@@ -314,3 +314,18 @@ Released under the **Apache License, Version 2.0**. The full text is in [LICENSE
 ## Acknowledgements
 
 WinTCP follows the interface ideas of Sysinternals TCPView (and its `tcpvcon` command-line companion) and NirSoft CurrPorts. GeoIP lookups read the MaxMind DB (`.mmdb`) format.
+
+## Web UI v2
+
+The Web UI has been upgraded to a multi-page control room with:
+
+- Collapsible grouped sidebar (Monitor, Respond, System)
+- Top bar with breadcrumb, command palette (Ctrl+K), theme and density toggles
+- Pages: Overview, Performance, Processes, Network, Map, Automations, System, Settings
+- Light and dark themes with shadcn design tokens
+- Real-time charts (uPlot + ECharts)
+- Virtualised tables handling 10,000+ rows
+- Metrics collector with PDH (CPU, memory, disk, network, GPU)
+
+See [docs/webui.md](docs/webui.md) for the full guide and
+[docs/webui-design.md](docs/webui-design.md) for the design system.

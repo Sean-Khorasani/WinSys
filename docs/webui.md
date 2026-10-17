@@ -221,3 +221,36 @@ This is a local management interface, not a LAN service. Do not expose its port 
 - The batch manager backgrounds the HTTP server but does not install a native Windows service or startup entry. The CLI script adapter uses the sibling `wintcp.exe`; copying the Web UI executable to another folder without that CLI sibling disables script execution, while the separate `wintcp-gui.exe` remains independent.
 
 See [`webui-design.md`](webui-design.md) for the design system, component catalogue, and extension guide, and [CLI reference](cli.md) for command syntax.
+
+## New API endpoints (v2)
+
+The following read-only endpoints were added in the v2 upgrade:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | /api/capabilities | Elevation, PDH, GPU, GeoIP, ETW, traffic scan, DNS |
+| GET | /api/system/info | OS, CPU, memory, volumes, adapters |
+| GET | /api/metrics/catalog | Series ids, labels, units, kinds |
+| GET | /api/metrics/now | Latest metric values |
+| GET | /api/metrics/history?since=<unix>&max=<n> | Ring buffer history |
+| GET | /api/processes | Process list with connection counts |
+| GET | /api/network/summary | Counts by state, protocol, family, process |
+| GET | /api/geo/summary | Country and ASN aggregates |
+
+All endpoints return JSON with `Cache-Control: no-store`. Unknown values
+are `null` plus a `reason` field — never zero.
+
+## Metrics collector
+
+`WebMetrics.h/.cpp` runs on a background `CreateThread` (not `std::thread`,
+per the code comment in `WebUi.cpp`). It owns its own PDH query and samplers.
+Samples at 1 Hz while the UI polls, drops to idle after 60 s. Ring buffers:
+tier A 1 s x 900 points (15 min), tier B 10 s x 2160 points (6 h).
+
+## Static asset handler
+
+`WebStatic.h/.cpp` serves files from `wintcp/webui/` with an allow-list of
+prefixes (`/js/`, `/css/`, `/vendor/`, `/fonts/`, `/data/`, `/img/`) and
+extensions (`.js`, `.mjs`, `.css`, `.json`, `.svg`, `.woff2`, `.png`, `.ico`,
+`.txt`). Path traversal, alternate data streams, and reserved device names
+are rejected. Per-file cap 1 MiB.

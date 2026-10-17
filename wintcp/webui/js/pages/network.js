@@ -1,7 +1,7 @@
 // pages/network.js - Network page
 import { h } from "../h.js";
 import { badge } from "../ui/badge.js";
-import { table, thead, tbody, tr, th, td } from "../ui/table.js";
+import { createVirtualTable } from "../ui/virtualtable.js";
 
 export async function renderNetwork(page, store) {
   page.innerHTML = "";
@@ -16,31 +16,24 @@ export async function renderNetwork(page, store) {
       h("button", { class: "tab", role: "tab" }, "Blocked"),
       h("button", { class: "tab", role: "tab" }, "Flows"),
     ),
-    h("div", { class: "table-container", style: "margin-top: 1rem" },
-      table({},
-        thead({},
-          tr({},
-            th({}, "Process"), th({}, "PID"), th({}, "Proto"),
-            th({}, "Local"), th({}, "Remote"), th({}, "State"),
-          ),
-        ),
-        tbody({ id: "network-rows" }),
-      ),
-    ),
+    h("div", { id: "network-table-container", style: "margin-top: 1rem;" }),
   );
 
-  const tbodyEl = page.querySelector("#network-rows");
+  const container = page.querySelector("#network-table-container");
   const conns = store.get().connections || [];
-  for (const c of conns.slice(0, 250)) {
-    tbodyEl.append(
-      tr({},
-        td({}, c.process || "-"),
-        td({ class: "num" }, String(c.pid)),
-        td({}, c.proto),
-        td({ class: "mono" }, c.local),
-        td({ class: "mono" }, c.remote),
-        td({}, badge({ variant: c.state === "ESTABLISHED" ? "success" : c.state === "LISTENING" ? "info" : "secondary" }, c.state)),
-      ),
-    );
-  }
+
+  const vt = createVirtualTable(container, {
+    columns: [
+      { key: "process", label: "Process", width: 2 },
+      { key: "pid", label: "PID", width: 0.8 },
+      { key: "proto", label: "Proto", width: 0.8 },
+      { key: "local", label: "Local", width: 1.5 },
+      { key: "remote", label: "Remote", width: 1.5 },
+      { key: "state", label: "State", width: 1 },
+    ],
+    rowHeight: 36,
+    height: 500,
+  });
+
+  vt.updateRows(conns);
 }
