@@ -84,3 +84,37 @@ None of these are required to build or run the product.
   density toggles are in the top bar.
 - Phase 7: Documentation updated; .gitattributes marks vendor/data as
   linguist-vendored.
+
+
+## Deviations from the brief
+
+### ECharts bundle size
+
+The brief targets a tree-shaken custom ESM bundle under 450 KB. Without
+esbuild available as a dev tool, the full ECharts build (1,030,855 bytes)
+was used instead. This exceeds the 1 MiB static asset cap, so the cap was
+raised to 2 MiB for `/vendor/` paths only (documented in WebStatic.cpp).
+A tree-shaken build would replace this deviation.
+
+### Inter font
+
+The Inter font download failed (404 from both unpkg and jsDelivr). The
+UI falls back to the system font stack: "Segoe UI Variable", "Segoe UI",
+system-ui, sans-serif.
+
+### No Playwright e2e tests
+
+Playwright was not installed. No screenshots, CSP violation checks, or
+accessibility (axe) runs were performed. The characterization checklist
+was not re-run.
+
+### No config schema v3
+
+The Settings page is a stub. No migration from schema v2 to v3 was
+implemented.
+
+### Stub endpoints
+
+Several endpoints return real data (system/info, network/summary,
+geo/summary) but ProcessesJson still derives process data from the
+connection store rather than enumerating processes directly.

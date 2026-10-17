@@ -917,18 +917,22 @@ std::string ProcessesJson(ServerContext& context) {
     std::ostringstream out;
     out << "{\"processes\":[";
     bool first = true;
+    std::map<DWORD, int> connCount;
+    std::map<DWORD, int> listenCount;
     for (size_t i = 0; i < context.store.View().size(); ++i) {
         const Connection* row = context.store.ViewRow(i);
         if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
         if (row->identity.pid == 0) continue;
+        connCount[row->identity.pid]++;
+        if (row->identity.protocol == IPPROTO_TCP && row->keys.stateLabel == L"LISTENING")
+            listenCount[row->identity.pid]++;
+    }
+    for (const auto& kv : connCount) {
         if (!first) out << ",";
         first = false;
-        out << "{\"pid\":" << row->identity.pid
-            << ",\"name\":" << JsonQuote(WideToUtf8(row->display.processName))
-            << ",\"cpu\":null,\"ws\":null,\"private\":null,\"ioRead\":null,\"ioWrite\":null"
-            << ",\"connections\":1,\"listeners\":0,\"threads\":null,\"handles\":null"
-            << ",\"startTime\":null,\"path\":" << JsonQuote(WideToUtf8(row->display.processPath))
-            << ",\"integrity\":null,\"signature\":null,\"service\":null,\"user\":null}";
+        out << "{\"pid\":" << kv.first
+            << ",\"connections\":" << kv.second
+            << ",\"listeners\":" << listenCount[kv.first] << "}";
     }
     out << "]}";
     return out.str();
