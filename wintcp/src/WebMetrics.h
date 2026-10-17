@@ -132,15 +132,25 @@ public:
     // Check if the collector is running.
     bool IsRunning() const { return running_; }
 
+    // True when the per-core wildcard counter was added successfully. Decided
+    // once in Start(), before the sampler thread exists, so reading it later is
+    // safe. Unlike inspecting the latest sample it does not report "unavailable"
+    // merely because the first sample has not landed yet - which made
+    // /api/capabilities flip-flop on the first poll.
+    bool PerCoreAvailable() const { return pdhCpuCore_ != nullptr; }
+
     // Force a re-enumeration of PDH instances (e.g. after a device change).
+    // Thread-safe: it only raises a flag. The sampler thread owns the counter
+    // handles and performs the re-enumeration between samples.
     void Reenumerate();
 
     // Set the idle timeout (default 60 s). After this many milliseconds
-    // without a GetLatest call, the sampler drops to idle cadence.
-    void SetIdleTimeoutMs(uint64_t ms) { idleTimeoutMs_ = ms; }
+    // without a GetLatest/GetHistory call, the sampler drops from 1 Hz to
+    // 0.1 Hz. Set to 0 to always sample at full rate.
+    void SetIdleTimeoutMs(uint64_t ms) { idleTimeoutMs_.store(ms); }
 
-    // Set whether to keep collecting while idle (default false).
-    void SetKeepCollectingWhileIdle(bool keep) { keepCollectingWhileIdle_ = keep; }
+    // Set whether to keep sampling at full rate while idle (default false).
+    void SetKeepCollectingWhileIdle(bool keep) { keepCollectingWhileIdle_.store(keep); }
 
 private:
     static DWORD WINAPI ThreadProc(LPVOID param);
@@ -170,6 +180,11 @@ private:
     HANDLE thread_ = nullptr;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopRequested_{false};
+    // Set by Reenumerate() from any thread; acted on by the sampler thread. The
+    // counter vectors are owned exclusively by the sampler thread, so an
+    // external caller must never mutate them itself - doing so raced with
+    // CollectSample() on the very same vectors.
+    std::atomic<bool> reenumerateRequested_{false};
 
     // PDH query handle (owned by the sampler thread)
     PDH_HQUERY pdhQuery_ = nullptr;
@@ -177,18 +192,17 @@ private:
     // Ring buffer: tier A (1 s x 900)
     MetricsRingBuffer ring_;
 
-    // Previous sample for rate calculation
-    mutable std::mutex prevMutex_;
-    MetricsSample prevSample_;
-    bool havePrev_ = false;
-
-    // Re-enumeration timer
+    // Re-enumeration timer (sampler thread only)
     uint64_t lastReenumerateMs_ = 0;
+    // Set after a re-enumeration so the first sample is discarded: removing and
+    // re-adding a counter throws away PDH's rate baseline, and the sample taken
+    // immediately afterwards is not a real reading.
+    bool skipNextSample_ = false;
 
-    // Idle detection
-    mutable uint64_t lastAccessMs_ = 0;
-    uint64_t idleTimeoutMs_ = 60000;
-    bool keepCollectingWhileIdle_ = false;
+    // Idle detection. Written by request threads, read by the sampler thread.
+    mutable std::atomic<uint64_t> lastAccessMs_{0};
+    std::atomic<uint64_t> idleTimeoutMs_{60000};
+    std::atomic<bool> keepCollectingWhileIdle_{false};
 };
 
 }  // namespace wintcp

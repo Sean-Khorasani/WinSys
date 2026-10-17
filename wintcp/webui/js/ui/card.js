@@ -25,3 +25,12 @@ export function cardContent(props = {}, ...children) {
 export function cardFooter(props = {}, ...children) {
   return h("div", { class: "card-footer", ...props }, ...children);
 }
+
+// Empty-state block. Used instead of an empty container so "nothing here" is
+// never mistaken for a failed load.
+export function emptyState(props = {}, title = "Nothing to show", detail = "") {
+  return h("div", { class: "empty-state", ...props },
+    h("p", { class: "empty-state-title" }, title),
+    detail ? h("p", { class: "empty-state-detail muted" }, detail) : null,
+  );
+}

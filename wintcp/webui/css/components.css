@@ -302,6 +302,23 @@
   border: none;
 }
 
+/* ---- Icons ---- */
+/* icon() returns a <span class="icon"> wrapping the <svg>. It needs to be an
+   inline-flex box so it lines up with adjacent label text and never stretches
+   to the full line height the way a bare inline <svg> can. */
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  line-height: 0;
+  color: currentColor;
+}
+.icon > svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
 /* ---- Breadcrumb ---- */
 .breadcrumb {
   display: flex;
@@ -312,7 +329,10 @@
 }
 .breadcrumb a { color: var(--muted-foreground); text-decoration: none; }
 .breadcrumb a:hover { color: var(--foreground); }
-.breadcrumb-sep { color: var(--border); }
+/* The separator is still text a screen reader announces, so it needs real
+   contrast: --border measured 1.26:1 against the page background in both
+   themes. --muted-foreground clears 4.5:1. */
+.breadcrumb-sep { color: var(--muted-foreground); }
 .breadcrumb-current { color: var(--foreground); font-weight: 500; }
 
 /* ---- Sidebar ---- */

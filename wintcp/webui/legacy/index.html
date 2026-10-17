@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="wintcp-api-token" content="{{WIN_TCP_TOKEN}}">
+  <meta name="color-scheme" content="dark light">
+  <title>WinTCP Control Room</title>
+  <link rel="stylesheet" href="/legacy/app.css">
+  <script src="/legacy/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#overview" aria-label="WinTCP overview">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="brand-copy"><strong>WinTCP</strong><small>CONTROL ROOM</small></span>
+      </a>
+      <div class="topbar-right">
+        <span id="server-status" class="status-pill status-wait" role="status" aria-live="polite"><i aria-hidden="true"></i> Connecting</span>
+        <button id="refresh-button" class="button button-quiet" type="button" title="Refresh now">Refresh</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar">
+        <div class="nav-label">Workspace</div>
+        <nav aria-label="Workspace">
+          <button class="nav-item is-active" data-view="overview" type="button"><span class="nav-icon">01</span>Overview</button>
+          <button class="nav-item" data-view="automations" type="button"><span class="nav-icon">02</span>Automations <span id="rule-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view="settings" type="button"><span class="nav-icon">03</span>Configuration</button>
+        </nav>
+        <div class="sidebar-foot">
+          <span class="local-dot"></span>
+          <div><strong>Local session</strong><small>Loopback only · no cloud</small></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <section id="view-overview" class="view is-visible">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">LIVE NETWORK INTELLIGENCE</div>
+              <h1>Overview</h1>
+              <p class="subhead">A live view of the connections WinTCP can observe on this PC.</p>
+            </div>
+            <div class="snapshot-label"><span class="pulse" aria-hidden="true"></span><span id="last-updated">Waiting for first snapshot</span></div>
+          </div>
+
+          <div class="metric-grid">
+            <article class="metric-card metric-primary"><div class="metric-label">ACTIVE CONNECTIONS</div><strong id="metric-connections">—</strong><small>TCP and UDP endpoints</small><span class="metric-spark spark-one"></span></article>
+            <article class="metric-card"><div class="metric-label">ESTABLISHED</div><strong id="metric-established">—</strong><small>Current TCP sessions</small><span class="metric-spark spark-two"></span></article>
+            <article class="metric-card"><div class="metric-label">PROCESSES</div><strong id="metric-processes">—</strong><small>Distinct owning PIDs</small><span class="metric-spark spark-three"></span></article>
+            <article class="metric-card"><div class="metric-label">TRAFFIC COVERAGE</div><strong id="metric-coverage">—</strong><small id="coverage-detail">Per-socket counters</small><span class="metric-spark spark-four"></span></article>
+          </div>
+
+          <section class="panel connection-panel">
+            <div class="panel-heading">
+              <div><h2>Connections</h2><p>Data comes from the same WinTCP snapshot path used by the CLI.</p></div>
+              <div class="connection-tools">
+                <label class="search-box"><span aria-hidden="true">⌕</span><input id="connection-search" type="search" placeholder="port:443, state:estab, pid:1000-2000…" autocomplete="off" aria-label="Filter connections using WinTCP filter syntax or ordinary text"><small class="filter-help">Native filters plus ordinary text</small></label>
+                <label class="sort-control">Sort by<select id="connection-sort" aria-label="Sort connections"><option value="process">Process</option><option value="pid">PID</option><option value="proto">Protocol</option><option value="local">Local endpoint</option><option value="remote">Remote endpoint</option><option value="state">State</option><option value="rx">Received bytes</option><option value="tx">Sent bytes</option></select></label>
+                <button id="sort-direction" class="button button-quiet button-small" type="button" aria-label="Sort ascending">Ascending</button>
+                <label class="sort-control">Protocol<select id="protocol-filter" aria-label="Filter by protocol"><option value="all">All</option><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+                <label class="sort-control">State<select id="state-filter" aria-label="Filter by TCP state"><option value="all">Any state</option><option value="LISTENING">Listening</option><option value="ESTABLISHED">Established</option><option value="CLOSE_WAIT">Close wait</option><option value="TIME_WAIT">Time wait</option></select></label>
+              </div>
+            </div>
+            <div class="connection-control-bar">
+              <div class="connection-view-toggles"><label class="toggle"><input id="group-by-process" type="checkbox"> Group by process</label><label class="toggle"><input id="freeze-view" type="checkbox"> Freeze display</label></div>
+              <div class="connection-bulk-tools"><span id="selection-label" class="muted-cell">No rows selected</span><button id="select-visible-rows" class="button button-small" type="button" disabled>Select visible</button><button id="clear-row-selection" class="button button-small button-quiet" type="button" disabled>Clear selection</button><button id="bookmark-selected-rows" class="button button-small" type="button" disabled>Bookmark selected</button><button id="copy-connections" class="button button-small" type="button" disabled>Copy rows</button><select id="export-format" aria-label="Export format"><option value="csv">CSV</option><option value="tsv">TSV</option><option value="json">JSON</option></select><button id="export-connections" class="button button-primary button-small" type="button" disabled>Export view</button></div>
+            </div>
+            <div class="preset-control-bar"><label for="view-preset">Saved views</label><select id="view-preset"><option value="">Select a saved view</option></select><input id="view-preset-name" type="text" maxlength="60" placeholder="Name this view" aria-label="Saved view name"><button id="save-view-preset" class="button button-small" type="button">Save view</button><button id="load-view-preset" class="button button-small" type="button" disabled>Load</button><button id="delete-view-preset" class="button button-small button-quiet" type="button" disabled>Delete</button><details class="column-picker"><summary>Visible columns</summary><div class="column-options"><label><input id="column-process" data-column-toggle="process" type="checkbox" checked>Process</label><label><input id="column-pid" data-column-toggle="pid" type="checkbox" checked>PID</label><label><input id="column-proto" data-column-toggle="proto" type="checkbox" checked>Protocol</label><label><input id="column-local" data-column-toggle="local" type="checkbox" checked>Local</label><label><input id="column-remote" data-column-toggle="remote" type="checkbox" checked>Remote</label><label><input id="column-state" data-column-toggle="state" type="checkbox" checked>State</label><label><input id="column-traffic" data-column-toggle="traffic" type="checkbox" checked>Traffic</label><small>Select and action columns always remain visible.</small></div></details></div>
+            <div class="table-wrap">
+              <table id="connection-table" class="connection-table">
+                <thead><tr><th scope="col" data-column="select">SELECT</th><th scope="col" data-column="process">PROCESS</th><th scope="col" data-column="pid">PID</th><th scope="col" data-column="proto">PROTO</th><th scope="col" data-column="local">LOCAL</th><th scope="col" data-column="remote">REMOTE</th><th scope="col" data-column="state">STATE</th><th scope="col" data-column="traffic">TRAFFIC</th><th scope="col" data-column="action">ACTION</th></tr></thead>
+                <tbody id="connection-rows"><tr><td colspan="9" class="empty-state">Waiting for a snapshot…</td></tr></tbody>
+              </table>
+            </div>
+            <div class="panel-foot"><span id="connection-count-label">No rows</span><span id="traffic-source-label">Counters are reported with their measurement scope.</span></div>
+          </section>
+
+          <section class="panel bookmark-panel" aria-labelledby="bookmark-title">
+            <div class="panel-heading"><div><h2 id="bookmark-title">Bookmarks &amp; notes</h2><p>Keep a local investigation list with the process and endpoint context captured from a selected connection.</p></div><span id="bookmark-count" class="catalog-badge"><strong>0</strong> saved</span></div>
+            <div id="bookmark-list" class="bookmark-list"><div class="empty-state">Select one or more visible connections and bookmark them to begin an investigation.</div></div>
+          </section>
+
+          <div class="notice notice-info"><span class="notice-mark">i</span><p><strong>Measurement note</strong> — Per-peer byte automation is available only when Windows exposes complete per-socket counters. Process-level or incomplete measurements are never treated as a precise remote-peer total.</p></div>
+        </section>
+
+        <section id="view-automations" class="view">
+          <div class="page-heading">
+            <div><div class="eyebrow">RULES & RESPONSE</div><h1>Automations</h1><p class="subhead">Start with a prepared playbook, configure its threshold, and review every event.</p></div>
+            <span class="catalog-badge"><strong>40</strong> prepared templates</span>
+          </div>
+          <div class="notice notice-warning"><span class="notice-mark">!</span><p><strong>Actions remain human-confirmed.</strong> Monitors run only while this page is open. The available firewall response first shows a dry-run plan, then requires an explicit confirmation and an unexpired one-time token. No background service or auto-blocking is installed.</p></div>
+          <div class="automation-tabs" role="tablist" aria-label="Automation sections">
+            <button class="auto-tab is-active" data-autotab="scripts" type="button" role="tab" aria-selected="true">Scripts</button>
+            <button class="auto-tab" data-autotab="library" type="button" role="tab" aria-selected="false">Templates &amp; rules</button>
+            <button class="auto-tab" data-autotab="events" type="button" role="tab" aria-selected="false">Events</button>
+          </div>
+          <div class="automation-layout" data-autopane="library" hidden>
+            <section class="panel template-panel">
+              <div class="panel-heading"><div><h2>Template library</h2><p>Prepared scenarios with capability and data-quality requirements.</p></div></div>
+              <label class="search-box template-search"><span aria-hidden="true">⌕</span><input id="template-search" type="search" placeholder="Find a template…" autocomplete="off"></label>
+              <div id="template-list" class="template-list"><div class="empty-state">Loading templates…</div></div>
+            </section>
+            <section class="panel rules-panel">
+              <div class="panel-heading"><div><h2>Active rules</h2><p>Rules are disabled by default until you enable them.</p></div></div>
+              <div id="rule-list" class="rule-list"><div class="empty-state">No rules added yet. Choose a ready template to begin.</div></div>
+            </section>
+          </div>
+          <section class="panel alerts-panel" data-autopane="events" hidden>
+            <div class="panel-heading"><div><h2>Recent events</h2><p>Monitor alerts and action confirmations for this browser session.</p></div><button id="clear-alerts" class="button button-quiet" type="button">Clear view</button></div>
+            <div id="alert-list" class="event-list"><div class="empty-state">No events yet.</div></div>
+          </section>
+          <section class="panel script-workbench" data-autopane="scripts" aria-labelledby="script-workbench-title">
+            <div class="panel-heading"><div><h2 id="script-workbench-title">Automation script workbench</h2><p>Inspect any built-in template, create editable copies, or manage your local script library.</p></div><button id="script-new" class="button button-primary" type="button">New script</button></div>
+              <div class="script-intro"><strong>Local scripts, not chat.</strong> The fixed WinTCP Script syntax runs commands through the sibling <code>wintcp.exe</code> using separate arguments: no shell, PowerShell, JavaScript evaluation, LLM, cloud service, or telemetry. Use <code>let</code>, <code>set</code>, <code>print</code>, and <code>if / else / end</code>. Sensitive commands require a one-use permit after you review the exact command.</div>
+            <div class="script-workspace">
+              <aside class="script-library" aria-label="Automation script library">
+                <label class="search-box script-search"><span aria-hidden="true">⌕</span><input id="script-library-search" type="search" placeholder="Find a template or script…" autocomplete="off" aria-label="Search scripts and templates"></label>
+                <h3>My scripts <span id="script-library-count" class="nav-count">0</span></h3>
+                <div id="my-script-list" class="script-list"><div class="empty-state">Saved scripts appear here.</div></div>
+                <h3>Built-in templates <span class="nav-count">40</span></h3>
+                <div id="script-template-list" class="script-list"><div class="empty-state">Loading templates…</div></div>
+              </aside>
+              <div class="script-editor">
+                <div class="script-editor-head"><div><label class="field-label" for="script-name">Script name</label><input id="script-name" type="text" maxlength="120" placeholder="Name this editable script"></div><div id="script-source-badge" class="planned-badge">No script selected</div></div>
+                <label class="field-label" for="automation-content">WinTCP Script source</label>
+                <textarea id="automation-content" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-describedby="script-validation" placeholder="Choose a template, paste a script, or start a new draft."></textarea>
+                <div class="script-toolbar">
+                  <button id="script-validate" class="button button-small" type="button">Validate</button>
+                  <button id="script-run" class="button button-primary button-small" type="button">Run script</button>
+                  <button id="script-copy" class="button button-small" type="button">Copy source</button>
+                  <button id="script-import-file" class="button button-small" type="button">Import file</button>
+                  <button id="script-export" class="button button-small" type="button">Export script</button>
+                  <button id="script-save" class="button button-primary button-small" type="button">Save script</button>
+                  <button id="script-remove" class="button button-danger button-small" type="button" disabled>Remove</button>
+                  <input id="script-file" type="file" accept=".wtscript,.txt,text/plain" hidden>
+                </div>
+                <p id="script-validation" class="script-validation" role="status" aria-live="polite">Built-in templates are read-only; open one, then save an editable copy in My scripts.</p>
+                <div id="script-capability" class="script-capability">Commands run synchronously with bounded output and runtime. Use Validate before Run to catch syntax and control-flow errors.</div>
+              </div>
+            </div>
+            <section class="script-console" data-autopane="scripts" aria-labelledby="script-console-title">
+              <div class="panel-heading"><div><h2 id="script-console-title">Run results &amp; debugger</h2><p>Review every command, exit code, captured output, and variable value from the last run.</p></div><div class="script-console-actions"><span id="script-run-status" class="catalog-badge" role="status" aria-live="polite">Not run</span><button id="script-clear-output" class="button button-small button-quiet" type="button">Clear results</button></div></div>
+              <div class="script-debug-grid">
+                <section class="script-debug-pane"><h3>Execution trace</h3><ol id="script-step-list" class="script-step-list"><li class="empty-state">Run a script to see its steps.</li></ol></section>
+                <section class="script-debug-pane"><h3>Variables</h3><div id="script-variable-list" class="script-variable-list"><div class="empty-state">Variables appear as steps assign them.</div></div></section>
+              </div>
+              <section class="script-run-history-block" aria-labelledby="script-run-history-title">
+                <h3 id="script-run-history-title">Recent runs</h3>
+                <div id="script-run-history" class="script-run-history"><div class="empty-state">No runs yet. Run a script and its outcome is recorded here — and it survives a refresh.</div></div>
+              </section>
+              <details class="script-raw-output"><summary>Combined stdout / stderr</summary><pre id="script-output">No command output yet.</pre></details>
+            </section>
+          </section>
+        </section>
+
+        <section id="view-settings" class="view">
+          <div class="page-heading"><div><div class="eyebrow">LOCAL PREFERENCES</div><h1>Configuration</h1><p class="subhead">Configuration and audit records are stored on this PC under your Windows profile.</p></div></div>
+          <div class="settings-grid">
+            <section class="panel settings-panel">
+              <div class="panel-heading"><div><h2>Monitoring cadence</h2><p>Refresh interval for snapshots and rule evaluation.</p></div></div>
+              <label class="field-label" for="refresh-seconds">Refresh interval</label>
+              <div class="input-row"><select id="refresh-seconds"><option value="2">2 seconds</option><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select><button id="save-settings" class="button button-primary" type="button">Save settings</button></div>
+              <div class="divider"></div>
+              <h3>Appearance</h3>
+              <p class="settings-copy">Choose the dashboard color theme. System follows your operating system.</p>
+              <div class="input-row"><select id="theme-mode" aria-label="Color theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
+              <div class="divider"></div>
+              <h3>Desktop alerts</h3>
+              <p class="settings-copy">Optional browser notifications for monitor events while this page is open. Notifications contain no process names or network addresses.</p>
+              <div class="notification-controls"><button id="enable-notifications" class="button button-quiet" type="button">Enable browser notifications</button><label class="toggle"><input id="desktop-notifications" type="checkbox" disabled> Show desktop alerts</label></div>
+              <p id="notification-status" class="settings-copy" role="status" aria-live="polite">Desktop alerts are off.</p>
+              <div class="divider"></div>
+              <h3>Data and safety</h3>
+              <ul class="safety-list">
+                <li>The listener binds to <code>127.0.0.1</code> only and chooses a temporary port.</li>
+                <li>There is no external asset, analytics, or cloud request.</li>
+                <li>Changes to the firewall are never made by a monitor alone.</li>
+                <li>Per-peer byte thresholds pause when socket-counter coverage is incomplete.</li>
+              </ul>
+              <p class="storage-path">Storage: <code>%LOCALAPPDATA%\WinTCP\WebUi\</code></p>
+            </section>
+            <section class="panel audit-panel">
+              <div class="panel-heading"><div><h2>Audit trail</h2><p class="subhead">Most recent configuration, alert, and action events.</p></div><label class="search-box audit-search-box"><span aria-hidden="true">⌕</span><input id="audit-search" type="search" placeholder="Search audit…" autocomplete="off" aria-label="Filter audit records by text"></label><button id="export-audit" class="button button-quiet" type="button">Export…</button><button id="reload-audit" class="button button-quiet" type="button">Reload</button></div>
+              <div id="audit-list" class="audit-list"><div class="empty-state">Loading audit trail…</div></div>
+            </section>
+          </div>
+        </section>
+
+        <footer class="footer"><span>WinTCP local control plane</span><span id="footer-health">Starting…</span></footer>
+      </main>
+    </div>
+  </div>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title">
+    <form method="dialog" class="confirm-dialog-form">
+      <h2 id="confirm-dialog-title">Confirm action</h2>
+      <p id="confirm-dialog-message"></p>
+      <div class="confirm-dialog-actions">
+        <button id="confirm-cancel" class="button button-quiet" type="submit" value="cancel">Cancel</button>
+        <button id="confirm-ok" class="button button-primary" type="submit" value="confirm">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="false"></div>
+  <span id="snapshot-status" class="sr-only" aria-live="polite" aria-atomic="true"></span>
+  <dialog id="connection-detail-dialog" class="connection-detail-dialog" aria-labelledby="connection-detail-title">
+    <div class="detail-dialog-head"><div><p class="eyebrow">SNAPSHOT ROW</p><h2 id="connection-detail-title">Connection details</h2><p id="connection-detail-summary" class="subhead"></p></div><form method="dialog"><button class="button button-quiet" type="submit" aria-label="Close connection details">Close</button></form></div>
+    <div class="detail-dialog-actions"><button id="copy-connection-detail" class="button button-small" type="button">Copy JSON</button><button id="block-connection-detail" class="button button-danger button-small" type="button" disabled>Block remote peer</button></div>
+    <pre id="connection-detail-json" class="detail-json" tabindex="0" aria-label="Connection row fields"></pre>
+    <p class="detail-footnote">Only fields included in the current WinTCP snapshot are shown. Displaying details does not perform additional process, DNS, ETW, or GeoIP enumeration.</p>
+  </dialog>
+</body>
+</html>

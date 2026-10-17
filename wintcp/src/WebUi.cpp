@@ -20,12 +20,16 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <climits>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <locale>
 #include <map>
 #include <memory>
 #include <functional>
@@ -38,6 +42,7 @@
 
 #include "Commands.h"
 #include "ConnectionStore.h"
+#include "Settings.h"
 #include "SocketTraffic.h"
 #include "Utils.h"
 #include "WebMetrics.h"
@@ -398,6 +403,48 @@ bool IsValidJsonObject(const std::string& text) {
     std::wstring wide;
     if (!Utf8ToWide(text, &wide)) return false;
     return JsonValidator(text).IsObject();
+}
+
+// Strict decimal integer parse. Digits only, no sign, no whitespace, no
+// trailing junk, and no overflow. Never throws, never allocates.
+// std::stoull/std::stoul are the wrong tool for untrusted query strings: they
+// throw std::invalid_argument / std::out_of_range, and an escaping exception
+// from a request handler terminates the process.
+bool ParseUint64Strict(const std::string& text, uint64_t* out) {
+    if (out == nullptr || text.empty() || text.size() > 20) return false;
+    uint64_t value = 0;
+    for (char c : text) {
+        if (c < '0' || c > '9') return false;
+        const uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (value > (UINT64_MAX - digit) / 10) return false;   // overflow
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return true;
+}
+
+// Format a double as a JSON number: classic locale, never scientific notation,
+// integral values printed as integers. std::ostringstream's default turned
+// 33277400000 bytes into "3.32774e+10" - valid JSON, but it threw away the low
+// digits and read as noise on the dashboard.
+std::string JsonNumber(double value) {
+    if (!std::isfinite(value)) return "null";     // NaN/Inf are not JSON
+    std::ostringstream v;
+    v.imbue(std::locale::classic());
+    if (value == std::floor(value) && std::fabs(value) < 9.0e15) {
+        v << static_cast<long long>(value);
+        return v.str();
+    }
+    v << std::fixed << std::setprecision(3) << value;
+    std::string text = v.str();
+    const size_t dot = text.find('.');
+    if (dot != std::string::npos) {
+        size_t last = text.size();
+        while (last > dot + 1 && text[last - 1] == '0') --last;
+        if (last == dot + 1) --last;              // drop the bare "."
+        text.resize(last);
+    }
+    return text.empty() ? "0" : text;
 }
 
 bool GetExecutableDirectory(std::wstring* directory) {
@@ -797,26 +844,53 @@ std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) 
 
 bool ParseForm(const std::string& body, std::map<std::string, std::string>* fields);
 
+// Read a REG_SZ under an absolute registry path. Returns false when the key or
+// value is absent, which the callers turn into null plus a reason rather than a
+// blank. Opens the key only long enough to hand it to RegReadBoundedString, so
+// there is ONE bounded-string-read policy in the codebase rather than a second
+// one living in the Web UI adapter.
+bool ReadRegistryString(const wchar_t* subKey, const wchar_t* name,
+                        std::string* out) {
+    if (out == nullptr || subKey == nullptr || name == nullptr) return false;
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(HKEY_LOCAL_MACHINE, subKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+    std::wstring value;
+    const bool ok = RegReadBoundedString(key, name, 512, &value);
+    ::RegCloseKey(key);
+    if (!ok) return false;
+    *out = WideToUtf8(value);
+    return !out->empty();
+}
+
 std::string CapabilitiesJson(ServerContext& context) {
     std::ostringstream out;
+    // Report what is actually true of THIS process, not a hardcoded assumption:
+    // the front end greys out what it cannot get and says why.
+    const bool pdh = context.metricsCollector.IsRunning();
+    const bool perCore = pdh && context.metricsCollector.PerCoreAvailable();
     out << "{\"elevated\":false"
-        << ",\"pdh\":true,\"perCore\":true,\"gpu\":false"
+        << ",\"pdh\":" << (pdh ? "true" : "false")
+        << ",\"pdhReason\":" << (pdh ? "null" : JsonQuote("metrics sampler did not start"))
+        << ",\"perCore\":" << (perCore ? "true" : "false")
+        << ",\"perCoreReason\":"
+        << (perCore ? "null"
+                    : JsonQuote("per-core CPU counter is unavailable"))
+        << ",\"gpu\":false"
         << ",\"geoIp\":{\"configured\":" << (context.source.GeoIpLoaded() ? "true" : "false")
         << ",\"type\":" << (context.source.GeoIpLoaded() ? JsonQuote("GeoLite2-Country") : "null")
         << ",\"error\":null}"
-        << ",\"etw\":true,\"trafficScan\":true,\"dns\":true"
-        << ",\"version\":" << JsonQuote("1.0.0") << "}";
+        << ",\"etw\":true,\"trafficScan\":false,\"dns\":true"
+        << ",\"version\":" << JsonQuote("2.0.0") << "}";
     return out.str();
 }
 
 std::string SystemInfoJson(ServerContext& context) {
-    // Return real system info from the metrics collector and store.
     (void)context;  // reserved for future use (e.g. GeoIP database info)
     std::ostringstream out;
     out << "{";
 
-    // OS info from registry would go here; for now use the computer name
-    // and a placeholder that the front end can enrich.
     char computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
     DWORD nameLen = MAX_COMPUTERNAME_LENGTH + 1;
     ::GetComputerNameA(computerName, &nameLen);
@@ -830,23 +904,58 @@ std::string SystemInfoJson(ServerContext& context) {
     ULONGLONG mins = (uptimeSec % 3600) / 60;
     out << "\"uptime\":\"" << days << "d " << hours << "h " << mins << "m\",";
 
-    // CPU count
-    SYSTEM_INFO si = {};
-    ::GetSystemInfo(&si);
-    out << "\"cpu\":{\"cores\":" << si.dwNumberOfProcessors
-        << ",\"threads\":" << si.dwNumberOfProcessors
-        << ",\"architecture\":\"x64\"},";
+    // OS, from the registry. Every field is independently optional: a Server
+    // SKU or a locked-down image can be missing any of them, and a missing
+    // field is null plus a reason, never an empty string (C-6).
+    std::string osCaption, osVersion, osBuild, cpuBrand;
+    const bool haveCaption = ReadRegistryString(
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"ProductName", &osCaption);
+    const bool haveVersion = ReadRegistryString(
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"DisplayVersion", &osVersion);
+    const bool haveBuild = ReadRegistryString(
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"CurrentBuildNumber", &osBuild);
+    const bool haveBrand = ReadRegistryString(
+        L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+        L"ProcessorNameString", &cpuBrand);
 
-    // Memory from GlobalMemoryStatusEx
+    out << "\"os\":{\"name\":" << (haveCaption ? JsonQuote(osCaption) : "null")
+        << ",\"version\":" << (haveVersion ? JsonQuote(osVersion) : "null")
+        << ",\"build\":" << (haveBuild ? JsonQuote(osBuild) : "null")
+        << ",\"architecture\":"
+        << JsonQuote(sizeof(void*) == 8 ? "x64" : "x86")
+        << ",\"nameReason\":"
+        << (haveCaption ? "null" : JsonQuote("ProductName is not readable"))
+        << "},";
+
+    // CPU. dwNumberOfProcessors is the count in the current processor group;
+    // GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) is the machine total on
+    // >64-core hosts, which is what an operator expects to read here.
+    WORD groups = ::GetActiveProcessorGroupCount();
+    DWORD processors = 0;
+    for (WORD g = 0; g < groups; ++g) processors += ::GetActiveProcessorCount(g);
+    if (processors == 0) processors = 1;
+    out << "\"cpu\":{\"brand\":" << (haveBrand ? JsonQuote(cpuBrand) : "null")
+        << ",\"model\":" << (haveBrand ? JsonQuote(cpuBrand) : "null")
+        << ",\"brandReason\":"
+        << (haveBrand ? "null" : JsonQuote("ProcessorNameString is not readable"))
+        << ",\"cores\":" << processors
+        << ",\"threads\":" << processors
+        << ",\"processorGroups\":" << groups
+        << ",\"architecture\":"
+        << JsonQuote(sizeof(void*) == 8 ? "x64" : "x86") << "},";
+
+    // Memory from GlobalMemoryStatusEx. Unavailable is not zero: say so (C-6).
     MEMORYSTATUSEX mem = {};
     mem.dwLength = sizeof(mem);
     if (::GlobalMemoryStatusEx(&mem)) {
         out << "\"memory\":{\"installed\":" << mem.ullTotalPhys
             << ",\"available\":" << mem.ullAvailPhys
             << ",\"used\":" << (mem.ullTotalPhys - mem.ullAvailPhys)
-            << ",\"pct\":" << mem.dwMemoryLoad << "}";
+            << ",\"pct\":" << mem.dwMemoryLoad << "},"
+            << "\"memoryReason\":null";
     } else {
-        out << "\"memory\":{\"installed\":0,\"available\":0,\"used\":0,\"pct\":0}";
+        out << "\"memory\":null"
+            << ",\"memoryReason\":" << JsonQuote("GlobalMemoryStatusEx failed");
     }
 
     out << "}";
@@ -867,17 +976,73 @@ std::string MetricsCatalogJson() {
     return out.str();
 }
 
+// Sum one per-instance series. `known` comes back false when NO instance
+// produced a value, which is what keeps "unknown" distinct from zero (C-6).
+double SumInstances(const std::map<std::wstring, double>& values,
+                    const std::map<std::wstring, bool>& known,
+                    bool* anyKnown) {
+    double total = 0.0;
+    bool saw = false;
+    for (const auto& kv : values) {
+        if (known.find(kv.first) == known.end() || !known.at(kv.first)) continue;
+        total += kv.second;
+        saw = true;
+    }
+    *anyKnown = saw;
+    return total;
+}
+
 std::string MetricsNowJson(ServerContext& context) {
     MetricsSample sample;
+    const bool have = context.metricsCollector.GetLatest(&sample);
     std::ostringstream out;
     out << "{";
-    if (context.metricsCollector.GetLatest(&sample)) {
-        if (sample.cpuTotalKnown) out << "\"cpu.total\":" << sample.cpuTotal << ",";
-        if (sample.memUsedKnown) out << "\"mem.usedBytes\":" << sample.memUsed << ",";
-        if (sample.memTotalKnown) out << "\"mem.totalBytes\":" << sample.memTotal << ",";
+    if (have) {
+        // Every catalogued series is always present. An unavailable counter is
+        // null plus a reason, never 0 - a zero here would read as "idle".
+        const auto series = [&](const char* id, bool known, double value,
+                                const char* reason) {
+            out << "\"" << id << "\":" << (known ? JsonNumber(value) : std::string("null"))
+                << ",\"" << id << ".reason\":"
+                << (known ? "null" : JsonQuote(reason)) << ",";
+        };
+        series("cpu.total", sample.cpuTotalKnown, sample.cpuTotal,
+               "PDH counter not ready");
+        series("mem.usedBytes", sample.memUsedKnown,
+               static_cast<double>(sample.memUsed), "PDH counter not ready");
+        series("mem.totalBytes", sample.memTotalKnown,
+               static_cast<double>(sample.memTotal), "PDH counter not ready");
+        bool diskReadKnown = false, diskWriteKnown = false;
+        bool netRxKnown = false, netTxKnown = false;
+        const double diskRead = SumInstances(sample.diskReadBps, sample.diskReadKnown,
+                                             &diskReadKnown);
+        const double diskWrite = SumInstances(sample.diskWriteBps, sample.diskWriteKnown,
+                                              &diskWriteKnown);
+        const double netRx = SumInstances(sample.netRxBps, sample.netRxKnown, &netRxKnown);
+        const double netTx = SumInstances(sample.netTxBps, sample.netTxKnown, &netTxKnown);
+        series("disk.readBps", diskReadKnown, diskRead, "no disk counters available");
+        series("disk.writeBps", diskWriteKnown, diskWrite, "no disk counters available");
+        series("net.rxBps", netRxKnown, netRx, "no network counters available");
+        series("net.txBps", netTxKnown, netTx, "no network counters available");
+        // Per-core CPU: cpu.core.<n>, null where the core reported no data. No
+        // leading comma - the series() lambda above already left one.
+        for (size_t i = 0; i < sample.cpuCore.size(); ++i) {
+            const bool known = i < sample.cpuCoreKnown.size() && sample.cpuCoreKnown[i];
+            out << "\"cpu.core." << i << "\":"
+                << (known ? JsonNumber(sample.cpuCore[i]) : std::string("null"))
+                << ",\"cpu.core." << i << ".reason\":"
+                << (known ? "null" : JsonQuote("core counter returned no data")) << ",";
+        }
         out << "\"_timestamp\":" << sample.unixTime;
     } else {
-        out << "\"cpu.total\":null,\"mem.usedBytes\":null,\"mem.totalBytes\":null";
+        const std::string reason = JsonQuote("sampler has not produced a sample yet");
+        out << "\"cpu.total\":null,\"cpu.total.reason\":" << reason
+            << ",\"mem.usedBytes\":null,\"mem.usedBytes.reason\":" << reason
+            << ",\"mem.totalBytes\":null,\"mem.totalBytes.reason\":" << reason
+            << ",\"disk.readBps\":null,\"disk.readBps.reason\":" << reason
+            << ",\"disk.writeBps\":null,\"disk.writeBps.reason\":" << reason
+            << ",\"net.rxBps\":null,\"net.rxBps.reason\":" << reason
+            << ",\"net.txBps\":null,\"net.txBps.reason\":" << reason;
     }
     out << "}";
     return out.str();
@@ -891,25 +1056,77 @@ std::string MetricsHistoryJson(ServerContext& context, const HttpRequest& reques
     if (query != std::string::npos) {
         std::map<std::string, std::string> params;
         if (ParseForm(request.target.substr(query + 1), &params)) {
-            if (params.count("since")) since = std::stoull(params["since"]);
-            if (params.count("max")) maxSamples = (std::stoul(params["max"]) < 900) ? std::stoul(params["max"]) : 900;
+            // Strict, allocation-free integer parsing. std::stoull/std::stoul
+            // throw std::invalid_argument on "abc" and std::out_of_range on
+            // "99999999999999999999"; nothing above caught that, so a single
+            // malformed query string unwound through the accept loop and killed
+            // the whole server (0xE06D7363, with a minidump). An unparseable
+            // parameter is a client error, not a fatal one.
+            uint64_t parsed = 0;
+            if (params.count("since") &&
+                !ParseUint64Strict(params["since"], &parsed)) {
+                return ErrorJson("since must be a non-negative integer");
+            }
+            since = parsed;
+            if (params.count("max")) {
+                if (!ParseUint64Strict(params["max"], &parsed)) {
+                    return ErrorJson("max must be a non-negative integer");
+                }
+                maxSamples = parsed < 900 ? static_cast<size_t>(parsed) : 900;
+            }
             if (params.count("tier")) tier = params["tier"];
         }
     }
     auto samples = context.metricsCollector.GetHistory(since, maxSamples);
     std::ostringstream out;
-    out << "{\"tier\":" << JsonQuote(tier) << ",\"step\":1,\"t\":[";
+    out << "{\"tier\":" << JsonQuote(tier) << ",\"step\":1,\"count\":"
+        << samples.size() << ",\"t\":[";
     for (size_t i = 0; i < samples.size(); ++i) {
         if (i > 0) out << ",";
         out << samples[i].unixTime;
     }
-    out << "],\"series\":{\"cpu.total\":[";
-    for (size_t i = 0; i < samples.size(); ++i) {
-        if (i > 0) out << ",";
-        if (samples[i].cpuTotalKnown) out << samples[i].cpuTotal;
-        else out << "null";
-    }
-    out << "]}}";
+    // One aligned array per series inside "series". Unknown samples are null,
+    // never 0 (C-6), and every array lines up index-for-index with "t".
+    out << "],\"series\":{";
+    bool firstSeries = true;
+    const auto emit = [&](const char* id, auto pick) {
+        if (!firstSeries) out << ",";
+        firstSeries = false;
+        out << "\"" << id << "\":[";
+        for (size_t i = 0; i < samples.size(); ++i) {
+            if (i > 0) out << ",";
+            const std::pair<bool, double> value = pick(samples[i]);
+            out << (value.first ? JsonNumber(value.second) : std::string("null"));
+        }
+        out << "]";
+    };
+    emit("cpu.total", [](const MetricsSample& s) {
+        return std::pair<bool, double>(s.cpuTotalKnown, s.cpuTotal);
+    });
+    emit("mem.usedBytes", [](const MetricsSample& s) {
+        return std::pair<bool, double>(s.memUsedKnown, static_cast<double>(s.memUsed));
+    });
+    emit("disk.readBps", [](const MetricsSample& s) {
+        bool known = false;
+        const double total = SumInstances(s.diskReadBps, s.diskReadKnown, &known);
+        return std::pair<bool, double>(known, total);
+    });
+    emit("disk.writeBps", [](const MetricsSample& s) {
+        bool known = false;
+        const double total = SumInstances(s.diskWriteBps, s.diskWriteKnown, &known);
+        return std::pair<bool, double>(known, total);
+    });
+    emit("net.rxBps", [](const MetricsSample& s) {
+        bool known = false;
+        const double total = SumInstances(s.netRxBps, s.netRxKnown, &known);
+        return std::pair<bool, double>(known, total);
+    });
+    emit("net.txBps", [](const MetricsSample& s) {
+        bool known = false;
+        const double total = SumInstances(s.netTxBps, s.netTxKnown, &known);
+        return std::pair<bool, double>(known, total);
+    });
+    out << "}}";
     return out.str();
 }
 
@@ -1424,6 +1641,25 @@ RuleRequest BlockRequest(const std::string& address, UINT port) {
     return request;
 }
 
+// Serve an HTML shell with the session token substituted into its meta tag.
+bool ServeShell(ServerContext& context, const wchar_t* asset, HttpResponse* response) {
+    response->contentType = "text/html; charset=utf-8";
+    if (!ReadAsset(context, asset, &response->body)) {
+        response->status = 500;
+        response->body = ErrorJson("Web UI asset missing; expected sibling webui folder");
+        return false;
+    }
+    const std::string placeholder = "{{WIN_TCP_TOKEN}}";
+    const size_t at = response->body.find(placeholder);
+    if (at == std::string::npos) {
+        response->status = 500;
+        response->body = ErrorJson("Web UI page is missing its token placeholder");
+        return false;
+    }
+    response->body.replace(at, placeholder.size(), context.token);
+    return true;
+}
+
 HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
     HttpResponse response;
     if (!ValidHostAndOrigin(context, request)) {
@@ -1440,20 +1676,16 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         return response;
     }
     if (path == "/" || path == "/index.html") {
-        response.contentType = "text/html; charset=utf-8";
-        if (!ReadAsset(context, L"index.html", &response.body)) {
-            response.status = 500;
-            response.body = ErrorJson("Web UI asset missing; expected sibling webui folder");
-            return response;
-        }
-        const std::string placeholder = "{{WIN_TCP_TOKEN}}";
-        const size_t at = response.body.find(placeholder);
-        if (at == std::string::npos) {
-            response.status = 500;
-            response.body = ErrorJson("Web UI page is missing its token placeholder");
-            return response;
-        }
-        response.body.replace(at, placeholder.size(), context.token);
+        ServeShell(context, L"index.html", &response);
+        return response;
+    }
+    // The pre-upgrade dashboard, preserved verbatim under webui/legacy. It is the
+    // strangler's fallback: the control room at / is still being ported page by
+    // page, and until a page reaches parity the legacy build keeps every feature
+    // (filter/sort/group/freeze, permit flow, scripts, templates, presets,
+    // bookmarks, alerts) reachable instead of silently lost.
+    if (path == "/legacy" || path == "/legacy/" || path == "/legacy/index.html") {
+        ServeShell(context, L"legacy\\index.html", &response);
         return response;
     }
     if (path == "/app.js" || path == "/app.css") {
@@ -1467,17 +1699,22 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         }
         return response;
     }
-    // Static assets: /js/*, /css/*, /vendor/*, /data/*, /img/*, /fonts/*
-    // Validated by WebStatic; served from the webui directory.
-    if (path.size() > 1 && path[0] == '/' &&
-        (path.rfind("/js/", 0) == 0 || path.rfind("/css/", 0) == 0 ||
-         path.rfind("/vendor/", 0) == 0 || path.rfind("/data/", 0) == 0 ||
-         path.rfind("/img/", 0) == 0 || path.rfind("/fonts/", 0) == 0)) {
-        if (!IsSafeStaticPath(path)) {
-            response.status = 403;
-            response.body = "Forbidden";
-            return response;
-        }
+    // Static assets: /js/*, /css/*, /vendor/*, /data/*, /img/*, /fonts/*, /legacy/*.
+    // IsSafeStaticPath owns the allow-list of prefixes AND extensions, so it is
+    // the only gate here: this used to repeat the prefix list inline and had
+    // already drifted from WebStatic, which is how every subdirectory asset 404'd.
+    // Anything it rejects falls through to the API routes and then to 404.
+    if (path.size() > 1 && path[0] == '/' && IsRejectedStaticPath(path)) {
+        // Under a static prefix but refused (traversal, reserved device name,
+        // disallowed extension). 403, not 404: a traversal attempt is a
+        // rejection, and it must not be logged as a missing asset.
+        WriteWebUiLog(context, WebUiLogLevel::Warn,
+                      "static request rejected path=" + path);
+        response.status = 403;
+        response.body = "Forbidden";
+        return response;
+    }
+    if (path.size() > 1 && path[0] == '/' && IsSafeStaticPath(path)) {
         // Map the URL path to a file in the webui directory.
         std::wstring relative;
         if (!Utf8ToWide(path.substr(1), &relative)) {
@@ -1485,20 +1722,38 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             response.body = "Bad request";
             return response;
         }
-        // Replace forward slashes with backslashes for Windows.
+        // Replace forward slashes with backslashes for Windows. IsSafeStaticPath
+        // already rejected backslashes in the URL, so this is the only place a
+        // separator is introduced.
         for (auto& ch : relative) { if (ch == L'/') ch = L'\\'; }
-        std::wstring fullPath = context.executableDirectory + L"\\webui\\" + relative;
-        // Check file size against the cap.
+        // NOTE: read the resolved ABSOLUTE path here. ReadAsset() prepends
+        // <exedir>\webui\, so passing it an already-resolved path produced
+        // <exedir>\webui\<exedir>\webui\js\main.js and every subdirectory asset
+        // answered 404 (the page rendered with no CSS and no JS).
+        const std::wstring fullPath = context.executableDirectory + L"webui\\" + relative;
+        const size_t maxBytes = StaticMaxBytesFor(path);
         WIN32_FILE_ATTRIBUTE_DATA fad = {};
         if (::GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &fad)) {
-            ULONGLONG fileSize = (static_cast<ULONGLONG>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
-            if (fileSize > StaticMaxBytesFor(path)) {
+            // A reparse point (symlink, junction, mount point) inside the webui
+            // tree can point anywhere on the machine, so it is refused outright
+            // rather than resolved.
+            if ((fad.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                response.status = 403;
+                response.body = "Forbidden";
+                return response;
+            }
+            const ULONGLONG fileSize =
+                (static_cast<ULONGLONG>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            if (fileSize > maxBytes) {
                 response.status = 413;
                 response.body = "File too large";
                 return response;
             }
         }
-        if (!ReadAsset(context, fullPath.c_str(), &response.body)) {
+        // ReadFileBounded re-checks the cap, so an oversized file cannot slip
+        // through between the stat above and the read.
+        if (!ReadFileBounded(fullPath, maxBytes, &response.body)) {
             response.status = 404;
             response.body = "Not found";
             return response;
@@ -1563,6 +1818,8 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
     }
     if (path == "/api/metrics/history") {
         response.body = MetricsHistoryJson(context, request);
+        // MetricsHistoryJson reports a rejected query string as an error object.
+        if (response.body.compare(0, 9, "{\"error\":") == 0) response.status = 400;
         return response;
     }
     if (path == "/api/processes") {
@@ -1977,7 +2234,30 @@ void ServeClient(ServerContext& context, SOCKET client) {
         ::closesocket(client);
         return;
     }
-    const HttpResponse response = HandleRequest(context, request);
+    const HttpResponse response = [&]() -> HttpResponse {
+        // Backstop. A C++ exception that escapes HandleRequest unwinds through
+        // WebUiAcceptLoop and terminates the process (observed: a malformed
+        // `since=` on /api/metrics/history threw std::invalid_argument and took
+        // the server down with 0xE06D7363 plus a minidump). One bad request must
+        // never take the dashboard offline, so a 500 is the worst case here.
+        try {
+            return HandleRequest(context, request);
+        } catch (const std::exception& e) {
+            WriteWebUiLog(context, WebUiLogLevel::Error,
+                          std::string("handler threw std::exception: ") + e.what());
+            HttpResponse failure;
+            failure.status = 500;
+            failure.body = ErrorJson("internal error");
+            return failure;
+        } catch (...) {
+            WriteWebUiLog(context, WebUiLogLevel::Error,
+                          "handler threw a non-std exception");
+            HttpResponse failure;
+            failure.status = 500;
+            failure.body = ErrorJson("internal error");
+            return failure;
+        }
+    }();
     std::string path = request.target;
     const size_t query = path.find('?');
     if (query != std::string::npos) path.resize(query);
@@ -2105,6 +2385,17 @@ int RunWebUiServer() {
                       "secure session token generation failed");
         std::cout << "webui: secure session token generation failed\r\n";
         return kExitFail;
+    }
+    // Start the PDH sampler. It used to never be started, so the ring buffer
+    // stayed empty and /api/metrics/now and /api/metrics/history reported every
+    // series as null (correctly "unknown", but not useful). The collector owns
+    // its own PDH query and thread; the accept loop only reads snapshots under
+    // the ring buffer's own mutex.
+    if (!context.metricsCollector.Start()) {
+        // Not fatal: the dashboard still works, metrics read as null, and
+        // /api/capabilities reports pdh=false so the UI can say why.
+        WriteWebUiLog(context, WebUiLogLevel::Warn,
+                      "metrics sampler did not start; metrics read as null");
     }
     WSADATA winsock = {};
     if (::WSAStartup(MAKEWORD(2, 2), &winsock) != 0) {

@@ -1,10 +1,20 @@
 /* pages.css - Page-specific layouts */
 
 /* ---- App shell ---- */
+/* Column, not row. The sidebar is position: fixed, so it is out of flow and
+   contributes NO width to this flex container - which is why the offset lives
+   here as padding rather than on .main-content. With a row layout plus
+   margin-left, the top bar became a flex sibling of the content, shrank to its
+   intrinsic width, and the page started 445px further right than the sidebar
+   ended: the whole dashboard sat in the right-hand half of the window. */
 .app-shell {
   display: flex;
+  flex-direction: column;
   min-height: 100vh;
+  padding-left: 16rem;
+  transition: padding-left 0.2s ease;
 }
+body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 
 /* ---- Top bar ---- */
 .topbar {
@@ -54,15 +64,14 @@
 .brand-mark span:nth-child(3) { width: 0.625rem; }
 
 /* ---- Main content ---- */
+/* No margin offset: .app-shell already reserves the sidebar's width for both
+   this and the top bar. */
 .main-content {
   flex: 1;
-  margin-left: 16rem;
-  transition: margin-left 0.2s ease;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
-.main-content.expanded { margin-left: 3rem; }
-.main-content.full { margin-left: 0; }
 
 .page {
   flex: 1;
@@ -283,6 +292,8 @@
     transition: left 0.2s ease;
   }
   .sidebar.open { left: 0; }
-  .main-content { margin-left: 0; }
-  .main-content.expanded { margin-left: 0; }
+  /* Below 1024px the sidebar slides off-canvas, so it no longer reserves
+     space and the shell's padding must go with it. */
+  .app-shell,
+  body.sidebar-collapsed .app-shell { padding-left: 0; }
 }

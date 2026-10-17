@@ -1,0 +1,236 @@
+{
+  "when": "2026-10-17T23:05:36.980Z",
+  "url": "http://127.0.0.1:58226/",
+  "results": [
+    {
+      "name": "Wrong Host header is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Wrong Host header on the shell is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Host with the wrong port is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Wrong Origin on GET is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Literal 127.0.0.1 on a different port is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "POST without Origin is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "POST without a token is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "POST with a wrong token is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "POST with a wrong Origin is rejected",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Transfer-Encoding is refused",
+      "pass": true,
+      "detail": "400"
+    },
+    {
+      "name": "Oversized Content-Length is refused",
+      "pass": true,
+      "detail": "413"
+    },
+    {
+      "name": "Duplicate Content-Length is rejected",
+      "pass": true,
+      "detail": "400"
+    },
+    {
+      "name": "Traversal refused: /js/../../wintcp.exe",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /css/../../build.bat",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /js/../index.html",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /legacy/../app.js",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /js/subdir/../../../../Windows/win.ini",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /vendor/../../../../etc/passwd",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /js/%2e%2e/%2e%2e/app.js",
+      "pass": true,
+      "detail": "404"
+    },
+    {
+      "name": "Traversal refused: /js/....//....//app.js",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /js/..\\..\\wintcp.exe",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /js/..;/..;/wintcp.exe",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Traversal refused: /js//..//..//app.css",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Backslash traversal refused: /js\\..\\..\\app.js",
+      "pass": true,
+      "detail": "404"
+    },
+    {
+      "name": "Backslash traversal refused: /legacy\\..\\index.html",
+      "pass": true,
+      "detail": "404"
+    },
+    {
+      "name": "Odd component refused: /js/CON",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Odd component refused: /js/nul.js",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Odd component refused: /js/COM1.json",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Odd component refused: /js/trailing.",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Odd component refused: /js/trailing%20",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Colon in path refused: /js/app.js:secret",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Colon in path refused: /js/C:/Windows/win.ini",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "Colon in path refused: /js/a:b.js",
+      "pass": true,
+      "detail": "403"
+    },
+    {
+      "name": "CSP header is present",
+      "pass": true,
+      "detail": "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self"
+    },
+    {
+      "name": "CSP has no unsafe-inline",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "CSP has no unsafe-eval",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "CSP pins object-src and base-uri to none",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "CSP pins frame-ancestors to none",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "C-1: no off-origin request is attempted",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "C-2: no CSP violations on load",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "C-6: every metric carries an explicit reason field",
+      "pass": true,
+      "detail": "7 series, 7 with a reason"
+    },
+    {
+      "name": "C-6: null and 0 are never conflated",
+      "pass": true,
+      "detail": "clean"
+    },
+    {
+      "name": "Hostile strings render as inert text",
+      "pass": true,
+      "detail": "script=0 img=0 svg=0 iframe=0 on*=0 pwned=false"
+    },
+    {
+      "name": "Hostile strings are preserved verbatim as text",
+      "pass": true,
+      "detail": "528 chars rendered"
+    },
+    {
+      "name": "No console errors during the security pass",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "Session token is exposed only via the meta tag",
+      "pass": true,
+      "detail": ""
+    }
+  ]
+}

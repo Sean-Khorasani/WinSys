@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <cwchar>
 #include <algorithm>
+#include <utility>
 
 namespace wintcp {
 namespace {
@@ -23,6 +25,105 @@ uint64_t NowUnix() {
 // Format a PDH counter value as double.
 double PdhValueToDouble(const PDH_FMT_COUNTERVALUE& val) {
     return static_cast<double>(val.doubleValue);
+}
+
+// Parse a PDH processor instance name of the form "0,3" (group, core) or a
+// bare "3". Hand-rolled: swscanf is deprecated under /W4 /WX and this is four
+// lines of work.
+bool ParseProcessorInstance(const std::wstring& name, long* group, long* core) {
+    size_t i = 0;
+    const auto number = [&name, &i](long* out) {
+        if (i >= name.size() || name[i] < L'0' || name[i] > L'9') return false;
+        long value = 0;
+        while (i < name.size() && name[i] >= L'0' && name[i] <= L'9') {
+            if (value > 100000) return false;         // implausible; not a core
+            value = value * 10 + (name[i] - L'0');
+            ++i;
+        }
+        *out = value;
+        return true;
+    };
+    if (!number(group)) return false;
+    *core = *group;
+    if (i < name.size() && name[i] == L',') {
+        ++i;
+        if (!number(core)) return false;
+    }
+    return i == name.size();
+}
+
+// Read a wildcard counter's instances. PDH has no size query: you ask with a
+// zero-length buffer, get PDH_MORE_DATA back with a byte count, then ask again.
+//
+// Two traps, both hit in practice:
+//   * The byte count PDH reports is an OVER-estimate - 876 bytes for 26 items of
+//     a 24-byte struct - so a buffer sized exactly count*sizeof(item) comes back
+//     as PDH_MORE_DATA again. Allocate with headroom and grow on MORE_DATA.
+//   * PDH_FMT_COUNTERVALUE_ITEM_W::szName is an LPWSTR into PDH-owned memory,
+//     valid only until the next PDH call on that query. Copy it out at once.
+//
+// `numericOrder` sorts instances by their (group, core) numbers - instances are
+// named "0,0", "0,1", "0,10", ... so a plain wcscmp would order core 10 before
+// core 2 and reshuffle the series between samples.
+bool ReadCounterArray(PDH_HCOUNTER counter, std::vector<double>* values,
+                      std::vector<bool>* known, bool numericOrder) {
+    if (counter == nullptr || values == nullptr || known == nullptr) return false;
+
+    DWORD bytes = 0;
+    DWORD count = 0;
+    const PDH_STATUS size = ::PdhGetFormattedCounterArray(counter, PDH_FMT_DOUBLE,
+                                                          &bytes, &count, nullptr);
+    if (size != PDH_MORE_DATA && size != ERROR_SUCCESS) return false;
+    if (count == 0 || count > 4096) return false;
+
+    // Headroom, because PDH's byte estimate overshoots the real struct size.
+    std::vector<PDH_FMT_COUNTERVALUE_ITEM_W> items(count + 32);
+    DWORD got = 0;
+    PDH_STATUS status = PDH_MORE_DATA;
+    for (int attempt = 0; attempt < 3 && status == PDH_MORE_DATA; ++attempt) {
+        DWORD inBytes = static_cast<DWORD>(items.size() * sizeof(items[0]));
+        DWORD outCount = 0;
+        status = ::PdhGetFormattedCounterArray(counter, PDH_FMT_DOUBLE, &inBytes,
+                                               &outCount, items.data());
+        got = outCount;
+        if (status != PDH_MORE_DATA) break;
+        const DWORD needed = inBytes / static_cast<DWORD>(sizeof(items[0])) + 32;
+        if (needed <= items.size()) items.resize(items.size() * 2 + 32);
+        else items.resize(needed);
+    }
+    if (status != ERROR_SUCCESS || got == 0) return false;
+    items.resize(got);
+
+    // Copy the names before anything else can invalidate them, and drop "_Total":
+    // it is an aggregate, not a core, and must never become cpu.core.N.
+    std::vector<std::pair<std::pair<long, long>, PDH_FMT_COUNTERVALUE>> parsed;
+    parsed.reserve(items.size());
+    for (const auto& item : items) {
+        const std::wstring name = item.szName != nullptr ? item.szName : L"";
+        if (name.empty() || name == L"_Total") continue;
+        long group = 0, core = 0;
+        if (!numericOrder) continue;
+        if (!ParseProcessorInstance(name, &group, &core)) continue;
+        parsed.emplace_back(std::make_pair(group, core), item.FmtValue);
+    }
+    std::sort(parsed.begin(), parsed.end(),
+              [](const std::pair<std::pair<long, long>, PDH_FMT_COUNTERVALUE>& a,
+                 const std::pair<std::pair<long, long>, PDH_FMT_COUNTERVALUE>& b) {
+                  return a.first < b.first;
+              });
+
+    values->clear();
+    known->clear();
+    values->reserve(parsed.size());
+    known->reserve(parsed.size());
+    for (const auto& entry : parsed) {
+        const PDH_FMT_COUNTERVALUE& v = entry.second;
+        const bool valid = v.CStatus == PDH_CSTATUS_VALID_DATA ||
+                           v.CStatus == PDH_CSTATUS_NEW_DATA;
+        values->push_back(valid ? PdhValueToDouble(v) : 0.0);
+        known->push_back(valid);                 // unknown is never 0
+    }
+    return !values->empty();
 }
 
 }  // namespace
@@ -116,18 +217,19 @@ void MetricsCollector::Stop() {
 }
 
 bool MetricsCollector::GetLatest(MetricsSample* out) const {
-    lastAccessMs_ = ::GetTickCount64();
+    lastAccessMs_.store(::GetTickCount64());
     return ring_.Latest(out);
 }
 
 std::vector<MetricsSample> MetricsCollector::GetHistory(uint64_t since, size_t maxSamples) const {
-    lastAccessMs_ = ::GetTickCount64();
+    lastAccessMs_.store(::GetTickCount64());
     return ring_.Since(since, maxSamples);
 }
 
 void MetricsCollector::Reenumerate() {
-    std::lock_guard<std::mutex> lock(prevMutex_);
-    ReenumerateInstances();
+    // Only raise the flag. The counter vectors belong to the sampler thread;
+    // mutating them from a request thread raced with CollectSample().
+    reenumerateRequested_.store(true);
 }
 
 DWORD WINAPI MetricsCollector::ThreadProc(LPVOID param) {
@@ -137,19 +239,37 @@ DWORD WINAPI MetricsCollector::ThreadProc(LPVOID param) {
 }
 
 void MetricsCollector::Run() {
+    lastReenumerateMs_ = ::GetTickCount64();
+    // Devices come and go (a USB NIC, a removable volume). Five minutes is
+    // frequent enough to notice and rare enough that discarding one sample for
+    // the lost rate baseline is invisible on a 1 Hz chart.
+    constexpr uint64_t kReenumerateEveryMs = 5 * 60 * 1000;
     while (!stopRequested_.load()) {
-        MetricsSample sample;
-        if (CollectSample(&sample)) {
-            ring_.Push(sample);
-        }
-        for (int i = 0; i < 10 && !stopRequested_.load(); ++i) {
-            ::Sleep(100);
+        // Re-enumeration first: a fresh counter has no baseline yet, so the
+        // sample this pass would take is thrown away.
+        const uint64_t loopStartMs = ::GetTickCount64();
+        if (reenumerateRequested_.exchange(false) ||
+            loopStartMs - lastReenumerateMs_ > kReenumerateEveryMs) {
+            ReenumerateInstances();
+            lastReenumerateMs_ = loopStartMs;
+            skipNextSample_ = true;
         }
 
-        uint64_t now = ::GetTickCount64();
-        if (now - lastReenumerateMs_ > 30000) {
-            ReenumerateInstances();
-            lastReenumerateMs_ = now;
+        MetricsSample sample;
+        if (CollectSample(&sample) && !skipNextSample_) {
+            ring_.Push(sample);
+        }
+        skipNextSample_ = false;
+
+        // Idle cadence (C-8: a sampler that never sleeps is a permanent tax).
+        const uint64_t idleTimeout = idleTimeoutMs_.load();
+        const uint64_t sinceAccess = loopStartMs - lastAccessMs_.load();
+        const bool idle = !keepCollectingWhileIdle_.load() && idleTimeout > 0 &&
+                          sinceAccess > idleTimeout;
+        const DWORD stepMs = idle ? 1000 : 100;   // 0.1 Hz idle, 1 Hz active
+        for (DWORD waited = 0; waited < stepMs; waited += 100) {
+            if (stopRequested_.load()) break;
+            ::Sleep(100);
         }
     }
 }
@@ -170,9 +290,20 @@ void MetricsCollector::ClosePdhQuery() {
 bool MetricsCollector::AddCounters() {
     if (pdhQuery_ == nullptr) return false;
 
+    // "% Processor Utility" exists ONLY under "Processor Information" - the
+    // plain "\Processor(_Total)\% Processor Utility" path fails to add with
+    // PDH_CSTATUS_NO_COUNTER. (_Total) is an explicit instance, not a wildcard:
+    // it reads back reliably through PdhGetFormattedCounterValue. Per-core comes
+    // from the wildcard handle below through PdhGetFormattedCounterArray.
     ::PdhAddEnglishCounterW(pdhQuery_,
-        L"\\Processor Information(*)\\% Processor Utility",
+        L"\\Processor Information(_Total)\\% Processor Utility",
         0, &pdhCpuTotal_);
+
+    if (::PdhAddEnglishCounterW(pdhQuery_,
+        L"\\Processor Information(*)\\% Processor Utility",
+        0, &pdhCpuCore_) != ERROR_SUCCESS) {
+        pdhCpuCore_ = nullptr;      // /api/capabilities reports perCore=false
+    }
 
     ::PdhAddEnglishCounterW(pdhQuery_,
         L"\\Memory\\Committed Bytes", 0, &pdhMemUsed_);
@@ -197,6 +328,12 @@ bool MetricsCollector::CollectSample(MetricsSample* out) {
         out->cpuTotalKnown = true;
         out->cpuTotal = PdhValueToDouble(cpuVal);
     }
+
+    // Per-core CPU. A wildcard counter must be read with the ARRAY API; reading
+    // it as a single value is what previously made cpuCore stay empty while
+    // /api/capabilities advertised perCore=true.
+    ReadCounterArray(pdhCpuCore_, &out->cpuCore, &out->cpuCoreKnown,
+                     /*sortByName=*/true);
 
     PDH_FMT_COUNTERVALUE memUsedVal = {};
     status = ::PdhGetFormattedCounterValue(pdhMemUsed_, PDH_FMT_DOUBLE, nullptr, &memUsedVal);

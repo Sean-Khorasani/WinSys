@@ -20,7 +20,7 @@ constexpr size_t kVendorMaxBytes = 2 * 1024 * 1024;  // 2 MiB for /vendor/
 
 // Allowed prefixes (must start with /)
 const std::vector<std::string> kAllowedPrefixes = {
-    "/js/", "/css/", "/vendor/", "/fonts/", "/data/", "/img/",
+    "/js/", "/css/", "/vendor/", "/fonts/", "/data/", "/img/", "/legacy/",
 };
 
 // Allowed extensions
@@ -86,6 +86,11 @@ bool IsSafeStaticPath(const std::string& path) {
         start = end + 1;
     }
     return true;
+}
+
+bool IsRejectedStaticPath(const std::string& path) {
+    return !path.empty() && path[0] == '/' && IsAllowedPrefix(path) &&
+           !IsSafeStaticPath(path);
 }
 
 // Get the maximum file size for a given path.

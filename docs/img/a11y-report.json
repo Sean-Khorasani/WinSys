@@ -1,0 +1,1554 @@
+{
+  "when": "2026-10-17T23:03:48.624Z",
+  "url": "http://127.0.0.1:58226/",
+  "pages": [
+    {
+      "theme": "light",
+      "page": "#/",
+      "name": "Overview",
+      "violations": [],
+      "contrast": {
+        "checked": 50,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Live system and network overview",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "CPU",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "Memory",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "Disk Read",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "light",
+      "page": "#/performance",
+      "name": "Performance",
+      "violations": [],
+      "contrast": {
+        "checked": 36,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "CPU, memory, disk, and network utilization",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a.sidebar-item.is-active",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "Performance",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
+            "isLargeText": false,
+            "foreground": "rgb(10, 10, 10)",
+            "background": "rgb(250, 250, 250)",
+            "ratio": 18.97,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "light",
+      "page": "#/processes",
+      "name": "Processes",
+      "violations": [],
+      "contrast": {
+        "checked": 99,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "button.proc-view",
+            "text": "Tree",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.proc-view",
+            "text": "Treemap",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Name",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "PID",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Connections",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 24
+    },
+    {
+      "theme": "light",
+      "page": "#/network",
+      "name": "Network",
+      "violations": [],
+      "contrast": {
+        "checked": 160,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "button.tab",
+            "text": "Listening",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.tab",
+            "text": "Blocked",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.tab",
+            "text": "Flows",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Process",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "PID",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Proto",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 22
+    },
+    {
+      "theme": "light",
+      "page": "#/map",
+      "name": "Map",
+      "violations": [],
+      "contrast": {
+        "checked": 37,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Geographic distribution of remote peers",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a.sidebar-item.is-active",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "Map",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
+            "isLargeText": false,
+            "foreground": "rgb(10, 10, 10)",
+            "background": "rgb(250, 250, 250)",
+            "ratio": 18.97,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "light",
+      "page": "#/automations",
+      "name": "Automations",
+      "violations": [],
+      "contrast": {
+        "checked": 40,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "button.tab",
+            "text": "Templates",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.tab",
+            "text": "Events",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Scripts, monitors, and events",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.empty-state",
+            "text": "Automation workbench - see legacy views",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 20
+    },
+    {
+      "theme": "light",
+      "page": "#/blocks",
+      "name": "Blocked Peers",
+      "violations": [],
+      "contrast": {
+        "checked": 38,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Firewall rules applied by WinTCP. Removing one goes through ",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.empty-state-detail.muted",
+            "text": "Rules created by wintcp block, or from Automations, appear h",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a.sidebar-item.is-active",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "Blocked Peers",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "light",
+      "page": "#/system",
+      "name": "System",
+      "violations": [],
+      "contrast": {
+        "checked": 78,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Hardware, OS, and capabilities",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a.sidebar-item.is-active",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "System",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
+            "isLargeText": false,
+            "foreground": "rgb(10, 10, 10)",
+            "background": "rgb(250, 250, 250)",
+            "ratio": 18.97,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 19
+    },
+    {
+      "theme": "light",
+      "page": "#/settings",
+      "name": "Settings",
+      "violations": [],
+      "contrast": {
+        "checked": 59,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Appearance, polling, and the audit trail",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.settings-description",
+            "text": "Match the system, or pin light or dark",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.settings-description",
+            "text": "Highlight colour for charts and focus rings",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.settings-description",
+            "text": "Row height and padding across tables",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(105, 105, 105)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 5.49,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 19
+    },
+    {
+      "theme": "dark",
+      "page": "#/",
+      "name": "Overview",
+      "violations": [],
+      "contrast": {
+        "checked": 50,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "div.kpi-label",
+            "text": "CPU",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "Memory",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "Disk Read",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "Network RX",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "Connections",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.kpi-label",
+            "text": "Processes",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "dark",
+      "page": "#/performance",
+      "name": "Performance",
+      "violations": [],
+      "contrast": {
+        "checked": 36,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "CPU, memory, disk, and network utilization",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 13,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.sidebar-group-label",
+            "text": "Monitor",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "dark",
+      "page": "#/processes",
+      "name": "Processes",
+      "violations": [],
+      "contrast": {
+        "checked": 99,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "button.proc-view",
+            "text": "Tree",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.proc-view",
+            "text": "Treemap",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Name",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "PID",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Connections",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 24
+    },
+    {
+      "theme": "dark",
+      "page": "#/network",
+      "name": "Network",
+      "violations": [],
+      "contrast": {
+        "checked": 160,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "button.tab",
+            "text": "Listening",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.tab",
+            "text": "Blocked",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.tab",
+            "text": "Flows",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Process",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "PID",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div",
+            "text": "Proto",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 22
+    },
+    {
+      "theme": "dark",
+      "page": "#/map",
+      "name": "Map",
+      "violations": [],
+      "contrast": {
+        "checked": 37,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Geographic distribution of remote peers",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 13,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.sidebar-group-label",
+            "text": "Monitor",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "dark",
+      "page": "#/automations",
+      "name": "Automations",
+      "violations": [],
+      "contrast": {
+        "checked": 40,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "button.tab",
+            "text": "Templates",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.tab",
+            "text": "Events",
+            "fontSizePx": 14,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.empty-state",
+            "text": "Automation workbench - see legacy views",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Scripts, monitors, and events",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 20
+    },
+    {
+      "theme": "dark",
+      "page": "#/blocks",
+      "name": "Blocked Peers",
+      "violations": [],
+      "contrast": {
+        "checked": 38,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "p.empty-state-detail.muted",
+            "text": "Rules created by wintcp block, or from Automations, appear h",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Firewall rules applied by WinTCP. Removing one goes through ",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 13,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 17
+    },
+    {
+      "theme": "dark",
+      "page": "#/system",
+      "name": "System",
+      "violations": [],
+      "contrast": {
+        "checked": 78,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "a",
+            "text": "WinTCP",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.breadcrumb-sep",
+            "text": "/",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.page-description",
+            "text": "Hardware, OS, and capabilities",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "span.sidebar-label",
+            "text": "WinTCP",
+            "fontSizePx": 16,
+            "fontWeight": 600,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "button.btn.btn-ghost.btn-icon.btn-sm",
+            "text": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"1",
+            "fontSizePx": 13,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.sidebar-group-label",
+            "text": "Monitor",
+            "fontSizePx": 12,
+            "fontWeight": 500,
+            "isLargeText": false,
+            "foreground": "rgb(250, 250, 250)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 17.18,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 19
+    },
+    {
+      "theme": "dark",
+      "page": "#/settings",
+      "name": "Settings",
+      "violations": [],
+      "contrast": {
+        "checked": 59,
+        "failures": 0,
+        "worst": [
+          {
+            "selector": "div.settings-description",
+            "text": "Match the system, or pin light or dark",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.settings-description",
+            "text": "Highlight colour for charts and focus rings",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.settings-description",
+            "text": "Row height and padding across tables",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.settings-description",
+            "text": "Byte prefixes used by every size readout",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "div.settings-description",
+            "text": "How often the browser asks the server for a new sample",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.settings-description",
+            "text": "The server samples on its own timer at 1 Hz and stores 15 mi",
+            "fontSizePx": 13,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(23, 23, 23)",
+            "ratio": 6.94,
+            "required": 4.5,
+            "passes": true
+          }
+        ]
+      },
+      "blocking": 0,
+      "passes": 19
+    }
+  ]
+}

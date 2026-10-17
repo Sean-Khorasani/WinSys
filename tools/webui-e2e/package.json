@@ -1,0 +1,16 @@
+{
+  "name": "wintcp-webui-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Dev-only Playwright checks for the WinTCP Web UI. Not part of the shipped product and not needed to build or run it.",
+  "type": "module",
+  "scripts": {
+    "check": "node run-checks.mjs",
+    "shots": "node screenshots.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.10.1",
+    "@playwright/test": "^1.64.1",
+    "axe-core": "4.10.2"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "when": "2026-10-17T23:04:22.456Z",
+  "url": "http://127.0.0.1:58226/",
+  "checks": [
+    {
+      "name": "Tab moves focus into the page",
+      "pass": true,
+      "detail": "a \"WinTCP\""
+    },
+    {
+      "name": "Focused controls have a visible focus indicator",
+      "pass": true,
+      "detail": "all sampled controls styled"
+    },
+    {
+      "name": "Ctrl+K opens the command palette",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "Palette filters as you type",
+      "pass": true,
+      "detail": "1 item(s)"
+    },
+    {
+      "name": "Palette Enter navigates",
+      "pass": true,
+      "detail": "hash is #/system"
+    },
+    {
+      "name": "Processes grid exposes role=grid with a name",
+      "pass": true,
+      "detail": "role=grid label=\"Processes with open endpoints\" rows=19"
+    },
+    {
+      "name": "Processes grid is focusable",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "Arrow keys move the row selection",
+      "pass": true,
+      "detail": "active row index=1"
+    },
+    {
+      "name": "End scrolls the grid to the last row",
+      "pass": true,
+      "detail": "scrollTop=1335 of 1835"
+    },
+    {
+      "name": "Home returns to the first row",
+      "pass": true,
+      "detail": "scrollTop=0"
+    },
+    {
+      "name": "Sidebar links navigate",
+      "pass": true,
+      "detail": "hash=#/network"
+    },
+    {
+      "name": "Unknown route shows a not-found page",
+      "pass": true,
+      "detail": "title=\"Page not found\""
+    },
+    {
+      "name": "No console errors during the walkthrough",
+      "pass": true,
+      "detail": ""
+    }
+  ]
+}

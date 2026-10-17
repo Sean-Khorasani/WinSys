@@ -80,3 +80,9 @@ Exact commands, from the repo root:
   Microsoft banner before diagnosing link errors.
 - The Web UI binds an ephemeral port on 127.0.0.1 only; 6 of the 40 monitor
   templates have evaluators (unsupported templates stay disabled).
+- `wintcp.exe webui serve` OPENS THE USER'S DEFAULT BROWSER (ShellExecuteW) unless
+  `WINTCP_WEBUI_OPEN_BROWSER` is `0`/`false`/`no`/`off`. Never launch it bare
+  while testing - it hijacks the user's desktop. Use
+  `cmd.exe /c webui-service.bat start`, which sets the flag for the child and
+  prints the URL. Drive the UI with curl or headless Playwright instead.
+- Playwright/Chromium is dev-only (`tools/webui-e2e`); always run it headless.

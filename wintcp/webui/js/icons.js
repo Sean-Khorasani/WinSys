@@ -41,14 +41,84 @@ const ICONS = {
   zap: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
 };
 
-export function icon(name, size = 16) {
-  const svg = ICONS[name];
-  if (!svg) return "";
-  return svg.replace('width="24" height="24"', `width="${size}" height="${size}"`);
+// Icons return real DOM elements, not strings.
+//
+// This used to return a markup string, which every caller passed to h() - and
+// h() appends non-node values as TEXT. The result was that every icon in the UI
+// rendered as a visible wall of "<svg xmlns=...>" source, which is what the
+// first screenshot of the control room showed. iconEl() existed and did the
+// right thing, but nothing called it.
+//
+// Parsing goes through DOMParser rather than innerHTML: the markup is a fixed,
+// hardcoded table (never user input), and innerHTML would put the module in
+// conflict with the CSP rule the design guide sets for itself.
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Lucide is camelCase in its docs; the UI uses kebab-case class-like names
+// ("chevron-right"). Normalise so both spellings resolve.
+function normalise(name) {
+  if (ICONS[name] !== undefined) return name;
+  const camel = String(name).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  if (ICONS[camel] !== undefined) return camel;
+  return null;
 }
 
-export function iconEl(name, size = 16) {
+const parsed = new Map();   // name -> SVGElement template (cloned per use)
+
+function templateFor(name) {
+  if (parsed.has(name)) return parsed.get(name);
+  const markup = ICONS[name];
+  let svg = null;
+  try {
+    const doc = new DOMParser().parseFromString(markup, "image/svg+xml");
+    const root = doc.documentElement;
+    // A parse error yields a <parsererror> document rather than throwing.
+    if (root && root.nodeName.toLowerCase() === "svg") svg = root;
+  } catch {
+    svg = null;
+  }
+  parsed.set(name, svg);
+  return svg;
+}
+
+function setSize(svg, size) {
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  return svg;
+}
+
+// Build an icon element. Returns an empty <span> for an unknown name so the
+// caller's layout does not collapse, and never returns a string.
+export function icon(name, size = 16) {
   const span = document.createElement("span");
-  span.innerHTML = icon(name, size);
-  return span.firstElementChild;
+  span.className = "icon";
+  span.setAttribute("aria-hidden", "true");
+  span.setAttribute("focusable", "false");
+  const key = normalise(name);
+  if (key !== null) {
+    const tpl = templateFor(key);
+    if (tpl) {
+      const svg = document.importNode(tpl, true);
+      setSize(svg, size);
+      span.append(svg);
+      return span;
+    }
+  }
+  return span;
+}
+
+// Kept for the rare caller that genuinely needs markup (e.g. a build step).
+// Never pass this to h(): h() renders strings as text.
+export function iconMarkup(name, size = 16) {
+  const key = normalise(name);
+  if (key === null) return "";
+  const tpl = templateFor(key);
+  return tpl ? setSize(tpl.cloneNode(true), size).outerHTML : "";
+}
+
+// Element-only alias, for call sites that want the <svg> rather than the wrapper.
+export function iconEl(name, size = 16) {
+  const wrapper = icon(name, size);
+  return wrapper.firstElementChild || wrapper;
 }

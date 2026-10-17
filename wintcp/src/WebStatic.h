@@ -27,6 +27,13 @@ namespace wintcp {
 // Returns true if the path is safe to serve.
 bool IsSafeStaticPath(const std::string& path);
 
+// True when the path falls under a static prefix but is NOT safe to serve (a
+// traversal attempt, a reserved device name, a disallowed extension). The route
+// uses this to answer 403 rather than 404, so a probe cannot tell "no such
+// asset" from "that asset is forbidden" - and, more usefully, so a traversal
+// attempt is still recorded as a rejection.
+bool IsRejectedStaticPath(const std::string& path);
+
 // Get the MIME type for a file extension.
 const char* StaticMimeType(const std::string& ext);
 
