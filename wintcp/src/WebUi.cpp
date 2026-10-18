@@ -199,10 +199,17 @@ DWORD WINAPI ConnectionRefresherThread(LPVOID param) {
         // it walks a different kernel structure entirely (Toolhelp, not IP
         // Helper) and the two have no reason to block each other.
         //
-        // The connection counts it joins in are copied under the store lock
-        // first: they are a snapshot-in-time pairing of "which process owns how
-        // many sockets" with "what is that process doing", and taking them from
-        // an unlocked store would be a torn read.
+        // SKIPPED WHEN NOBODY IS LOOKING. Walking 350+ processes means opening
+        // each one for CPU times, and doing that forever for a server nobody has
+        // looked at is a pure tax: measured idle cost was 11% of one core before
+        // this guard, against the 1% budget in docs/webui.md. The connection
+        // refresh above still runs, because a connection is what the summaries
+        // are about; the process table is only worth enumerating when a request
+        // will actually read it.
+        if (now - context->lastStoreAccess.load() >= kConnRefreshIdleMs) {
+            continue;
+        }
+
         std::map<DWORD, int> connectionsByPid;
         std::map<DWORD, int> listenersByPid;
         {

@@ -391,6 +391,43 @@ System: uptime from `GetTickCount64`, and process, thread and handle counts from
 Every one of these is collected on the sampler thread. None of them runs inside a
 request.
 
+### Measured cost
+
+Taken on this machine (368 processes, 18 network adapters, 2 volumes), server-side
+time over 25 requests, and process CPU over 60 s:
+
+| Endpoint | median | p95 |
+|---|---|---|
+| `/api/health` (control) | 0.49 ms | 0.90 ms |
+| `/api/metrics/now` | 0.71 ms | 23.5 ms |
+| `/api/network/summary` | 0.60 ms | 1.05 ms |
+| `/api/processes?sort=cpu&limit=50` | 0.73 ms | 1.34 ms |
+| `/api/geo/summary` | 0.56 ms | 0.87 ms |
+| `/api/metrics/history?max=300` | 19.9 ms | 41.0 ms |
+| `/api/connections` | 9.3 ms | 34.1 ms |
+
+| Scenario | CPU |
+|---|---|
+| Idle, no client (2 min) | **0.3 %** of one core |
+| Active, client polling `/api/connections` + `/api/metrics/now` at 1 Hz (60 s) | **2.1 %** of one core |
+
+Two findings are recorded rather than smoothed over:
+
+- **`/api/metrics/history` is at the 20 ms line, not under it.** Cost scales with
+  sample count (50 samples 4.2 ms, 150 samples 13.4 ms, 300 samples 19.9 ms), so
+  it is per-sample work, not a fixed overhead. The cause is that
+  `GetHistory` returns `std::vector<MetricsSample>` **by value**, and
+  `MetricsSample` now holds eight `std::map`s per sample — so widening the metric
+  set made the copy itself expensive. The fix is columnar storage in the ring
+  buffer, which is a real refactor and is not done. Until then the UI asks for
+  300 samples rather than 900, which is what keeps it at the line instead of over
+  it.
+- **Idle cost was 11 % of one core** before the refresher learned to skip the
+  process enumeration when no read endpoint has touched the store for 30 s.
+  Walking 368 processes means opening each one for CPU times; doing that forever
+  for a server nobody has looked at is a pure tax. The connection refresh still
+  runs when idle, because a connection is what the summaries are about.
+
 ## Static asset handler
 
 `WebStatic.h/.cpp` serves files from `wintcp/webui/`.
