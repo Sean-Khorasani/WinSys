@@ -27,3 +27,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 *.mmdb
+/AGENTS.md
+/docs/webui-upgrade-plan.md
+/docs/webui-upgrade-report.md
