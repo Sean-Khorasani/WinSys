@@ -40,7 +40,7 @@ export function downsample(values, width) {
     let count = 0;
     for (let j = start; j < end && j < values.length; j += 1) {
       const v = values[j];
-      if (v === null || v === undefined || Number.isNaN(v)) continue;
+      if (!Number.isFinite(v)) continue;
       sum += v;
       count += 1;
     }
@@ -58,11 +58,23 @@ export function downsample(values, width) {
  * covered by `node --test` without a browser.
  */
 export function polylineSegments(values, width, height) {
-  const known = values.filter((v) => v !== null && v !== undefined && !Number.isNaN(v));
+  // Number.isFinite, not an isNaN check. Infinity and -Infinity pass every
+  // isNaN-style test, and they poison the min/max range: the browser then drops
+  // the whole polyline for having a non-finite attribute, and the chart vanishes
+  // with nothing in the console. The server already serialises non-finite values
+  // as null, but a value computed in the browser can still go infinite.
+  const known = values.filter((v) => Number.isFinite(v));
   if (known.length === 0) return null;
 
-  let min = Math.min(...known);
-  let max = Math.max(...known);
+  // Reduced with a loop rather than Math.min(...known): the tier-B history is up
+  // to 2160 samples, and spreading that many arguments has a real argument-count
+  // limit in some engines.
+  let min = known[0];
+  let max = known[0];
+  for (let i = 1; i < known.length; i += 1) {
+    if (known[i] < min) min = known[i];
+    if (known[i] > max) max = known[i];
+  }
   // A flat series (every sample identical) would divide by zero here. Give it a
   // band of its own so it draws through the middle instead of collapsing onto an
   // edge, which reads as "off scale".
@@ -77,7 +89,7 @@ export function polylineSegments(values, width, height) {
   let current = [];
   for (let i = 0; i < values.length; i += 1) {
     const v = values[i];
-    if (v === null || v === undefined || Number.isNaN(v)) {
+    if (!Number.isFinite(v)) {
       if (current.length > 0) segments.push(current.join(" "));
       current = [];
       continue;

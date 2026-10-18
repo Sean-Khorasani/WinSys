@@ -290,12 +290,28 @@ JSON with `Cache-Control: no-store`, and `Connection: close`.
 | POST | `/api/block/commit` | Commit a firewall block. Permit flow. |
 | GET | `/api/capabilities` | What THIS process can actually report. |
 | GET | `/api/system/info` | OS, CPU, memory, hostname, uptime. |
-| GET | `/api/metrics/catalog` | Series ids, labels, units, kinds. |
-| GET | `/api/metrics/now` | Latest sample, every catalogued series. |
-| GET | `/api/metrics/history?since=&max=&tier=` | Ring-buffer history. |
-| GET | `/api/processes` | Per-PID endpoint and listener counts. |
-| GET | `/api/network/summary` | Counts by state, protocol, family, process. |
-| GET | `/api/geo/summary` | Country and listener aggregates. |
+| GET | `/api/metrics/catalog` | Series ids, labels, units, kinds, availability. Built from a live sample, so per-core and per-instance ids exist exactly when the hardware does. |
+| GET | `/api/metrics/now` | Latest sample, every catalogued series, plus a `facts` block with volumes and adapters. |
+| GET | `/api/metrics/history?series=&since=&max=&tier=1s\|10s` | Ring-buffer history, columnar. `tier=10s` selects the 6 h tier. An unknown series or tier is a `400` naming what is valid. |
+| GET | `/api/processes?sort=&dir=&limit=` | The **whole** process table: name, PID, PPID, path, CPU %, working set, private bytes, I/O transfer, connection and listener counts. `sort` is one of `cpu`, `memory`, `private`, `ioread`, `iowrite`, `threads`, `name`, `pid`, `connections`, `listeners`. Rows with no reading for the sort column sort **last** in both directions. |
+| GET | `/api/network/summary` | Counts by state, protocol, family and process name; listener exposure split by wildcard / LAN / loopback. |
+| GET | `/api/geo/summary` | Country aggregates plus local and unknown counters. IPv4 only, and says so in `ipv4Only`. |
+
+### The connection store has a refresher
+
+`/api/connections` refreshes the connection store inline while building its own
+response. `/api/processes`, `/api/network/summary` and `/api/geo/summary` only
+read it. A background **refresher thread** (`ConnectionRefresherThread` in
+`WebUi.cpp`) now owns that refresh at 1 Hz, dropping to 0.5 Hz after 30 s with
+no reader, and serialises against the inline path with the same `g_storeMutex` —
+so the store is never observed mid-refresh.
+
+Without it, all three summaries returned empty objects on a cold server, and on a
+warm one they depended on the browser having polled `/api/connections` first. The
+process list depending on which endpoint the client happened to ask for is both
+invisible in the code and wrong. Each summary now also reports `snapshotKnown`
+and its age in milliseconds, so a three-second-old summary and a
+thirty-second-old one do not look identical.
 
 ### Unknown is never zero
 
@@ -319,19 +335,61 @@ loop only reads snapshots under the ring buffer's own mutex.
 - **Cadence.** 1 Hz while a client is polling. After 60 s with no
   `GetLatest`/`GetHistory` call it drops to 0.1 Hz. Verified: 8 consecutive
   samples at 1 s spacing with a client attached, 10 s spacing when idle.
-- **Ring buffer.** One tier: 900 samples, which is 15 minutes at 1 Hz.
+- **Ring buffers.** Two tiers. Tier A is 1 s x 900 (15 minutes); tier B is
+  10 s x 2160 (6 hours), written as a decimated copy of the same sample on a
+  fixed stride — not a second PDH pass, so the extra memory is the only cost.
+  `?tier=10s` selects it.
 - **First sample.** Discarded. A freshly added PDH counter has no baseline, so
   the first reading is not a real value. The same applies to the first sample
   after a re-enumeration.
-- **Re-enumeration.** Wildcard counters are re-enumerated every 5 minutes, or
-  on demand. It used to be 30 s, which threw away a rate baseline every 30 s.
-- **Thread safety.** The counter vectors belong exclusively to the sampler
+- **Wildcard counters need no re-enumeration.** Each family gets ONE
+  `PdhAddEnglishCounterW` handle and PDH tracks new instances on it itself.
+  `ReadGroup` reads names *and* values from the same
+  `PdhGetFormattedCounterArray` call, which is what makes it impossible to pair
+  disk 0's bytes/s with disk 1's name. The earlier design cached instance names
+  in a parallel vector and needed a 5-minute re-enumeration pass purely to
+  repair that cache; reading both together removes the cache, and with it the
+  whole class of "the instance list is stale" bug. A USB NIC now appears on the
+  next sample with no lost rate baseline. The `_Total` pseudo-instance is
+  dropped so per-instance columns do not double-count against the aggregate.
+- **Thread safety.** The counter handles belong exclusively to the sampler
   thread. `Reenumerate()` only raises a flag for it to act on; it must never
   touch them itself.
 - **Per-core CPU.** Read with `PdhGetFormattedCounterArray`, sorted numerically
   by `(group, core)` so the series order is stable across samples. `_Total` is
   excluded. Note that PDH's reported byte count OVER-estimates the buffer, so
   the reader allocates headroom and grows on `PDH_MORE_DATA`.
+
+### What the sampler measures
+
+Memory: used, installed, available (from `GlobalMemoryStatusEx`, which is what
+the KPI cards show — **not** PDH's "Committed Bytes", which is commit charge and
+a different number), cache, kernel paged pool, kernel non-paged pool, commit
+limit and commit peak.
+
+Disk: per physical disk, read and written bytes per second **plus** `% Disk
+Time`, `Current Disk Queue Length` and `Avg. Disk sec/Transfer` — throughput
+alone answers "how much", not "is it healthy". Instance names arrive as
+`"0 C:"` and the index is stripped so the sampler agrees with the volume list.
+Volumes carry capacity, file system and label from `GetDiskFreeSpaceExW` and
+`GetVolumeInformationW`.
+
+Network: per adapter received and sent bytes per second, link speed and up/down
+from `GetIfTable2`. The adapter name comes from `Alias`, which is the same string
+`\Network Interface(*)` uses as its PDH instance name — so the two join without a
+lookup table.
+
+GPU: `\GPU Engine(*)` collapsed from per-process instances to per engine type
+(`engtype_3D`, `engtype_Compute`, …) and `\GPU Adapter Memory(*)` dedicated
+usage. Summing per-process engine shares measures **scheduler busy time, not
+utilisation**; the UI labels it that way. Absent counters report null with a
+reason rather than zero.
+
+System: uptime from `GetTickCount64`, and process, thread and handle counts from
+`GetPerformanceInfo`.
+
+Every one of these is collected on the sampler thread. None of them runs inside a
+request.
 
 ## Static asset handler
 
@@ -429,21 +487,41 @@ it was disabled.
 
 ## Known limitations
 
-- **Feature parity is partial.** `/legacy` still carries filter/sort/group/
-  freeze, the permit flow, the script runner, template selection, presets,
-  bookmarks and alerts. Those are not yet in the control room.
-- **The Processes page derives rows from the connection store**, not by
-  enumerating processes. A process with no open endpoint does not appear.
-- **Tree and Treemap views are disabled** in Processes.
+- **Feature parity with `/legacy` is still partial.** `/legacy` carries
+  filter/sort/group/freeze on the connection table, the permit flow, the script
+  runner, template selection, presets, bookmarks and desktop alerts. Those are
+  not yet in the control room. The control room's own filter, sort, grouping,
+  column picker, CSV/TSV/JSON export, copy-rows, saved views and details dialog
+  work on its own; what is missing is the *automation* surface.
+- **Tree and Treemap views are disabled** in Processes. The endpoint now
+  supplies the parent chain and the per-process figures they would need.
+- **Per-process thread count is `null`.** `PROCESSENTRY32W` has no
+  `th32Threads` field and this SDK `#define`s the ANSI struct that does have one
+  away to it, so Toolhelp cannot supply it. The alternative,
+  `NtQuerySystemInformation(SystemProcessInformation)`, returns it — but on this
+  machine its buffer does not match the layout `winnt.h` documents: the first
+  record's `NextEntryOffset` does not read as a plausible offset and the chain
+  ends after one record. Decoding it would mean reverse-engineering an
+  undocumented structure and then trusting it with every PID the UI shows, so it
+  was rejected. A wrong PID is worse than an absent thread count.
+- **Per-process I/O is transfer bytes** — file, pipe and device — not disk-only,
+  and per-process bandwidth is not shown at all.
 - **Traffic is not scanned in the Web UI.** The per-socket `SIO_TCP_INFO` scan
   wedges under polling (see `ConnectionsJson` in `WebUi.cpp`), so the traffic
   column reads `-` here while the CLI and GUI still show it.
+- **GeoIP is IPv4 only.** `world-atlas` data ships, and the country table is
+  wired, but no `.mmdb` database is configured by default; without one every
+  remote peer lands in `unknown`, and the Map page shows a setup card.
 - **ECharts is the full build**, 1,030,855 bytes, against a 450 KB target.
   It forces the 2 MiB vendor cap. No donut/treemap/sankey/map chart is wired
-  yet.
-- **GPU counters are not collected.** `/api/capabilities` reports `gpu:false`.
-- **Tier B (6 h) history is not implemented.** Only the 900-sample tier exists.
+  yet — the Overview uses CSS bars and divs instead, which need no bundle.
+- **No `.mmdb` is shipped.** WinTCP vendors no geolocation database; that is
+  licensed data, and downloading one at run time would break the offline
+  requirement.
 - **The Inter font is not vendored**; the UI uses the system font stack.
+- **The dark chart palette deviates from shadcn.** Its dark values are four of
+  five red or amber, which made a two-series chart render as two shades of the
+  same red. The five are re-hued; see [`webui-design.md`](webui-design.md).
 
 See [`webui-design.md`](webui-design.md) for the design system, component
 catalogue, and extension guide; [`webui-upgrade-plan.md`](webui-upgrade-plan.md)

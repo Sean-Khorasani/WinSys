@@ -660,6 +660,32 @@ try {
                 for ($k = [Math]::Max(0, $lines.Count - 25); $k -lt $lines.Count; $k++) { Say ("    " + $lines[$k]) }
             }
             Remove-Item -LiteralPath (Join-Path $t 'unit.txt'), ((Join-Path $t 'unit.txt') + '.err') -ErrorAction SilentlyContinue
+
+            # Web UI pure-logic tests: node --test over wintcp/tests/webui/.
+            #
+            # Node is DEV-ONLY. If it is not on PATH the tests are SKIPPED with a
+            # note, never failed: the product must build and run without Node, and
+            # a gate that depends on it would contradict that. The suite covers
+            # chart geometry that would otherwise only be caught by looking at a
+            # screenshot - which is exactly the class of bug a missing-argument
+            # bug is.
+            $nodeExe = (Get-Command node -ErrorAction SilentlyContinue)
+            if ($null -eq $nodeExe) {
+                Say 'skip  webui node tests (node not on PATH - dev-only, not required)'
+            } else {
+                $webuiTests = Join-Path $Root 'wintcp\tests\webui'
+                $r2 = Invoke-Proc -exe $nodeExe.Source -argv @('--test', $webuiTests) `
+                        -out (Join-Path $t 'webui.txt')
+                if ($r2.Rc -eq 0) {
+                    Say 'ok    webui node tests (node --test wintcp/tests/webui)'
+                } else {
+                    $fails++
+                    Say ("FAIL  webui node tests [rc={0}]" -f $r2.Rc)
+                    $lines2 = $r2.Text.Trim().Split("`n")
+                    for ($k = [Math]::Max(0, $lines2.Count - 25); $k -lt $lines2.Count; $k++) { Say ("    " + $lines2[$k]) }
+                }
+                Remove-Item -LiteralPath (Join-Path $t 'webui.txt'), ((Join-Path $t 'webui.txt') + '.err') -ErrorAction SilentlyContinue
+            }
         }
 
         # The stale-gate trap: fast-build writes HERE (build-fast\) and the
@@ -700,7 +726,7 @@ try {
             exit 2
         }
         Say ("FAST: PASS - {0}/{1} checks ok (CLI smoke + harness self-check{2})" -f `
-             $totalChecks, $totalChecks, $(if ($needTests) { ' + unit driver' } else { '' }))
+             $totalChecks, $totalChecks, $(if ($needTests) { ' + unit driver + webui node tests' } else { '' }))
     }
     exit 0
 }
