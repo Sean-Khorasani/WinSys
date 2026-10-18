@@ -1,6 +1,6 @@
 {
-  "url": "http://127.0.0.1:50858",
-  "when": "2026-10-18T01:21:39.404Z",
+  "url": "http://127.0.0.1:58250",
+  "when": "2026-10-18T03:44:37.805Z",
   "results": [
     {
       "theme": "light",
@@ -23,6 +23,12 @@
     {
       "theme": "light",
       "page": "#/network",
+      "heading": "Network",
+      "problems": []
+    },
+    {
+      "theme": "light",
+      "page": "#/network › flows",
       "heading": "Network",
       "problems": []
     },
@@ -77,6 +83,12 @@
     {
       "theme": "dark",
       "page": "#/network",
+      "heading": "Network",
+      "problems": []
+    },
+    {
+      "theme": "dark",
+      "page": "#/network › flows",
       "heading": "Network",
       "problems": []
     },

@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-18T01:21:39.721Z",
-  "url": "http://127.0.0.1:50858",
+  "when": "2026-10-18T03:44:47.815Z",
+  "url": "http://127.0.0.1:58250",
   "pages": [
     {
       "theme": "light",
@@ -8,7 +8,7 @@
       "name": "Overview",
       "violations": [],
       "contrast": {
-        "checked": 127,
+        "checked": 139,
         "failures": 0,
         "worst": [
           {
@@ -94,7 +94,7 @@
       "name": "Performance",
       "violations": [],
       "contrast": {
-        "checked": 95,
+        "checked": 107,
         "failures": 0,
         "worst": [
           {
@@ -180,11 +180,11 @@
       "name": "Processes",
       "violations": [],
       "contrast": {
-        "checked": 86,
+        "checked": 249,
         "failures": 0,
         "worst": [
           {
-            "selector": "button.proc-view",
+            "selector": "button.tab",
             "text": "Tree",
             "fontSizePx": 14,
             "fontWeight": 500,
@@ -196,7 +196,7 @@
             "passes": true
           },
           {
-            "selector": "button.proc-view",
+            "selector": "button.tab",
             "text": "Treemap",
             "fontSizePx": 14,
             "fontWeight": 500,
@@ -233,7 +233,7 @@
           },
           {
             "selector": "div",
-            "text": "Connections",
+            "text": "PPID",
             "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
@@ -244,21 +244,21 @@
             "passes": true
           },
           {
-            "selector": "a",
-            "text": "WinTCP",
-            "fontSizePx": 14,
-            "fontWeight": 400,
+            "selector": "div",
+            "text": "CPU %",
+            "fontSizePx": 12,
+            "fontWeight": 500,
             "isLargeText": false,
             "foreground": "rgb(105, 105, 105)",
-            "background": "rgb(255, 255, 255)",
-            "ratio": 5.49,
+            "background": "rgb(245, 245, 245)",
+            "ratio": 5.04,
             "required": 4.5,
             "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 24
+      "passes": 25
     },
     {
       "theme": "light",
@@ -266,7 +266,7 @@
       "name": "Network",
       "violations": [],
       "contrast": {
-        "checked": 147,
+        "checked": 162,
         "failures": 0,
         "worst": [
           {
@@ -344,7 +344,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 22
+      "passes": 25
     },
     {
       "theme": "light",
@@ -438,12 +438,12 @@
       "name": "Automations",
       "violations": [],
       "contrast": {
-        "checked": 27,
+        "checked": 28,
         "failures": 0,
         "worst": [
           {
             "selector": "button.tab",
-            "text": "Templates",
+            "text": "Scripts",
             "fontSizePx": 14,
             "fontWeight": 500,
             "isLargeText": false,
@@ -455,7 +455,7 @@
           },
           {
             "selector": "button.tab",
-            "text": "Events",
+            "text": "Events & audit",
             "fontSizePx": 14,
             "fontWeight": 500,
             "isLargeText": false,
@@ -491,7 +491,7 @@
           },
           {
             "selector": "p.page-description",
-            "text": "Scripts, monitors, and events",
+            "text": "Monitor templates, the audit trail, and the script workbench",
             "fontSizePx": 14,
             "fontWeight": 400,
             "isLargeText": false,
@@ -502,8 +502,8 @@
             "passes": true
           },
           {
-            "selector": "p.empty-state",
-            "text": "Automation workbench - see legacy views",
+            "selector": "p.empty-state-detail.muted",
+            "text": "The catalogue file did not load.",
             "fontSizePx": 14,
             "fontWeight": 400,
             "isLargeText": false,
@@ -610,7 +610,7 @@
       "name": "System",
       "violations": [],
       "contrast": {
-        "checked": 65,
+        "checked": 64,
         "failures": 0,
         "worst": [
           {
@@ -696,7 +696,7 @@
       "name": "Settings",
       "violations": [],
       "contrast": {
-        "checked": 46,
+        "checked": 54,
         "failures": 0,
         "worst": [
           {
@@ -774,7 +774,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 20
+      "passes": 21
     },
     {
       "theme": "dark",
@@ -954,11 +954,11 @@
       "name": "Processes",
       "violations": [],
       "contrast": {
-        "checked": 86,
+        "checked": 249,
         "failures": 0,
         "worst": [
           {
-            "selector": "button.proc-view",
+            "selector": "button.tab",
             "text": "Tree",
             "fontSizePx": 14,
             "fontWeight": 500,
@@ -970,7 +970,7 @@
             "passes": true
           },
           {
-            "selector": "button.proc-view",
+            "selector": "button.tab",
             "text": "Treemap",
             "fontSizePx": 14,
             "fontWeight": 500,
@@ -1007,7 +1007,7 @@
           },
           {
             "selector": "div",
-            "text": "Connections",
+            "text": "PPID",
             "fontSizePx": 12,
             "fontWeight": 500,
             "isLargeText": false,
@@ -1018,21 +1018,21 @@
             "passes": true
           },
           {
-            "selector": "a",
-            "text": "WinTCP",
-            "fontSizePx": 14,
-            "fontWeight": 400,
+            "selector": "div",
+            "text": "CPU %",
+            "fontSizePx": 12,
+            "fontWeight": 500,
             "isLargeText": false,
             "foreground": "rgb(161, 161, 161)",
-            "background": "rgb(10, 10, 10)",
-            "ratio": 7.66,
+            "background": "rgb(38, 38, 38)",
+            "ratio": 5.86,
             "required": 4.5,
             "passes": true
           }
         ]
       },
       "blocking": 0,
-      "passes": 24
+      "passes": 25
     },
     {
       "theme": "dark",
@@ -1040,7 +1040,7 @@
       "name": "Network",
       "violations": [],
       "contrast": {
-        "checked": 147,
+        "checked": 162,
         "failures": 0,
         "worst": [
           {
@@ -1118,7 +1118,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 22
+      "passes": 25
     },
     {
       "theme": "dark",
@@ -1212,12 +1212,12 @@
       "name": "Automations",
       "violations": [],
       "contrast": {
-        "checked": 27,
+        "checked": 28,
         "failures": 0,
         "worst": [
           {
             "selector": "button.tab",
-            "text": "Templates",
+            "text": "Scripts",
             "fontSizePx": 14,
             "fontWeight": 500,
             "isLargeText": false,
@@ -1229,25 +1229,13 @@
           },
           {
             "selector": "button.tab",
-            "text": "Events",
+            "text": "Events & audit",
             "fontSizePx": 14,
             "fontWeight": 500,
             "isLargeText": false,
             "foreground": "rgb(161, 161, 161)",
             "background": "rgb(38, 38, 38)",
             "ratio": 5.86,
-            "required": 4.5,
-            "passes": true
-          },
-          {
-            "selector": "p.empty-state",
-            "text": "Automation workbench - see legacy views",
-            "fontSizePx": 14,
-            "fontWeight": 400,
-            "isLargeText": false,
-            "foreground": "rgb(161, 161, 161)",
-            "background": "rgb(23, 23, 23)",
-            "ratio": 6.94,
             "required": 4.5,
             "passes": true
           },
@@ -1277,7 +1265,19 @@
           },
           {
             "selector": "p.page-description",
-            "text": "Scripts, monitors, and events",
+            "text": "Monitor templates, the audit trail, and the script workbench",
+            "fontSizePx": 14,
+            "fontWeight": 400,
+            "isLargeText": false,
+            "foreground": "rgb(161, 161, 161)",
+            "background": "rgb(10, 10, 10)",
+            "ratio": 7.66,
+            "required": 4.5,
+            "passes": true
+          },
+          {
+            "selector": "p.empty-state-detail.muted",
+            "text": "The catalogue file did not load.",
             "fontSizePx": 14,
             "fontWeight": 400,
             "isLargeText": false,
@@ -1384,7 +1384,7 @@
       "name": "System",
       "violations": [],
       "contrast": {
-        "checked": 65,
+        "checked": 64,
         "failures": 0,
         "worst": [
           {
@@ -1470,7 +1470,7 @@
       "name": "Settings",
       "violations": [],
       "contrast": {
-        "checked": 46,
+        "checked": 54,
         "failures": 0,
         "worst": [
           {
@@ -1548,7 +1548,7 @@
         ]
       },
       "blocking": 0,
-      "passes": 20
+      "passes": 21
     }
   ]
 }

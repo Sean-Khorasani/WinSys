@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-18T01:22:12.335Z",
-  "url": "http://127.0.0.1:50858",
+  "when": "2026-10-18T03:45:20.954Z",
+  "url": "http://127.0.0.1:58250",
   "results": [
     {
       "name": "Wrong Host header is rejected",

@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-18T01:22:17.938Z",
-  "url": "http://127.0.0.1:50858",
+  "when": "2026-10-18T03:27:28.819Z",
+  "url": "http://127.0.0.1:17587",
   "checks": [
     {
       "name": "Tab moves focus into the page",
@@ -30,7 +30,7 @@
     {
       "name": "Processes grid exposes role=grid with a name",
       "pass": true,
-      "detail": "role=grid label=\"Processes with open endpoints\" rows=19"
+      "detail": "role=grid label=\"Processes on this machine\" rows=21"
     },
     {
       "name": "Processes grid is focusable",
@@ -45,7 +45,7 @@
     {
       "name": "End scrolls the grid to the last row",
       "pass": true,
-      "detail": "scrollTop=1443 of 1943"
+      "detail": "scrollTop=6315 of 6835"
     },
     {
       "name": "Home returns to the first row",
