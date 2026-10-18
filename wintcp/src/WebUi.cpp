@@ -149,6 +149,11 @@ std::string TrimAscii(const std::string& s) {
     return s.substr(first, last - first);
 }
 
+// The three emitters below are declared in WebUi.h so the unit tests can assert
+// their output. Everything after this point is still file-local.
+
+}  // namespace
+
 std::string JsonQuote(const std::string& s) {
     static const char hex[] = "0123456789abcdef";
     std::string out = "\"";
@@ -446,6 +451,8 @@ std::string JsonNumber(double value) {
     }
     return text.empty() ? "0" : text;
 }
+
+namespace {
 
 bool GetExecutableDirectory(std::wstring* directory) {
     if (directory == nullptr) return false;
@@ -962,17 +969,96 @@ std::string SystemInfoJson(ServerContext& context) {
     return out.str();
 }
 
-std::string MetricsCatalogJson() {
+// One series id per metric, plus its per-instance siblings. The catalog is the
+// contract the UI renders a series picker from, so it has to name every series
+// the history endpoint will actually answer for - a picker built from a
+// hand-written list silently omits the per-instance and per-core series.
+std::string MetricsCatalogJson(const MetricsSample& probe) {
     std::ostringstream out;
-    out << "{\"series\":["
-        << "{\"id\":\"cpu.total\",\"label\":\"CPU Total\",\"unit\":\"%\",\"kind\":\"gauge\"},"
-        << "{\"id\":\"mem.usedBytes\",\"label\":\"Memory Used\",\"unit\":\"bytes\",\"kind\":\"gauge\"},"
-        << "{\"id\":\"mem.totalBytes\",\"label\":\"Memory Total\",\"unit\":\"bytes\",\"kind\":\"gauge\"},"
-        << "{\"id\":\"disk.readBps\",\"label\":\"Disk Read\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"},"
-        << "{\"id\":\"disk.writeBps\",\"label\":\"Disk Write\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"},"
-        << "{\"id\":\"net.rxBps\",\"label\":\"Network RX\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"},"
-        << "{\"id\":\"net.txBps\",\"label\":\"Network TX\",\"unit\":\"bytes/s\",\"kind\":\"gauge\"}"
-        << "]}";
+    out << "{\"series\":[";
+    bool first = true;
+    const auto series = [&](const char* id, const char* label, const char* unit,
+                            const char* kind, bool available) {
+        if (!first) out << ",";
+        first = false;
+        out << "{\"id\":" << JsonQuote(id)
+            << ",\"label\":" << JsonQuote(label)
+            << ",\"unit\":" << JsonQuote(unit)
+            << ",\"kind\":" << JsonQuote(kind)
+            // Availability is reported per series, not as one global flag: CPU
+            // can be readable while per-core GPU counters are absent, and the UI
+            // has to grey out exactly the second one.
+            << ",\"available\":" << (available ? "true" : "false")
+            << "}";
+    };
+
+    series("cpu.total", "CPU Total", "%", "gauge", probe.cpuTotalKnown);
+    series("mem.usedBytes", "Memory Used", "bytes", "gauge", probe.memUsedKnown);
+    series("mem.totalBytes", "Memory Installed", "bytes", "gauge", probe.memTotalKnown);
+    series("mem.availableBytes", "Memory Available", "bytes", "gauge", probe.memAvailableKnown);
+    series("mem.cacheBytes", "Cache", "bytes", "gauge", probe.memCacheKnown);
+    series("mem.kernelPagedBytes", "Kernel paged pool", "bytes", "gauge", probe.memKernelPagedKnown);
+    series("mem.kernelNonPagedBytes", "Kernel non-paged pool", "bytes", "gauge", probe.memKernelNonPagedKnown);
+    series("mem.commitLimitBytes", "Commit limit", "bytes", "gauge", probe.memCommitLimitKnown);
+    series("mem.commitPeakBytes", "Commit peak", "bytes", "gauge", probe.memCommitPeakKnown);
+    series("disk.readBps", "Disk Read", "bytes/s", "gauge", !probe.diskReadBps.empty());
+    series("disk.writeBps", "Disk Write", "bytes/s", "gauge", !probe.diskWriteBps.empty());
+    series("disk.activePct", "Disk Active", "%", "gauge", !probe.diskActivePct.empty());
+    series("disk.queueLength", "Disk queue", "requests", "gauge", !probe.diskQueueLength.empty());
+    series("disk.latencyMs", "Disk latency", "ms", "gauge", !probe.diskLatencyMs.empty());
+    series("net.rxBps", "Network received", "bytes/s", "gauge", !probe.netRxBps.empty());
+    series("net.txBps", "Network sent", "bytes/s", "gauge", !probe.netTxBps.empty());
+    series("gpu.vramBytes", "GPU dedicated memory", "bytes", "gauge", probe.gpuVramKnown);
+    series("sys.uptimeSeconds", "Uptime", "seconds", "counter", probe.uptimeKnown);
+    series("sys.processCount", "Processes", "count", "gauge", probe.processCountKnown);
+    series("sys.threadCount", "Threads", "count", "gauge", probe.threadCountKnown);
+    series("sys.handleCount", "Handles", "count", "gauge", probe.handleCountKnown);
+
+    // Per-core CPU, one catalog entry each, so a range picker can list them.
+    for (size_t i = 0; i < probe.cpuCore.size(); ++i) {
+        const bool known = i < probe.cpuCoreKnown.size() && probe.cpuCoreKnown[i];
+        const std::string id = "cpu.core." + std::to_string(i);
+        const std::string label = "CPU core " + std::to_string(i);
+        series(id.c_str(), label.c_str(), "%", "gauge", known);
+    }
+    // Per-instance disk and network series, named "<family>.<label>" so the
+    // history endpoint can resolve them from one id.
+    for (const auto& kv : probe.diskReadBps) {
+        const std::string id = "disk.readBps." + WideToUtf8(kv.first);
+        series(id.c_str(), ("Disk read " + WideToUtf8(kv.first)).c_str(),
+               "bytes/s", "gauge",
+               probe.diskReadKnown.count(kv.first) > 0);
+    }
+    for (const auto& kv : probe.diskWriteBps) {
+        const std::string id = "disk.writeBps." + WideToUtf8(kv.first);
+        series(id.c_str(), ("Disk write " + WideToUtf8(kv.first)).c_str(),
+               "bytes/s", "gauge",
+               probe.diskWriteKnown.count(kv.first) > 0);
+    }
+    for (const auto& kv : probe.netRxBps) {
+        const std::string id = "net.rxBps." + WideToUtf8(kv.first);
+        series(id.c_str(), ("Network received " + WideToUtf8(kv.first)).c_str(),
+               "bytes/s", "gauge", probe.netRxKnown.count(kv.first) > 0);
+    }
+    for (const auto& kv : probe.netTxBps) {
+        const std::string id = "net.txBps." + WideToUtf8(kv.first);
+        series(id.c_str(), ("Network sent " + WideToUtf8(kv.first)).c_str(),
+               "bytes/s", "gauge", probe.netTxKnown.count(kv.first) > 0);
+    }
+    for (const auto& kv : probe.netLinkBits) {
+        if (!kv.second) continue;
+        const std::string id = "net.linkBits." + WideToUtf8(kv.first);
+        series(id.c_str(), ("Link speed " + WideToUtf8(kv.first)).c_str(),
+               "bits/s", "gauge", true);
+    }
+    for (const auto& kv : probe.volumes) {
+        if (!kv.second.known) continue;
+        const std::string id = "vol.freeBytes." + WideToUtf8(kv.first);
+        series(id.c_str(), ("Free " + WideToUtf8(kv.first)).c_str(),
+               "bytes", "gauge", true);
+    }
+
+    out << "]}";
     return out.str();
 }
 
@@ -992,46 +1078,182 @@ double SumInstances(const std::map<std::wstring, double>& values,
     return total;
 }
 
+// Volumes and adapters as a COMPLETE JSON object.
+//
+// This is deliberately a whole object rather than a fragment the caller splices
+// into a larger string. The first version emitted `"facts":"volumes":[{...}]`
+// with no opening brace, which made every /api/metrics/now response invalid
+// JSON and silently broke every consumer on the far side of the parse.
+std::string MetricsFactsJson(const MetricsSample& sample) {
+    std::ostringstream out;
+    out << "{\"volumes\":[";
+    bool first = true;
+    for (const auto& kv : sample.volumes) {
+        if (!kv.second.known) continue;
+        if (!first) out << ",";
+        first = false;
+        out << "{\"label\":" << JsonQuote(WideToUtf8(kv.first))
+            << ",\"fileSystem\":" << JsonQuote(WideToUtf8(kv.second.fileSystem))
+            << ",\"volumeName\":" << JsonQuote(WideToUtf8(kv.second.label))
+            << ",\"totalBytes\":" << kv.second.totalBytes
+            << ",\"freeBytes\":" << kv.second.freeBytes << "}";
+    }
+    out << "],\"adapters\":[";
+    first = true;
+    // Iterated from netUp, not netLinkKnown: an adapter with no link speed
+    // (a tunnel, a loopback alias, a virtual switch) is still an adapter the
+    // user can see in Task Manager, and hiding it would be the same lie as
+    // reporting its speed as zero.
+    for (const auto& kv : sample.netUp) {
+        if (!first) out << ",";
+        first = false;
+        const auto bits = sample.netLinkBits.find(kv.first);
+        const bool linkKnown = bits != sample.netLinkBits.end() &&
+                               sample.netLinkBits.count(kv.first) > 0;
+        out << "{\"name\":" << JsonQuote(WideToUtf8(kv.first))
+            << ",\"linkBits\":" << (linkKnown
+                                    ? JsonNumber(static_cast<double>(bits->second))
+                                    : std::string("null"))
+            << ",\"linkKnown\":" << (linkKnown ? "true" : "false")
+            // "up" is a link fact read straight from the interface table, not a
+            // guess from traffic: a down link really can show non-zero counters
+            // for a few seconds while the driver settles.
+            << ",\"up\":" << (kv.second ? "true" : "false") << "}";
+    }
+    out << "]}";
+    return out.str();
+}
+
 std::string MetricsNowJson(ServerContext& context) {
     MetricsSample sample;
     const bool have = context.metricsCollector.GetLatest(&sample);
+    // Non-series facts the UI needs but that are not time series: volumes are a
+    // capacity snapshot, link speed is a link property, and neither belongs in
+    // the history arrays. They go in a sibling object so /api/metrics/now stays
+    // a flat map of series ids plus one "facts" block.
+    const std::string facts = MetricsFactsJson(sample);
     std::ostringstream out;
     out << "{";
     if (have) {
         // Every catalogued series is always present. An unavailable counter is
         // null plus a reason, never 0 - a zero here would read as "idle".
-        const auto series = [&](const char* id, bool known, double value,
+        const auto series = [&](const std::string& id, bool known, double value,
                                 const char* reason) {
             out << "\"" << id << "\":" << (known ? JsonNumber(value) : std::string("null"))
                 << ",\"" << id << ".reason\":"
                 << (known ? "null" : JsonQuote(reason)) << ",";
         };
+        const auto anyInstance = [](const auto& /*values*/, const auto& knowns,
+                                    const std::wstring& key) {
+            auto it = knowns.find(key);
+            return it != knowns.end() && it->second;
+        };
+
         series("cpu.total", sample.cpuTotalKnown, sample.cpuTotal,
                "PDH counter not ready");
         series("mem.usedBytes", sample.memUsedKnown,
                static_cast<double>(sample.memUsed), "PDH counter not ready");
         series("mem.totalBytes", sample.memTotalKnown,
                static_cast<double>(sample.memTotal), "PDH counter not ready");
-        bool diskReadKnown = false, diskWriteKnown = false;
-        bool netRxKnown = false, netTxKnown = false;
-        const double diskRead = SumInstances(sample.diskReadBps, sample.diskReadKnown,
-                                             &diskReadKnown);
-        const double diskWrite = SumInstances(sample.diskWriteBps, sample.diskWriteKnown,
-                                              &diskWriteKnown);
-        const double netRx = SumInstances(sample.netRxBps, sample.netRxKnown, &netRxKnown);
-        const double netTx = SumInstances(sample.netTxBps, sample.netTxKnown, &netTxKnown);
-        series("disk.readBps", diskReadKnown, diskRead, "no disk counters available");
-        series("disk.writeBps", diskWriteKnown, diskWrite, "no disk counters available");
-        series("net.rxBps", netRxKnown, netRx, "no network counters available");
-        series("net.txBps", netTxKnown, netTx, "no network counters available");
-        // Per-core CPU: cpu.core.<n>, null where the core reported no data. No
-        // leading comma - the series() lambda above already left one.
+        series("mem.availableBytes", sample.memAvailableKnown,
+               static_cast<double>(sample.memAvailable), "PDH counter not ready");
+        series("mem.cacheBytes", sample.memCacheKnown,
+               static_cast<double>(sample.memCache),
+               "this Windows build does not expose Cache Bytes");
+        series("mem.kernelPagedBytes", sample.memKernelPagedKnown,
+               static_cast<double>(sample.memKernelPaged), "PDH counter not ready");
+        series("mem.kernelNonPagedBytes", sample.memKernelNonPagedKnown,
+               static_cast<double>(sample.memKernelNonPaged), "PDH counter not ready");
+        series("mem.commitLimitBytes", sample.memCommitLimitKnown,
+               static_cast<double>(sample.memCommitLimit), "PDH counter not ready");
+        series("mem.commitPeakBytes", sample.memCommitPeakKnown,
+               static_cast<double>(sample.memCommitPeak), "PDH counter not ready");
+
+        // Aggregates across all instances. The aggregate and the per-instance series
+        // are both emitted: the KPI cards want the total, the Performance page
+        // wants each disk and adapter separately.
+        {
+            bool known = false;
+            const double diskRead = SumInstances(sample.diskReadBps,
+                                                  sample.diskReadKnown, &known);
+            series("disk.readBps", known, diskRead, "no disk counters available");
+        }
+        {
+            bool known = false;
+            const double diskWrite = SumInstances(sample.diskWriteBps,
+                                                   sample.diskWriteKnown, &known);
+            series("disk.writeBps", known, diskWrite, "no disk counters available");
+        }
+        {
+            bool known = false;
+            const double netRx = SumInstances(sample.netRxBps, sample.netRxKnown, &known);
+            series("net.rxBps", known, netRx, "no network counters available");
+        }
+        {
+            bool known = false;
+            const double netTx = SumInstances(sample.netTxBps, sample.netTxKnown, &known);
+            series("net.txBps", known, netTx, "no network counters available");
+        }
+
+        // Per-instance throughput, so the Performance page can draw one series
+        // per disk and one per adapter.
+        for (const auto& kv : sample.diskReadBps) {
+            series("disk.readBps." + WideToUtf8(kv.first),
+                   anyInstance(sample.diskReadBps, sample.diskReadKnown, kv.first),
+                   kv.second, "this disk reported no reading");
+        }
+        for (const auto& kv : sample.diskWriteBps) {
+            series("disk.writeBps." + WideToUtf8(kv.first),
+                   anyInstance(sample.diskWriteBps, sample.diskWriteKnown, kv.first),
+                   kv.second, "this disk reported no reading");
+        }
+        for (const auto& kv : sample.netRxBps) {
+            series("net.rxBps." + WideToUtf8(kv.first),
+                   anyInstance(sample.netRxBps, sample.netRxKnown, kv.first),
+                   kv.second, "this adapter reported no reading");
+        }
+        for (const auto& kv : sample.netTxBps) {
+            series("net.txBps." + WideToUtf8(kv.first),
+                   anyInstance(sample.netTxBps, sample.netTxKnown, kv.first),
+                   kv.second, "this adapter reported no reading");
+        }
+        series("gpu.vramBytes", sample.gpuVramKnown,
+               static_cast<double>(sample.gpuVramUsed),
+               "no GPU adapter memory counter on this machine");
+        series("sys.uptimeSeconds", sample.uptimeKnown,
+               static_cast<double>(sample.uptimeSeconds), "");
+        series("sys.processCount", sample.processCountKnown,
+               static_cast<double>(sample.processCount), "");
+        series("sys.threadCount", sample.threadCountKnown,
+               static_cast<double>(sample.threadCount), "");
+        series("sys.handleCount", sample.handleCountKnown,
+               static_cast<double>(sample.handleCount), "");
+
+        for (const auto& kv : sample.diskActivePct) {
+            series("disk.activePct." + WideToUtf8(kv.first),
+                   anyInstance(sample.diskActivePct, sample.diskActiveKnown, kv.first),
+                   kv.second, "");
+        }
+        for (const auto& kv : sample.diskQueueLength) {
+            series("disk.queueLength." + WideToUtf8(kv.first),
+                   anyInstance(sample.diskQueueLength, sample.diskQueueKnown, kv.first),
+                   kv.second, "");
+        }
+        for (const auto& kv : sample.diskLatencyMs) {
+            series("disk.latencyMs." + WideToUtf8(kv.first),
+                   anyInstance(sample.diskLatencyMs, sample.diskLatencyKnown, kv.first),
+                   kv.second, "");
+        }
+        for (const auto& kv : sample.gpuEnginePct) {
+            series("gpu.engine." + WideToUtf8(kv.first),
+                   anyInstance(sample.gpuEnginePct, sample.gpuEngineKnown, kv.first),
+                   kv.second, "");
+        }
+        // Per-core CPU: cpu.core.<n>, null where the core reported no data.
         for (size_t i = 0; i < sample.cpuCore.size(); ++i) {
             const bool known = i < sample.cpuCoreKnown.size() && sample.cpuCoreKnown[i];
-            out << "\"cpu.core." << i << "\":"
-                << (known ? JsonNumber(sample.cpuCore[i]) : std::string("null"))
-                << ",\"cpu.core." << i << ".reason\":"
-                << (known ? "null" : JsonQuote("core counter returned no data")) << ",";
+            series("cpu.core." + std::to_string(i), known, sample.cpuCore[i],
+                   "core counter returned no data");
         }
         out << "\"_timestamp\":" << sample.unixTime;
     } else {
@@ -1039,19 +1261,128 @@ std::string MetricsNowJson(ServerContext& context) {
         out << "\"cpu.total\":null,\"cpu.total.reason\":" << reason
             << ",\"mem.usedBytes\":null,\"mem.usedBytes.reason\":" << reason
             << ",\"mem.totalBytes\":null,\"mem.totalBytes.reason\":" << reason
+            << ",\"mem.availableBytes\":null,\"mem.availableBytes.reason\":" << reason
+            << ",\"mem.cacheBytes\":null,\"mem.cacheBytes.reason\":" << reason
             << ",\"disk.readBps\":null,\"disk.readBps.reason\":" << reason
             << ",\"disk.writeBps\":null,\"disk.writeBps.reason\":" << reason
             << ",\"net.rxBps\":null,\"net.rxBps.reason\":" << reason
-            << ",\"net.txBps\":null,\"net.txBps.reason\":" << reason;
+            << ",\"net.txBps\":null,\"net.txBps.reason\":" << reason
+            << ",\"gpu.vramBytes\":null,\"gpu.vramBytes.reason\":" << reason;
     }
-    out << "}";
+    out << ",\"facts\":" << MetricsFactsJson(sample) << "}";
     return out.str();
+}
+
+// Extract one named series from a sample. `id` is either a bare series
+// ("cpu.total") or an instance-qualified one ("disk.readBps.C:"), and the
+// per-instance form falls back to the aggregate when the suffix does not match a
+// live instance - a disk that was unplugged must not turn a whole chart into
+// nulls. Returns false only when the value genuinely has no meaning here.
+bool ExtractSeries(const MetricsSample& s, const std::string& id, double* value,
+                   bool* known) {
+    *known = false;
+    *value = 0.0;
+
+    const auto scalar = [&](bool ok, double v) {
+        *known = ok;
+        *value = v;
+    };
+    const auto instanceSplit = [&](const char* prefix,
+                                   const std::map<std::wstring, double>& values,
+                                   const std::map<std::wstring, bool>& knowns) {
+        const size_t prefixLen = std::strlen(prefix);
+        if (id.size() <= prefixLen || id.compare(0, prefixLen, prefix) != 0) {
+            return false;
+        }
+        std::wstring suffix;
+        if (!Utf8ToWide(id.substr(prefixLen), &suffix)) return true;   // known=false
+        auto vit = values.find(suffix);
+        if (vit == values.end()) {
+            // Fall back to the family aggregate.
+            bool any = false;
+            *value = SumInstances(values, knowns, &any);
+            *known = any;
+            return true;
+        }
+        auto kit = knowns.find(suffix);
+        *known = kit != knowns.end() && kit->second;
+        *value = vit->second;
+        return true;
+    };
+
+    if (id == "cpu.total") { scalar(s.cpuTotalKnown, s.cpuTotal); return true; }
+    if (id == "mem.usedBytes") { scalar(s.memUsedKnown, static_cast<double>(s.memUsed)); return true; }
+    if (id == "mem.totalBytes") { scalar(s.memTotalKnown, static_cast<double>(s.memTotal)); return true; }
+    if (id == "mem.availableBytes") { scalar(s.memAvailableKnown, static_cast<double>(s.memAvailable)); return true; }
+    if (id == "mem.cacheBytes") { scalar(s.memCacheKnown, static_cast<double>(s.memCache)); return true; }
+    if (id == "mem.kernelPagedBytes") { scalar(s.memKernelPagedKnown, static_cast<double>(s.memKernelPaged)); return true; }
+    if (id == "mem.kernelNonPagedBytes") { scalar(s.memKernelNonPagedKnown, static_cast<double>(s.memKernelNonPaged)); return true; }
+    if (id == "mem.commitLimitBytes") { scalar(s.memCommitLimitKnown, static_cast<double>(s.memCommitLimit)); return true; }
+    if (id == "mem.commitPeakBytes") { scalar(s.memCommitPeakKnown, static_cast<double>(s.memCommitPeak)); return true; }
+    if (id == "gpu.vramBytes") { scalar(s.gpuVramKnown, static_cast<double>(s.gpuVramUsed)); return true; }
+    if (id == "sys.uptimeSeconds") { scalar(s.uptimeKnown, static_cast<double>(s.uptimeSeconds)); return true; }
+    if (id == "sys.processCount") { scalar(s.processCountKnown, static_cast<double>(s.processCount)); return true; }
+    if (id == "sys.threadCount") { scalar(s.threadCountKnown, static_cast<double>(s.threadCount)); return true; }
+    if (id == "sys.handleCount") { scalar(s.handleCountKnown, static_cast<double>(s.handleCount)); return true; }
+
+    // Per-core.
+    if (id.rfind("cpu.core.", 0) == 0) {
+        const std::string digits = id.substr(9);
+        if (digits.empty() ||
+            digits.find_first_not_of("0123456789") != std::string::npos) {
+            return false;
+        }
+        const size_t index = static_cast<size_t>(std::strtoul(digits.c_str(), nullptr, 10));
+        *known = index < s.cpuCoreKnown.size() && s.cpuCoreKnown[index];
+        *value = index < s.cpuCore.size() ? s.cpuCore[index] : 0.0;
+        return true;
+    }
+
+    // Per-instance families. The prefix check comes first so a request for
+    // "disk.readBps.C:" is recognised before the bare "disk.readBps" case below.
+    if (instanceSplit("disk.readBps.", s.diskReadBps, s.diskReadKnown)) return true;
+    if (instanceSplit("disk.writeBps.", s.diskWriteBps, s.diskWriteKnown)) return true;
+    if (instanceSplit("disk.activePct.", s.diskActivePct, s.diskActiveKnown)) return true;
+    if (instanceSplit("disk.queueLength.", s.diskQueueLength, s.diskQueueKnown)) return true;
+    if (instanceSplit("disk.latencyMs.", s.diskLatencyMs, s.diskLatencyKnown)) return true;
+    if (instanceSplit("net.rxBps.", s.netRxBps, s.netRxKnown)) return true;
+    if (instanceSplit("net.txBps.", s.netTxBps, s.netTxKnown)) return true;
+    if (instanceSplit("gpu.engine.", s.gpuEnginePct, s.gpuEngineKnown)) return true;
+
+    // Bare family aggregates. The suffix test above would have consumed any id
+    // that merely starts with "disk.readBps."; what is left is the aggregate.
+    if (id == "disk.readBps") { *value = SumInstances(s.diskReadBps, s.diskReadKnown, known); return true; }
+    if (id == "disk.writeBps") { *value = SumInstances(s.diskWriteBps, s.diskWriteKnown, known); return true; }
+    if (id == "disk.activePct") { *value = SumInstances(s.diskActivePct, s.diskActiveKnown, known); return true; }
+    if (id == "disk.queueLength") { *value = SumInstances(s.diskQueueLength, s.diskQueueKnown, known); return true; }
+    if (id == "disk.latencyMs") { *value = SumInstances(s.diskLatencyMs, s.diskLatencyKnown, known); return true; }
+    if (id == "net.rxBps") { *value = SumInstances(s.netRxBps, s.netRxKnown, known); return true; }
+    if (id == "net.txBps") { *value = SumInstances(s.netTxBps, s.netTxKnown, known); return true; }
+    return false;
+}
+
+// Series ids the endpoint accepts, so an unknown one is rejected with a message
+// naming what IS available instead of silently returning an empty array.
+std::vector<std::string> KnownSeriesIds() {
+    return {
+        "cpu.total", "mem.usedBytes", "mem.totalBytes", "mem.availableBytes",
+        "mem.cacheBytes", "mem.kernelPagedBytes", "mem.kernelNonPagedBytes",
+        "mem.commitLimitBytes", "mem.commitPeakBytes",
+        "disk.readBps", "disk.writeBps", "disk.activePct", "disk.queueLength",
+        "disk.latencyMs", "net.rxBps", "net.txBps", "gpu.vramBytes",
+        "sys.uptimeSeconds", "sys.processCount", "sys.threadCount",
+        "sys.handleCount",
+    };
 }
 
 std::string MetricsHistoryJson(ServerContext& context, const HttpRequest& request) {
     uint64_t since = 0;
     size_t maxSamples = 900;
-    std::string tier = "1s";
+    std::string tierParam = "1s";
+    MetricsCollector::Tier tier = MetricsCollector::Tier::A;
+    // Optional explicit series selection. Absent means "everything the sample
+    // carries", which is what the current callers rely on.
+    std::vector<std::string> requested;
     size_t query = request.target.find('?');
     if (query != std::string::npos) {
         std::map<std::string, std::string> params;
@@ -1074,13 +1405,76 @@ std::string MetricsHistoryJson(ServerContext& context, const HttpRequest& reques
                 }
                 maxSamples = parsed < 900 ? static_cast<size_t>(parsed) : 900;
             }
-            if (params.count("tier")) tier = params["tier"];
+            if (params.count("tier")) {
+                tierParam = params["tier"];
+                // Only the two documented tiers. An unknown tier silently
+                // falling back to tier A would return the wrong time base with
+                // no indication, which is exactly the failure C-6 warns about.
+                if (tierParam == "10s") {
+                    tier = MetricsCollector::Tier::B;
+                    if (maxSamples > 2160) maxSamples = 2160;
+                } else if (tierParam != "1s") {
+                    return ErrorJson("tier must be 1s or 10s");
+                }
+            }
+            if (params.count("series")) {
+                // Comma-separated ids. An unknown id is refused with the list
+                // that IS valid, rather than returning an empty array that looks
+                // like "this machine reports nothing".
+                requested.clear();
+                size_t start = 0;
+                const std::string& list = params["series"];
+                while (start <= list.size()) {
+                    const size_t comma = list.find(',', start);
+                    const std::string one = list.substr(
+                        start, comma == std::string::npos ? std::string::npos : comma - start);
+                    if (!one.empty()) {
+                        bool known = false;
+                        for (const auto& candidate : KnownSeriesIds()) {
+                            if (candidate == one) { known = true; break; }
+                        }
+                        // Per-instance ids are validated by prefix: the suffix is
+                        // whatever instance the sampler happened to see, so the
+                        // family is checked instead.
+                        if (!known) {
+                            static const char* kFamilies[] = {
+                                "disk.readBps.", "disk.writeBps.", "disk.activePct.",
+                                "disk.queueLength.", "disk.latencyMs.",
+                                "net.rxBps.", "net.txBps.", "gpu.engine.",
+                                "cpu.core.",
+                            };
+                            for (const char* family : kFamilies) {
+                                if (one.rfind(family, 0) == 0) { known = true; break; }
+                            }
+                        }
+                        if (!known) {
+                            return ErrorJson("unknown series '" + one +
+                                "'; use /api/metrics/catalog for the available ids");
+                        }
+                        requested.push_back(one);
+                    }
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+                // Cap the width: 900 samples x N series is the response size
+                // budget, and a client asking for 400 per-core series would
+                // otherwise produce a multi-megabyte body from a sequential
+                // server (C-8).
+                if (requested.size() > 48) {
+                    return ErrorJson("at most 48 series may be requested at once");
+                }
+            }
         }
     }
-    auto samples = context.metricsCollector.GetHistory(since, maxSamples);
+    auto samples = context.metricsCollector.GetHistory(tier, since, maxSamples);
+    const size_t step = tier == MetricsCollector::Tier::B ? 10 : 1;
+    // `samples` comes back OLDEST-first, so the newest is the back element. With
+    // an empty window there is no back element at all, and every "newest"
+    // lookup below has to tolerate that rather than reading past the end.
+    const MetricsSample* newest = samples.empty() ? nullptr : &samples.back();
     std::ostringstream out;
-    out << "{\"tier\":" << JsonQuote(tier) << ",\"step\":1,\"count\":"
-        << samples.size() << ",\"t\":[";
+    out << "{\"tier\":" << JsonQuote(tierParam) << ",\"step\":" << step
+        << ",\"count\":" << samples.size() << ",\"t\":[";
     for (size_t i = 0; i < samples.size(); ++i) {
         if (i > 0) out << ",";
         out << samples[i].unixTime;
@@ -1089,43 +1483,57 @@ std::string MetricsHistoryJson(ServerContext& context, const HttpRequest& reques
     // never 0 (C-6), and every array lines up index-for-index with "t".
     out << "],\"series\":{";
     bool firstSeries = true;
-    const auto emit = [&](const char* id, auto pick) {
+    // When no explicit list is given, emit every series the newest sample
+    // actually carries - including the per-instance and per-core ones, which is
+    // what lets the UI discover them without a second round trip.
+    std::vector<std::string> ids = requested;
+    if (ids.empty()) {
+        ids = KnownSeriesIds();
+        // The per-instance and per-core ids only exist once the sampler has seen
+        // the hardware, so they are discovered from the newest sample rather
+        // than hardcoded. With no sample yet, only the fixed families are named
+        // - which is the correct answer, not a missing one.
+        if (newest != nullptr) {
+            for (size_t i = 0; i < newest->cpuCore.size(); ++i) {
+                ids.push_back("cpu.core." + std::to_string(i));
+            }
+            for (const auto& kv : newest->diskReadBps) ids.push_back("disk.readBps." + WideToUtf8(kv.first));
+            for (const auto& kv : newest->diskWriteBps) ids.push_back("disk.writeBps." + WideToUtf8(kv.first));
+            for (const auto& kv : newest->diskActivePct) ids.push_back("disk.activePct." + WideToUtf8(kv.first));
+            for (const auto& kv : newest->netRxBps) ids.push_back("net.rxBps." + WideToUtf8(kv.first));
+            for (const auto& kv : newest->netTxBps) ids.push_back("net.txBps." + WideToUtf8(kv.first));
+        }
+    }
+    for (const auto& id : ids) {
+        if (requested.empty()) {
+            // The id is a valid family, but this machine's samples may carry no
+            // such family at all (no GPU, no per-core counter). Skip the column
+            // rather than emitting a screenful of nulls. An explicitly
+            // requested id is always emitted, so a client asking for a series
+            // gets a column (of nulls, with the reason) rather than silence.
+            bool carried = false;
+            for (const auto& s : samples) {
+                double v = 0.0;
+                bool k = false;
+                if (ExtractSeries(s, id, &v, &k)) { carried = true; break; }
+            }
+            if (!carried) continue;
+        }
         if (!firstSeries) out << ",";
         firstSeries = false;
         out << "\"" << id << "\":[";
         for (size_t i = 0; i < samples.size(); ++i) {
             if (i > 0) out << ",";
-            const std::pair<bool, double> value = pick(samples[i]);
-            out << (value.first ? JsonNumber(value.second) : std::string("null"));
+            double value = 0.0;
+            bool known = false;
+            if (!ExtractSeries(samples[i], id, &value, &known)) {
+                out << "null";
+            } else {
+                out << (known ? JsonNumber(value) : std::string("null"));
+            }
         }
         out << "]";
-    };
-    emit("cpu.total", [](const MetricsSample& s) {
-        return std::pair<bool, double>(s.cpuTotalKnown, s.cpuTotal);
-    });
-    emit("mem.usedBytes", [](const MetricsSample& s) {
-        return std::pair<bool, double>(s.memUsedKnown, static_cast<double>(s.memUsed));
-    });
-    emit("disk.readBps", [](const MetricsSample& s) {
-        bool known = false;
-        const double total = SumInstances(s.diskReadBps, s.diskReadKnown, &known);
-        return std::pair<bool, double>(known, total);
-    });
-    emit("disk.writeBps", [](const MetricsSample& s) {
-        bool known = false;
-        const double total = SumInstances(s.diskWriteBps, s.diskWriteKnown, &known);
-        return std::pair<bool, double>(known, total);
-    });
-    emit("net.rxBps", [](const MetricsSample& s) {
-        bool known = false;
-        const double total = SumInstances(s.netRxBps, s.netRxKnown, &known);
-        return std::pair<bool, double>(known, total);
-    });
-    emit("net.txBps", [](const MetricsSample& s) {
-        bool known = false;
-        const double total = SumInstances(s.netTxBps, s.netTxKnown, &known);
-        return std::pair<bool, double>(known, total);
-    });
+    }
     out << "}}";
     return out.str();
 }
@@ -1809,7 +2217,13 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         return response;
     }
     if (path == "/api/metrics/catalog") {
-        response.body = MetricsCatalogJson();
+        // The catalog names every series the history endpoint answers for, so
+        // it is built from a live sample: a hand-written list silently drifts
+        // from what the sampler actually produces (per-core and per-instance
+        // series only exist when the counters exist).
+        MetricsSample probe;
+        const bool have = context.metricsCollector.GetLatest(&probe);
+        response.body = MetricsCatalogJson(have ? probe : MetricsSample{});
         return response;
     }
     if (path == "/api/metrics/now") {

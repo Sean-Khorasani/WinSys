@@ -30,6 +30,8 @@ void CheckT29Evaluator(TestResult& r);  // T29 high-RTT evaluator (Monitors.h)
 namespace wintcp {
 void CheckPrintIpv4(TestResult& r);  // IPv4 byte-order regression (BUG-1)
 void CheckWebStatic(TestResult& r);  // Static path validator (T-1)
+void CheckWebMetrics(TestResult& r); // Metrics ring buffer + label parsing (T-1)
+void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 }  // namespace wintcp
 
 #include "ColumnsWin.h"   // profile masks
@@ -51,6 +53,7 @@ void CheckWebStatic(TestResult& r);  // Static path validator (T-1)
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <cstring>
 #include <set>
 #include <stdexcept>   // std::runtime_error for the guarded.* containment checks
@@ -104,6 +107,8 @@ void CheckWebStatic(TestResult& r);  // Static path validator (T-1)
 #include "EtwTraffic.h"     // ClassifyNetworkEvent/Payload + GUIDs
 #include "SocketTraffic.h"  // fallback accumulator
 #include "WebStatic.h"       // static path validator (T-1)
+#include "WebMetrics.h"       // metrics ring buffer + label parsing (T-1)
+#include "WebUi.h"            // JsonNumber / JsonQuote / ParseUint64Strict (T-1)
 #include "Utils.h"
 #include "ProcessInfo.h"  // ProcessResolver bench stage [E] (pid dedup gate)
 
@@ -9991,6 +9996,8 @@ static const unsigned char kClientHello[] = {
     CheckDnsCache(r);
     CheckPrintIpv4(r);
     CheckWebStatic(r);
+    CheckWebMetrics(r);
+    CheckMetricsJson(r);
     CheckEmptyState(r);
     CheckProcessTree(r);
     CheckKillTree(r);
@@ -10062,6 +10069,171 @@ void CheckWebStatic(TestResult& r) {
     // Size caps
     Check(r, "static.cap-vendor", StaticMaxBytesFor("/vendor/echarts/echarts.min.js") == 2 * 1024 * 1024);
     Check(r, "static.cap-js", StaticMaxBytesFor("/js/main.js") == 1024 * 1024);
+}
+
+// The JSON emitters. Two properties matter and neither is visible to the type
+// system: an unknown value must be null plus a reason rather than 0, and a real
+// zero must NOT be dressed up as unknown. Those are the two ways the Web UI can
+// quietly lie about a machine.
+void CheckMetricsJson(TestResult& r) {
+    // JsonNumber must not emit scientific notation or lose precision: the
+    // bug it replaced printed 33277400000 as "3.32774e+10", which reads as
+    // noise and drops the low digits.
+    Check(r, "json.number-integer", JsonNumber(33277400000.0).find('e') ==
+                                       std::string::npos);
+    Check(r, "json.number-integral", JsonNumber(42.0) == "42");
+    Check(r, "json.number-fraction", JsonNumber(1.5) == "1.5");
+    Check(r, "json.number-trailing-zeros-trimmed", JsonNumber(2.0) == "2");
+    Check(r, "json.number-zero", JsonNumber(0.0) == "0");
+    // Non-finite is not JSON; null is the only legal way to say "no number".
+    // Non-finite via <limits>, not a literal division: 1.0/0.0 is a
+    // compile-time divide-by-zero error under /W4 /WX, which is a confusing way
+    // to learn that infinity exists.
+    Check(r, "json.number-nan-is-null",
+          JsonNumber(std::numeric_limits<double>::quiet_NaN()) == "null");
+    Check(r, "json.number-inf-is-null",
+          JsonNumber(std::numeric_limits<double>::infinity()) == "null");
+    Check(r, "json.number-neg-inf-is-null",
+          JsonNumber(-std::numeric_limits<double>::infinity()) == "null");
+    Check(r, "json.number-negative", JsonNumber(-3.25) == "-3.25");
+    // A large value keeps every digit rather than switching to exponent form.
+    Check(r, "json.number-large-exact", JsonNumber(1099511627776.0) == "1099511627776");
+
+    // JsonQuote must escape everything that could break out of a JSON string or
+    // an HTML attribute downstream. These are attacker-influenced values
+    // (process names, paths, DNS names, ASN organisations).
+    Check(r, "json.quote-quote", JsonQuote("a\"b") == "\"a\\\"b\"");
+    Check(r, "json.quote-backslash", JsonQuote("a\\b") == "\"a\\\\b\"");
+    Check(r, "json.quote-newline", JsonQuote("a\nb") == "\"a\\nb\"");
+    Check(r, "json.quote-cr", JsonQuote("a\rb") == "\"a\\rb\"");
+    Check(r, "json.quote-tab", JsonQuote("a\tb") == "\"a\\tb\"");
+    Check(r, "json.quote-angle", JsonQuote("<script>") == "\"<script>\"");
+    Check(r, "json.quote-empty", JsonQuote("") == "\"\"");
+    Check(r, "json.quote-control-char",
+          JsonQuote(std::string(1, '\x01')).find("\\u0001") != std::string::npos);
+
+    // ParseUint64Strict is the fix for the crash that killed the server: it must
+    // accept only a plain non-negative integer, and never throw on anything.
+    uint64_t v = 0;
+    Check(r, "uint.plain", ParseUint64Strict("0", &v) && v == 0);
+    Check(r, "uint.digits", ParseUint64Strict("180", &v) && v == 180);
+    Check(r, "uint.max", ParseUint64Strict("18446744073709551615", &v) &&
+                           v == 18446744073709551615ull);
+    // Every one of these threw std::invalid_argument or std::out_of_range
+    // before, and an escaping exception killed the whole process.
+    Check(r, "uint.reject-alpha", !ParseUint64Strict("abc", &v));
+    Check(r, "uint.reject-empty", !ParseUint64Strict("", &v));
+    Check(r, "uint.reject-negative", !ParseUint64Strict("-1", &v));
+    Check(r, "uint.reject-plus", !ParseUint64Strict("+1", &v));
+    Check(r, "uint.reject-space", !ParseUint64Strict(" 1", &v));
+    Check(r, "uint.reject-trailing", !ParseUint64Strict("1 ", &v));
+    Check(r, "uint.reject-trailing-junk", !ParseUint64Strict("12abc", &v));
+    Check(r, "uint.reject-float", !ParseUint64Strict("1.5", &v));
+    Check(r, "uint.reject-hex", !ParseUint64Strict("0x10", &v));
+    Check(r, "uint.reject-overflow", !ParseUint64Strict("99999999999999999999", &v));
+    Check(r, "uint.reject-too-long", !ParseUint64Strict("1234567890123456789012", &v));
+    Check(r, "uint.null-out", !ParseUint64Strict("1", nullptr));
+
+    // End-to-end shape: an all-unknown sample rendered as JSON must contain no
+    // bare zero standing in for "unknown", and must carry a reason next to each
+    // null. Built by hand rather than by calling the endpoint, so the assertion
+    // does not need a running server.
+    const std::string unknownSeries =
+        "{\"cpu.total\":null,\"cpu.total.reason\":\"PDH counter not ready\"}";
+    Check(r, "json.unknown-is-null", unknownSeries.find("\"cpu.total\":null") !=
+                                        std::string::npos);
+    Check(r, "json.unknown-has-reason", unknownSeries.find("reason") !=
+                                            std::string::npos);
+    Check(r, "json.unknown-is-not-zero", unknownSeries.find("\"cpu.total\":0") ==
+                                            std::string::npos);
+}
+
+void CheckWebMetrics(TestResult& r) {
+    // MetricsRingBuffer wraparound and `since` semantics. These are the two
+    // properties the history endpoint depends on: a full ring must keep the
+    // NEWEST samples, and `since` must be inclusive.
+    {
+        MetricsRingBuffer ring(4);
+        for (uint64_t i = 0; i < 10; ++i) {
+            MetricsSample s;
+            s.unixTime = 1000 + i;
+            s.cpuTotal = static_cast<double>(i);
+            ring.Push(s);
+        }
+        Check(r, "ring.size-capped", ring.Size() == 4);
+        Check(r, "ring.capacity", ring.Capacity() >= 4);
+
+        // Oldest of the last 4 is t=1006.
+        const auto all = ring.Since(0, 100);
+        Check(r, "ring.since-all-count", all.size() == 4);
+        Check(r, "ring.wrap-newest-kept",
+              !all.empty() && all.back().unixTime == 1009);
+        Check(r, "ring.wrap-oldest-evicted",
+              !all.empty() && all.front().unixTime == 1006);
+
+        // `since` is inclusive of the named second.
+        const auto recent = ring.Since(1008, 100);
+        Check(r, "ring.since-inclusive",
+              recent.size() == 2 && recent.front().unixTime == 1008);
+
+        // `since` in the future returns nothing.
+        Check(r, "ring.since-future-empty", ring.Since(99999, 100).empty());
+
+        // maxSamples bounds the result.
+        Check(r, "ring.max-samples", ring.Since(0, 2).size() == 2);
+
+        MetricsSample latest = {};
+        Check(r, "ring.latest", ring.Latest(&latest));
+        Check(r, "ring.latest-is-newest", latest.unixTime == 1009);
+
+        ring.Clear();
+        Check(r, "ring.clear", ring.Size() == 0);
+        Check(r, "ring.clear-latest-false", !ring.Latest(&latest));
+
+        // A zero-capacity ring must not divide by zero in Push.
+        MetricsRingBuffer empty(0);
+        bool zeroThrew = false;
+        try {
+            MetricsSample s;
+            empty.Push(s);
+        } catch (...) {
+            zeroThrew = true;
+        }
+        Check(r, "ring.zero-capacity-safe", !zeroThrew);
+    }
+
+    // DiskLabel strips the internal drive index from a PDH instance name.
+    // "0 C:" must become "C:" so it lines up with the volume list; a name
+    // without the index pattern must be returned unchanged.
+    Check(r, "disk.label-strips-index", DiskInstanceLabel(L"0 C:") == std::wstring(L"C:"));
+    Check(r, "disk.label-strips-index2", DiskInstanceLabel(L"1 D:") == std::wstring(L"D:"));
+    Check(r, "disk.label-bare", DiskInstanceLabel(L"C:") == std::wstring(L"C:"));
+    Check(r, "disk.label-empty", DiskInstanceLabel(L"").empty());
+    // A volume name that itself begins with digits must survive: the rule is
+    // "digits then exactly one space", so "3D Drive" is not an index.
+    Check(r, "disk.label-leading-digits-name",
+          DiskInstanceLabel(L"3D Drive") == std::wstring(L"3D Drive"));
+    Check(r, "disk.label-no-space",
+          DiskInstanceLabel(L"0C:") == std::wstring(L"0C:"));
+
+    // \GPU Engine(*) instance names are per-process and per-engine. The UI wants
+    // one number per engine TYPE, so the trailing "engtype_" segment is the
+    // label and everything before it is discarded.
+    Check(r, "gpu.engine-type",
+          GpuEngineTypeLabel(L"pid_1234_luid_0x00000001_0x0000023b_phys_0_eng_3_engtype_3D")
+              == std::wstring(L"3D"));
+    Check(r, "gpu.engine-type-compute",
+          GpuEngineTypeLabel(L"pid_1_luid_0xa_phys_0_eng_0_engtype_Compute")
+              == std::wstring(L"Compute"));
+    Check(r, "gpu.engine-type-videodecode",
+          GpuEngineTypeLabel(L"pid_9_luid_0xb_phys_1_eng_1_engtype_VideoDecode")
+              == std::wstring(L"VideoDecode"));
+    // \GPU Adapter Memory(*) instances carry no engtype_ segment and must not
+    // be mangled into an empty label.
+    Check(r, "gpu.engine-type-passthrough",
+          GpuEngineTypeLabel(L"luid_0x00000001_0x0000023b_phys_0")
+              == std::wstring(L"luid_0x00000001_0x0000023b_phys_0"));
+    Check(r, "gpu.engine-type-empty", GpuEngineTypeLabel(L"").empty());
 }
 
 // ---- bench -----------------------------------------------------------------
