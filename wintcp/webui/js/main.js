@@ -32,7 +32,9 @@ export const store = createStore({
   status: "connecting",
   lastUpdate: null,
   theme: "system",
+  accent: "neutral",
   density: "comfortable",
+  units: "iec",
   sidebarOpen: true,
   sidebarCollapsed: false,
   refreshInterval: 2000,
@@ -54,6 +56,31 @@ function applyTheme(theme) {
 // Apply density
 function applyDensity(density) {
   document.body.classList.toggle("density-compact", density === "compact");
+}
+
+// Apply accent colour
+function applyAccent(accent) {
+  document.documentElement.setAttribute("data-accent", accent || "neutral");
+}
+
+// The sidebar is built once and never rebuilt, so its active state has to be
+// re-synced on navigation. Baking `is-active` into the markup at build time is
+// what left "Overview" highlighted while the Performance page was showing: the
+// class was computed from the hash at boot and then never revisited.
+let sidebarNav = null;
+
+function syncSidebarActive() {
+  if (!sidebarNav) return;
+  const path = (window.location.hash || "#/").slice(1) || "/";
+  for (const link of sidebarNav.querySelectorAll("a.sidebar-item")) {
+    const target = link.getAttribute("href").slice(1) || "/";
+    const active = target === path;
+    link.classList.toggle("is-active", active);
+    // aria-current is what a screen reader announces on the active nav item.
+    // The visual class alone leaves the sidebar looking right and reading wrong.
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
 }
 
 // Render sidebar
@@ -104,6 +131,8 @@ function renderSidebar(container) {
     nav.append(groupEl);
   }
 
+  sidebarNav = nav;
+
   container.append(
     h("aside", { class: "sidebar", id: "sidebar" },
       h("div", { class: "sidebar-header" },
@@ -128,6 +157,17 @@ function renderSidebar(container) {
   );
 }
 
+// Mirror the current route into the breadcrumb.
+//
+// Like the sidebar, the top bar is built once, so the crumb is a placeholder
+// that gets rewritten on every navigation rather than a value baked in at boot.
+function syncBreadcrumb() {
+  const el = document.querySelector(".breadcrumb-current");
+  if (!el) return;
+  const path = (window.location.hash || "#/").slice(1) || "/";
+  el.textContent = pageMap[path] ? PAGE_LABELS[path] : "Not found";
+}
+
 // Render top bar. The handlers are injected rather than closed over, because
 // the poller and the palette do not exist yet when this first runs - they used
 // to be empty comment bodies, i.e. two buttons that looked live and did nothing.
@@ -149,7 +189,7 @@ function renderTopbar(container, handlers = {}) {
         h("div", { class: "breadcrumb" },
           h("a", { href: "#/" }, "WinTCP"),
           h("span", { class: "breadcrumb-sep" }, "/"),
-          h("span", { class: "breadcrumb-current" }, crumb),
+          h("span", { class: "breadcrumb-current", "aria-current": "page" }, crumb),
         ),
       ),
       h("div", { class: "topbar-right" },
@@ -311,6 +351,14 @@ function init() {
 
   // Start router
   startRouter();
+  syncSidebarActive();
+  // Registered AFTER startRouter so the page has rendered before the breadcrumb
+  // and the sidebar catch up; hashchange fires once per listener in
+  // registration order.
+  window.addEventListener("hashchange", () => {
+    syncSidebarActive();
+    syncBreadcrumb();
+  });
 
   // Command palette
   const palette = createCommandPalette([
@@ -392,7 +440,9 @@ function init() {
   api.get("/api/config").then((config) => {
     const patch = {};
     if (config.theme) patch.theme = config.theme;
+    if (config.accent) patch.accent = config.accent;
     if (config.density) patch.density = config.density;
+    if (config.units) patch.units = config.units;
     if (Number.isFinite(config.refreshSeconds)) {
       // The server stores seconds; the poller wants milliseconds. Clamp so a
       // hand-edited config cannot turn the dashboard into a request storm.
@@ -402,6 +452,7 @@ function init() {
     }
     store.set(patch);
     applyTheme(patch.theme || store.get().theme);
+    applyAccent(patch.accent || store.get().accent);
     applyDensity(patch.density || store.get().density);
   }).catch(() => { /* defaults already applied */ });
 }
