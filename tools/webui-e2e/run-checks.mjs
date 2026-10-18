@@ -39,6 +39,7 @@ const PAGES = [
   { hash: "#/performance", expect: "Performance" },
   { hash: "#/processes", expect: "Processes" },
   { hash: "#/network", expect: "Network" },
+  { hash: "#/network", expect: "Network", tab: "flows" },
   { hash: "#/map", expect: "Map" },
   { hash: "#/automations", expect: "Automations" },
   { hash: "#/blocks", expect: "Blocked Peers" },
@@ -56,7 +57,7 @@ function record(entry) {
   if (bad) hardFailures++;
   const tag = bad ? "FAIL" : " ok ";
   console.log(
-    `[${tag}] ${entry.theme.padEnd(5)} ${entry.page.padEnd(13)} ${entry.heading || "(no heading)"}`,
+    `[${tag}] ${entry.theme.padEnd(5)} ${entry.page.padEnd(17)} ${entry.heading || "(no heading)"}`,
   );
   for (const p of entry.problems) console.log(`         - ${p}`);
 }
@@ -93,6 +94,28 @@ try {
         heading = (await tab.locator(".page-title").first().textContent().catch(() => "")) ?? "";
         if (!heading.trim()) problems.push("no .page-title rendered");
 
+        if (page.tab) {
+          // Click the tab button and wait for its panel to render content.
+          const tabButton = `button#tab-${page.tab}`;
+          await tab.waitForSelector(tabButton, { timeout: 5000 });
+          await tab.click(tabButton);
+          await tab.waitForTimeout(800);
+          const panel = await tab.$(`#panel-${page.tab}`);
+          if (!panel) {
+            problems.push(`tab ${page.tab}: panel #panel-${page.tab} not found`);
+          } else {
+            // The Flows panel should show either a country bar-list (GeoIP active)
+            // or an empty-state card (no database configured). Either is valid.
+            const flowEmpty = await panel.$(".flow-empty");
+            const barList = await panel.$(".bar-list");
+            const emptyState = await panel.$(".empty-state");
+            if (!flowEmpty && !barList && !emptyState) {
+              const text = await panel.evaluate((el) => el.textContent?.trim().slice(0, 120) ?? "");
+              problems.push(`tab ${page.tab}: panel rendered no expected content (got: "${text}")`);
+            }
+          }
+        }
+
         const csp = await tab.evaluate(() => globalThis.__wintcpCspViolations || []);
         for (const v of csp) {
           problems.push(
@@ -103,7 +126,8 @@ try {
         problems.push(`navigation failed: ${err.message}`);
       }
 
-      record({ theme, page: page.hash, heading: heading.trim(), problems });
+      const label = page.tab ? `${page.hash} › ${page.tab}` : page.hash;
+      record({ theme, page: label, heading: heading.trim(), problems });
       await context.close();
     }
   }
