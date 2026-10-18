@@ -200,6 +200,7 @@
     <ClCompile Include="..\src\WebUi.cpp" />
     <ClCompile Include="..\src\WebMetrics.cpp" />
     <ClCompile Include="..\src\WebStatic.cpp" />
+    <ClCompile Include="..\src\WebProcesses.cpp" />
     <ClCompile Include="..\src\DnsResolver.cpp" />
     <ClCompile Include="..\src\DnsCache.cpp" />
     <ClCompile Include="..\src\Settings.cpp" />

@@ -46,6 +46,7 @@
 #include "SocketTraffic.h"
 #include "Utils.h"
 #include "WebMetrics.h"
+#include "WebProcesses.h"
 #include "WebStatic.h"
 #include "WebUi.h"
 
@@ -104,6 +105,17 @@ struct ServerContext {
     SnapshotSource source;
     ConnectionStore store;
     MetricsCollector metricsCollector;
+    // Process table. Sampled and OWNED by the refresher thread; requests only
+    // read the published snapshot through ProcessSnapshot's own mutex.
+    ProcessSnapshot processes;
+    // Bumped by every endpoint that reads the store. The refresher uses it to
+    // decide whether anyone is still looking.
+    std::atomic<ULONGLONG> lastStoreAccess{0};
+    // Set by the refresher thread. Read endpoints use it to say how old the
+    // rows they are reporting are, so a stale summary is labelled rather than
+    // passed off as live.
+    std::atomic<ULONGLONG> connectionSnapshotTick{0};
+    std::atomic<bool> connectionRefreshFailed{false};
     std::map<std::string, PendingBlock> pendingBlocks;
     std::map<std::string, PendingCliAction> pendingCliActions;
 };
@@ -121,6 +133,98 @@ static std::atomic<HANDLE> g_stopEvent{nullptr};
 // could otherwise race on the shared store. The SSE stream itself takes no lock
 // - it only ever writes to its own socket.
 std::mutex g_storeMutex;
+
+// Refresh the connection store on a background thread, so that the read-only
+// endpoints answer from data that is already there.
+//
+// WHY THIS EXISTS: /api/connections refreshes the store inline as part of
+// building its own response. The summary endpoints (/api/processes,
+// /api/network/summary, /api/geo/summary) only read it. With nothing else
+// populating it they returned empty objects on a cold server, and on a warm one
+// they depended on the browser having polled /api/connections first - an
+// ordering coupling that is both invisible in the code and wrong: the process
+// list should not depend on which endpoint the browser happened to ask for.
+//
+// C-8 forbids running an IP Helper scan inside a request, and running one in
+// three more handlers to paper over this would make that worse, not better. So
+// the refresh moved off the request path entirely.
+//
+// It runs on the same g_storeMutex the inline /api/connections refresh takes, so
+// the two serialise rather than race: the store is never observed mid-refresh.
+// It also stops itself when nothing has asked for connections recently, so a
+// server nobody is looking at costs nothing.
+constexpr DWORD kConnRefreshIdleMs = 30000;   // below this, stay at 1 Hz
+constexpr DWORD kConnRefreshStepMs = 2000;    // above this, idle cadence
+
+DWORD WINAPI ConnectionRefresherThread(LPVOID param) {
+    auto* context = static_cast<ServerContext*>(param);
+    if (context == nullptr) return 0;
+    // The one owner of this sampler. Nothing else touches it, so its internal
+    // CPU-time baselines cannot be raced.
+    WebProcessSampler processSampler;
+    while (!g_stop.load()) {
+        // "Someone is looking" is the same signal the metrics sampler uses: a
+        // read endpoint touched the store recently.
+        const ULONGLONG now = ::GetTickCount64();
+        const ULONGLONG sinceAccess = now - context->lastStoreAccess.load();
+        const DWORD stepMs = (sinceAccess < kConnRefreshIdleMs) ? 1000
+                                                               : kConnRefreshStepMs;
+        ULONGLONG deadline = now + stepMs;
+        while (!g_stop.load() && ::GetTickCount64() < deadline) ::Sleep(50);
+        if (g_stop.load()) break;
+
+        ListOptions options;
+        options.format = "json";
+        // The refresher never enables the per-socket traffic scan: its probe
+        // threads can wedge in an uncancelable kernel call holding the
+        // process-wide Winsock lock, and a background thread doing that forever
+        // is strictly worse than /api/connections doing it once per request.
+        options.webMetadata = true;
+        bool ok = false;
+        {
+            std::lock_guard<std::mutex> lock(g_storeMutex);
+            const CommandResult result = CmdListInto(context->source, context->store,
+                                                     options);
+            ok = (result.exitCode == kExitOk);
+            if (ok) {
+                context->connectionSnapshotTick.store(::GetTickCount64());
+                context->connectionRefreshFailed.store(false);
+            } else {
+                context->connectionRefreshFailed.store(true);
+            }
+        }
+        if (!ok) ::Sleep(1000);   // do not spin on a failing source
+
+        // Process table. Sampled on this thread, outside the store lock, because
+        // it walks a different kernel structure entirely (Toolhelp, not IP
+        // Helper) and the two have no reason to block each other.
+        //
+        // The connection counts it joins in are copied under the store lock
+        // first: they are a snapshot-in-time pairing of "which process owns how
+        // many sockets" with "what is that process doing", and taking them from
+        // an unlocked store would be a torn read.
+        std::map<DWORD, int> connectionsByPid;
+        std::map<DWORD, int> listenersByPid;
+        {
+            std::lock_guard<std::mutex> lock(g_storeMutex);
+            for (size_t i = 0; i < context->store.View().size(); ++i) {
+                const Connection* row = context->store.ViewRow(i);
+                if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
+                if (row->identity.pid == 0) continue;
+                connectionsByPid[row->identity.pid]++;
+                if (row->identity.protocol == IPPROTO_TCP &&
+                    row->keys.stateLabel == L"LISTENING") {
+                    listenersByPid[row->identity.pid]++;
+                }
+            }
+        }
+        const WebProcessSnapshot processes =
+            processSampler.Sample(connectionsByPid, listenersByPid,
+                                  context->connectionSnapshotTick.load() > 0);
+        context->processes.Publish(processes);
+    }
+    return 0;
+}
 
 BOOL WINAPI WebUiControlHandler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
@@ -799,6 +903,9 @@ std::string ErrorJson(const std::string& text) {
 }
 
 std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) {
+    // Tell the refresher this endpoint is live, then take the lock. Order
+    // matters only for tidiness: both are set/atomic operations.
+    context.lastStoreAccess.store(::GetTickCount64());
     ListOptions options;
     options.format = "json";
     // NO traffic. The per-socket SIO_TCP_INFO scan's detached probe threads can
@@ -1538,43 +1645,169 @@ std::string MetricsHistoryJson(ServerContext& context, const HttpRequest& reques
     return out.str();
 }
 
-std::string ProcessesJson(ServerContext& context) {
-    std::lock_guard<std::mutex> lock(g_storeMutex);
+// Parse ?sort= and ?limit= for /api/processes. An unknown sort key is a 400
+// naming the valid keys, because silently falling back to "pid" would hand back
+// a table sorted by something the caller did not ask for and label it as if it
+// were what they wanted.
+bool ParseProcessQuery(const std::string& queryString, ProcessSort* sort,
+                       bool* ascending, size_t* limit, std::string* error) {
+    *sort = ProcessSort::Cpu;
+    *ascending = false;          // "top CPU" means largest first
+    *limit = 500;
+    if (queryString.empty()) return true;
+
+    std::map<std::string, std::string> parameters;
+    if (!ParseForm(queryString, &parameters)) {
+        if (error) *error = "could not parse the query string";
+        return false;
+    }
+    for (const auto& kv : parameters) {
+        if (kv.first == "sort") {
+            const std::string key = LowerAscii(kv.second);
+            if (key == "cpu") *sort = ProcessSort::Cpu;
+            else if (key == "memory") *sort = ProcessSort::Memory;
+            else if (key == "private") *sort = ProcessSort::PrivateBytes;
+            else if (key == "ioread") *sort = ProcessSort::IoRead;
+            else if (key == "iowrite") *sort = ProcessSort::IoWrite;
+            else if (key == "threads") *sort = ProcessSort::Threads;
+            else if (key == "name") *sort = ProcessSort::Name;
+            else if (key == "pid") *sort = ProcessSort::Pid;
+            else if (key == "connections") *sort = ProcessSort::Connections;
+            else if (key == "listeners") *sort = ProcessSort::Listeners;
+            else {
+                if (error) {
+                    *error = "unknown sort key '" + kv.second +
+                             "'; use cpu, memory, private, ioread, iowrite, "
+                             "threads, name, pid, connections or listeners";
+                }
+                return false;
+            }
+        } else if (kv.first == "dir") {
+            const std::string dir = LowerAscii(kv.second);
+            if (dir == "asc") *ascending = true;
+            else if (dir == "desc") *ascending = false;
+            else {
+                if (error) *error = "dir must be asc or desc";
+                return false;
+            }
+        } else if (kv.first == "limit") {
+            uint64_t parsed = 0;
+            // ParseUint64Strict, never std::stoull: the same throwing parse that
+            // used to terminate the whole server on ?since=abc is what this
+            // parameter would otherwise reintroduce.
+            if (!ParseUint64Strict(kv.second, &parsed)) {
+                if (error) *error = "limit must be a non-negative integer";
+                return false;
+            }
+            // Capped: the response is built in memory and the server is
+            // sequential, so an unbounded limit is a way to make one request
+            // cost seconds. 2000 rows is well past what the UI ever asks for.
+            *limit = parsed > 2000 ? 2000 : static_cast<size_t>(parsed);
+        } else {
+            if (error) *error = "unknown parameter '" + kv.first + "'";
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string ProcessesJson(ServerContext& context, const std::string& queryString) {
+    context.lastStoreAccess.store(::GetTickCount64());
+
+    ProcessSort sort = ProcessSort::Cpu;
+    bool ascending = false;
+    size_t limit = 500;
+    std::string error;
+    if (!ParseProcessQuery(queryString, &sort, &ascending, &limit, &error)) {
+        return "{\"error\":" + JsonQuote(error) + "}";
+    }
+
+    WebProcessSnapshot snapshot = context.processes.Read();
+    const ULONGLONG ageMs = context.processes.AgeMs();
+
     std::ostringstream out;
+    if (!snapshot.known) {
+        // "not measured yet" must not look like "no processes exist" (C-6).
+        out << "{\"processes\":[],\"known\":false,\"reason\":"
+            << JsonQuote(snapshot.reason.empty() ? "the process table has not been sampled yet"
+                                                 : snapshot.reason) << "}";
+        return out.str();
+    }
+
+    std::vector<WebProcessRow> rows = snapshot.rows;
+    std::stable_sort(rows.begin(), rows.end(),
+                     [sort, ascending](const WebProcessRow& a, const WebProcessRow& b) {
+                         return CompareProcesses(a, b, sort, ascending);
+                     });
+
+    const size_t total = rows.size();
+    const size_t count = rows.size() < limit ? rows.size() : limit;
+
     out << "{\"processes\":[";
-    bool first = true;
-    std::map<DWORD, int> connCount;
-    std::map<DWORD, int> listenCount;
-    for (size_t i = 0; i < context.store.View().size(); ++i) {
-        const Connection* row = context.store.ViewRow(i);
-        if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
-        if (row->identity.pid == 0) continue;
-        connCount[row->identity.pid]++;
-        if (row->identity.protocol == IPPROTO_TCP && row->keys.stateLabel == L"LISTENING")
-            listenCount[row->identity.pid]++;
+    for (size_t i = 0; i < count; ++i) {
+        const WebProcessRow& row = rows[i];
+        if (i > 0) out << ",";
+        out << "{\"pid\":" << row.pid
+            << ",\"ppid\":" << row.ppid
+            << ",\"name\":" << JsonQuote(WideToUtf8(row.name))
+            // An unreadable path is null plus a reason, never "" - an empty
+            // string reads as "this process has no path", which is false.
+            << ",\"path\":" << (row.path.empty()
+                                  ? std::string("null,\"pathReason\":\"the image path could not be read without elevation\"")
+                                  : JsonQuote(WideToUtf8(row.path)))
+            << ",\"threads\":" << (row.threadsKnown ? std::to_string(row.threads)
+                                                    : std::string("null"))
+            << ",\"connections\":" << (row.connectionCountsKnown
+                                          ? std::to_string(row.connections)
+                                          : std::string("null"))
+            << ",\"listeners\":" << (row.connectionCountsKnown
+                                        ? std::to_string(row.listeners)
+                                        : std::string("null"))
+            // Per-process CPU, memory and I/O. Each carries its own known flag
+            // because a process that cannot be opened reports none of them
+            // while still having a perfectly good PID and name.
+            << ",\"cpuPct\":" << (row.stats.cpuKnown ? JsonNumber(row.stats.cpuPct)
+                                                     : std::string("null"))
+            << ",\"memWs\":" << (row.stats.memKnown
+                                    ? std::to_string(row.stats.memWs)
+                                    : std::string("null"))
+            << ",\"memPrivate\":" << (row.stats.memKnown
+                                        ? std::to_string(row.stats.memPrivate)
+                                        : std::string("null"))
+            // I/O is TRANSFER bytes - file, pipe and device - not disk-only.
+            // The UI labels it that way; see docs/webui.md.
+            << ",\"ioRead\":" << (row.stats.ioKnown ? std::to_string(row.stats.ioRead)
+                                                     : std::string("null"))
+            << ",\"ioWrite\":" << (row.stats.ioKnown ? std::to_string(row.stats.ioWrite)
+                                                      : std::string("null"))
+            << "}";
     }
-    for (const auto& kv : connCount) {
-        if (!first) out << ",";
-        first = false;
-        out << "{\"pid\":" << kv.first
-            << ",\"connections\":" << kv.second
-            << ",\"listeners\":" << listenCount[kv.first] << "}";
-    }
-    out << "]}";
+    out << "],\"total\":" << total << ",\"returned\":" << count
+        << ",\"known\":true,\"ageMs\":" << ageMs
+        << ",\"connectionCountsKnown\":"
+        << ((total > 0 && rows[0].connectionCountsKnown) ? "true" : "false")
+        << "}";
     return out.str();
 }
 
 std::string NetworkSummaryJson(ServerContext& context) {
+    context.lastStoreAccess.store(::GetTickCount64());
     std::lock_guard<std::mutex> lock(g_storeMutex);
     std::map<std::string, int> byState, byProto, byFamily, byProcess;
     int loopback = 0, lan = 0, wildcard = 0;
+    size_t liveRows = 0;
     for (size_t i = 0; i < context.store.View().size(); ++i) {
         const Connection* row = context.store.ViewRow(i);
         if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
+        ++liveRows;
         byState[WideToUtf8(row->keys.stateLabel.empty() ? L"UNKNOWN" : row->keys.stateLabel)]++;
         byProto[row->identity.protocol == IPPROTO_TCP ? "TCP" : "UDP"]++;
         byFamily[row->identity.family == AF_INET6 ? "IPv6" : "IPv4"]++;
-        byProcess[row->display.processName.empty() ? "unknown" : std::string("PROC")]++;
+        // Grouped by the process NAME, not a placeholder: a by-process
+        // breakdown where every row reads "PROC" answers nothing. The name is
+        // attacker-influenced, so it goes through JsonQuote like everything else.
+        byProcess[row->display.processName.empty() ? std::string("(no process)")
+                                                    : WideToUtf8(row->display.processName)]++;
         if (row->identity.protocol == IPPROTO_TCP && row->keys.stateLabel == L"LISTENING") {
             const std::wstring& local = row->display.localAddress;
             if (local == L"0.0.0.0" || local == L"::" || local == L"*") wildcard++;
@@ -1583,7 +1816,7 @@ std::string NetworkSummaryJson(ServerContext& context) {
         }
     }
     std::ostringstream out;
-    out << "{\"byState\":{";
+    out << "{\"total\":" << liveRows << ",\"byState\":{";
     bool first = true;
     for (const auto& kv : byState) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
     out << "},\"byProto\":{";
@@ -1595,22 +1828,31 @@ std::string NetworkSummaryJson(ServerContext& context) {
     out << "},\"byProcess\":{";
     first = true;
     for (const auto& kv : byProcess) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
-    out << "},\"listeners\":{\"loopback\":" << loopback << ",\"lan\":" << lan << ",\"wildcard\":" << wildcard << "}}";
+    out << "},\"listeners\":{\"loopback\":" << loopback << ",\"lan\":" << lan << ",\"wildcard\":" << wildcard << "}";
+    out << ",\"snapshotKnown\":" << (context.connectionSnapshotTick.load() > 0 ? "true" : "false");
+    out << ",\"snapshotAgeMs\":" << (context.connectionSnapshotTick.load() > 0
+                                       ? ::GetTickCount64() - context.connectionSnapshotTick.load()
+                                       : 0);
+    out << "}";
     return out.str();
 }
 
 std::string GeoSummaryJson(ServerContext& context) {
+    context.lastStoreAccess.store(::GetTickCount64());
     std::lock_guard<std::mutex> lock(g_storeMutex);
     std::map<std::string, int> countries;
     int local = 0, unknown = 0;
+    const bool geoLoaded = context.source.GeoIpLoaded();
     for (size_t i = 0; i < context.store.View().size(); ++i) {
         const Connection* row = context.store.ViewRow(i);
         if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
+        // A listening socket has no remote peer, so it has no country. Counting
+        // it as "local" would quietly inflate the loopback figure.
+        if (row->keys.stateLabel == L"LISTENING") continue;
         if (row->identity.family != AF_INET) continue;
         uint32_t addr = ntohl(row->identity.remote4.S_un.S_addr);
         if (!IsGlobalUnicastV4(addr)) { local++; continue; }
-        std::wstring cc = context.source.GeoIpLoaded()
-            ? context.source.GeoIpLookupV4(addr) : L"";
+        std::wstring cc = geoLoaded ? context.source.GeoIpLookupV4(addr) : L"";
         if (cc.empty()) unknown++;
         else countries[WideToUtf8(cc)]++;
     }
@@ -1618,8 +1860,14 @@ std::string GeoSummaryJson(ServerContext& context) {
     out << "{\"countries\":{";
     bool first = true;
     for (const auto& kv : countries) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
+    // asns is an empty OBJECT, not null: no ASN database is configured, which is
+    // a different statement from "there are no ASNs" - and it is stated with
+    // geoIpConfigured below so the UI can offer the setup card.
     out << "},\"asns\":{},\"local\":" << local << ",\"unknown\":" << unknown
-        << ",\"geoIpConfigured\":" << (context.source.GeoIpLoaded() ? "true" : "false") << "}";
+        << ",\"geoIpConfigured\":" << (geoLoaded ? "true" : "false");
+    out << ",\"ipv4Only\":true";
+    out << ",\"snapshotKnown\":" << (context.connectionSnapshotTick.load() > 0 ? "true" : "false");
+    out << "}";
     return out.str();
 }
 
@@ -2237,7 +2485,16 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         return response;
     }
     if (path == "/api/processes") {
-        response.body = ProcessesJson(context);
+        const std::string body = ProcessesJson(context,
+                                               query == std::string::npos
+                                                   ? std::string()
+                                                   : request.target.substr(query + 1));
+        // A bad sort key or a non-numeric limit is a client error, not an empty
+        // result: 400 plus the message, so the caller can tell "you asked for
+        // something invalid" from "this machine has no processes".
+        // Nine characters: {"error": with no trailing space.
+        if (body.compare(0, 9, "{\"error\":") == 0) response.status = 400;
+        response.body = body;
         return response;
     }
     if (path == "/api/network/summary") {
@@ -2811,12 +3068,23 @@ int RunWebUiServer() {
         WriteWebUiLog(context, WebUiLogLevel::Warn,
                       "metrics sampler did not start; metrics read as null");
     }
+    // Connection refresher. Started AFTER Winsock, because CmdListInto reads
+    // the IP Helper tables and a socket stack that is not up yet would make
+    // every refresh fail.
     WSADATA winsock = {};
     if (::WSAStartup(MAKEWORD(2, 2), &winsock) != 0) {
         WriteWebUiLog(context, WebUiLogLevel::Error,
                       "Winsock initialization failed");
         std::cout << "webui: Winsock initialization failed\r\n";
         return kExitFail;
+    }
+    HANDLE refresher = ::CreateThread(nullptr, 0, ConnectionRefresherThread, &context,
+                                       0, nullptr);
+    if (refresher == nullptr) {
+        // Not fatal: /api/connections still refreshes inline, and the summary
+        // endpoints will report snapshotKnown=false rather than an empty set.
+        WriteWebUiLog(context, WebUiLogLevel::Warn,
+                      "connection refresher did not start; summaries read stale");
     }
     SOCKET listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listener == INVALID_SOCKET) {
