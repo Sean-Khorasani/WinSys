@@ -84,6 +84,8 @@ export async function renderSettings(page, store) {
     density: readPref(config, "density", "comfortable"),
     refreshSeconds: readPref(config, "refreshSeconds", 2),
     units: readPref(config, "units", "iec"),
+    geoIpDbPath: readPref(config, "geoIpDbPath", ""),
+    desktopNotifications: readPref(config, "desktopNotifications", false),
   };
   const schemaVersion = config.version || 2;
 
@@ -95,14 +97,13 @@ export async function renderSettings(page, store) {
     clearTimeout(pending);
     pending = setTimeout(async () => {
       status.textContent = "Saving...";
-      try {
-        const next = await api.post("/api/config", {
-          ...config,
-          version: 3,
-          preferences: { ...prefs, ...patch },
-        });
-        config = next;
-        status.textContent = "Saved.";
+       try {
+         await api.post("/api/config", {
+           ...config,
+           version: 3,
+           preferences: { ...prefs, ...patch },
+         });
+         status.textContent = "Saved.";
       } catch (err) {
         status.textContent = "Not saved: " + err.message;
         status.className = "settings-status text-danger";
@@ -157,6 +158,41 @@ export async function renderSettings(page, store) {
     ),
   );
 
+  const notifications = card({},
+    cardHeader({}, cardTitle({}, "Notifications")),
+    cardContent({},
+      row("Desktop notifications", "Show browser notifications for new connections or alerts",
+        h("input", {
+          class: "toggle",
+          type: "checkbox",
+          "aria-label": "Desktop notifications",
+          checked: prefs.desktopNotifications ? "" : null,
+          onchange: (e) => applyAndSave({ desktopNotifications: e.target.checked }),
+        })),
+      h("p", { class: "settings-description" },
+        "Requires notification permission. The browser will prompt the first time this is enabled."),
+    ),
+  );
+
+  const geoIp = card({},
+    cardHeader({}, cardTitle({}, "GeoIP database")),
+    cardContent({},
+      row("Database path", "Path to a local GeoLite2-Country.mmdb (or GeoLite2-ASN.mmdb) for country/ASN enrichment. Empty = disabled.",
+        h("input", {
+          class: "input",
+          type: "text",
+          value: prefs.geoIpDbPath,
+          placeholder: "C:\\\\path\\\\to\\\\GeoLite2-Country.mmdb",
+          "aria-label": "GeoIP database path",
+          onchange: (e) => applyAndSave({ geoIpDbPath: e.target.value }),
+        }),
+      ),
+      h("p", { class: "settings-description" },
+        "WinTCP ships no database. Download GeoLite2 from MaxMind and enter the .mmdb path here. " +
+        "The Map page and Flows tab will pick it up immediately."),
+    ),
+  );
+
   const configCard = card({},
     cardHeader({}, cardTitle({}, "Configuration")),
     cardContent({},
@@ -168,11 +204,11 @@ export async function renderSettings(page, store) {
     ),
   );
 
-  grid.append(appearance, polling, configCard);
+  grid.append(appearance, polling, notifications, geoIp, configCard);
 
   try {
     const audit = await api.get("/api/audit");
-    const entries = Array.isArray(audit.entries) ? audit.entries : [];
+    const entries = Array.isArray(audit) ? audit : Array.isArray(audit.entries) ? audit.entries : [];
     grid.append(card({},
       cardHeader({}, cardTitle({}, "Audit trail")),
       cardContent({},
@@ -181,8 +217,9 @@ export async function renderSettings(page, store) {
               "Every mutation is written here before it runs.")
           : h("ul", { class: "rule-list" },
               entries.slice(-20).reverse().map((entry) => h("li", { class: "rule-row" },
-                h("span", { class: "rule-label num" }, entry.at || entry.timestamp || ""),
-                h("span", { class: "rule-address" }, entry.action || entry.command || ""),
+                h("span", { class: "rule-label num" }, entry.time || entry.at || entry.timestamp || ""),
+                h("span", { class: "rule-address" },
+                  (entry.event?.type || entry.action || entry.command || entry.type || "").slice(0, 60)),
               ))),
       ),
     ));
