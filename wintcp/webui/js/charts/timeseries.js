@@ -223,21 +223,46 @@ export function repaintCharts() {
   for (const entry of Array.from(liveCharts)) {
     const palette = chartPalette();
     if (!entry || !entry.chart || !entry.opts) continue;
-    const axes = entry.chart.axes;
-    axes.forEach((axis) => {
-      axis.stroke = palette.axis;
-      if (axis.grid) axis.grid.stroke = palette.grid;
-      if (axis.ticks) axis.ticks.stroke = palette.grid;
-    });
-    // Index 0 of uPlot's series array is the x axis, which is not a data
-    // series and has no stroke. The FIRST DATA series is at index 1 and must
-    // take palette.series[0] - mapping on the raw index made every chart start
-    // at the second colour, which is why a two-line chart showed the same hue
-    // for both lines after a theme switch while the initial paint was correct.
-    entry.chart.series.forEach((s, i) => {
-      if (i === 0) return;
-      s.stroke = palette.series[(i - 1) % palette.series.length];
-    });
-    entry.chart.redraw();
+    const chart = entry.chart;
+
+    // Use uPlot's own setters. Writing `axis.stroke = ...` looks equivalent and
+    // is not: uPlot's axes are class instances whose render functions are
+    // methods, so replacing `stroke` deletes a method and the very next redraw
+    // throws "axis.stroke is not a function". That is what broke every chart on
+    // the Performance page the first time the theme was switched.
+    //
+    // setAxisColor(side, key, value) is keyed by SIDE AND SLOT (0 = x, 1 = the
+    // first y, 2 = the second y ...), not by the order of chart.axes.
+    for (const scale of Object.keys(chart.scales || {})) {
+      const slot = scale === "x" ? 0 : Object.keys(chart.scales).indexOf(scale);
+      for (const side of [0, 1]) {
+        safeSet(() => chart.setAxisColor(side, slot, palette.axis));
+        safeSet(() => chart.setAxisColor(side, slot, palette.grid, 1));
+        safeSet(() => chart.setAxisColor(side, slot, palette.grid, 2));
+        safeSet(() => chart.setAxisColor(side, slot, palette.grid, 3));
+      }
+    }
+
+    // Index 0 of uPlot's series array is the x axis, which is not a data series
+    // and has no stroke. The FIRST DATA series is at index 1 and must take
+    // palette.series[0] - mapping on the raw index made every chart start at the
+    // second colour, which is why a two-line chart showed the same hue for both
+    // lines after a theme switch while the initial paint was correct.
+    for (let i = 1; i < (chart.series || []).length; i += 1) {
+      safeSet(() => chart.setSeriesColor(i, palette.series[(i - 1) % palette.series.length]));
+    }
+
+    safeSet(() => chart.redraw());
+  }
+}
+
+// A theme repaint must not be able to throw. If a uPlot version renames or
+// removes one of these methods, the worst outcome should be a chart that keeps
+// its previous colours - not an uncaught error that blanks the page.
+function safeSet(fn) {
+  try {
+    fn();
+  } catch (err) {
+    console.warn("chart repaint step skipped", err);
   }
 }
