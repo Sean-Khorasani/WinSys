@@ -73,12 +73,19 @@ export function createVirtualTable(container, opts = {}) {
   inner.append(spacerTop, spacerBottom);
   wrapper.append(headerGroup, inner);
 
+  // The empty state is a role="row" like any other, so it needs a role="gridcell"
+  // child: a row containing bare text violates aria-required-children, which axe
+  // reports as CRITICAL. It is also given the full column span so a screen reader
+  // announces it as occupying the table rather than as a stray cell.
+  //
+  // A gridcell is a required child, but a bare role="gridcell" with no role="row"
+  // above it would fail the same rule in reverse, so the pairing matters.
   const emptyRow = h("div", {
     class: "virtual-table-empty muted",
     role: "row",
     "aria-rowindex": "2",
     style: `height: ${rowHeight}px; display: flex; align-items: center; padding: 0 0.75rem;`,
-  }, emptyMessage);
+  }, h("div", { role: "gridcell", "aria-colspan": String(columns.length) }, emptyMessage));
 
   container.append(wrapper);
 
