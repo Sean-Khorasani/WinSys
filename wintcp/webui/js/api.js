@@ -14,7 +14,9 @@ async function request(path, options = {}) {
       signal: controller.signal,
       headers: {
         "X-WinTCP-Token": TOKEN,
-        ...(options.body && { "Content-Type": "application/json" }),
+        ...(options.body && !(options.body instanceof URLSearchParams) && {
+          "Content-Type": "application/json",
+        }),
         ...options.headers,
       },
     });
@@ -23,6 +25,8 @@ async function request(path, options = {}) {
       const text = await res.text().catch(() => "");
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
+    // JSON-parse unless the caller asked for raw text.
+    if (options.raw) return await res.text();
     return await res.json();
   } catch (err) {
     clearTimeout(timeout);
@@ -34,4 +38,16 @@ async function request(path, options = {}) {
 export const api = {
   get: (path) => request(path),
   post: (path, body) => request(path, { method: "POST", body: JSON.stringify(body) }),
+  postForm: (path, body) =>
+    request(path, {
+      method: "POST",
+      body:
+        body instanceof URLSearchParams
+          ? body
+          : new URLSearchParams(body).toString(),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+    }),
+  raw: (path, options = {}) => request(path, { ...options, raw: true }),
 };
