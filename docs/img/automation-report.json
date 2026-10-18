@@ -1,0 +1,14 @@
+{
+  "url": "http://127.0.0.1:2144/",
+  "when": "2026-10-18T06:49:08.413Z",
+  "passed": 169,
+  "failed": 0,
+  "failures": [],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 400 (Bad Request)",
+    "Failed to load resource: the server responded with a status of 415 (Unsupported Media Type)",
+    "Failed to load resource: the server responded with a status of 400 (Bad Request)"
+  ]
+}
