@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-17T23:39:02.152Z",
-  "url": "http://127.0.0.1:19373/",
+  "when": "2026-10-18T01:04:09.876Z",
+  "url": "http://127.0.0.1:23514",
   "results": [
     {
       "name": "Wrong Host header is rejected",
@@ -205,7 +205,7 @@
     {
       "name": "C-6: every metric carries an explicit reason field",
       "pass": true,
-      "detail": "31 series, 31 with a reason"
+      "detail": "63 series, 63 with a reason"
     },
     {
       "name": "C-6: null and 0 are never conflated",

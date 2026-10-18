@@ -93,16 +93,50 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 .page-title { font-size: 1.5rem; font-weight: 600; }
 .page-description { font-size: 0.875rem; color: var(--muted-foreground); margin-top: 0.25rem; }
 
-/* ---- KPI grid ---- */
+/* ---- KPI grid ----
+   Six cards, but only when there is genuinely room for six. A hard
+   repeat(6, 1fr) overflowed the viewport at 1440px: the sidebar takes 16 rem,
+   the content is padded on both sides, and a value like
+   "91.2 KiB/s · 326.7 KiB/s" is wider than a sixth of what is left, so the
+   sixth card ran off the right edge. auto-fit with a floor means the row drops
+   to fewer, wider columns instead of clipping - the breakpoint is a consequence
+   of the content's minimum width rather than a guess at viewport sizes. */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
   gap: 1rem;
   margin-bottom: 1.5rem;
 }
-@media (max-width: 1400px) { .kpi-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 1024px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 640px) { .kpi-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .kpi-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- Overview summary card rows ----
+   These sit under the charts on the Overview page: three equal cards
+   (exposure / volumes / at-a-glance) then two wider ones (top processes /
+   connection states). Breakpoints match .kpi-grid so the page does not
+   re-flow twice at different widths. */
+.card-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.card-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+@media (max-width: 1400px) { .card-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 1024px) {
+  .card-grid-3, .card-grid-2 { grid-template-columns: minmax(0, 1fr); }
+}
+/* Below the sidebar breakpoint the volume rows lose their label column first:
+   the number and the bar are the part that carries the information. */
+@media (max-width: 640px) {
+  .volume-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .volume-track { display: none; }
+  .exposure-grid { grid-template-columns: 1fr; }
+}
 
 /* ---- Chart grid ---- */
 .chart-grid {

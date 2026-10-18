@@ -297,7 +297,15 @@ try {
     const res = await fetch("/api/metrics/now");
     return await res.json();
   });
-  const seriesKeys = Object.keys(metrics).filter((k) => !k.endsWith(".reason") && k !== "_timestamp");
+  // Top-level envelope members that are not series. "_timestamp" is the sample's
+  // clock and "facts" holds volumes and adapters - a snapshot of machine facts,
+  // not a time series with a per-sample known/unknown flag. Requiring a
+  // "<key>.reason" for either would be requiring a reason for a value that is
+  // always present and never unknown.
+  const ENVELOPE_KEYS = new Set(["_timestamp", "facts"]);
+  const seriesKeys = Object.keys(metrics).filter(
+    (k) => !k.endsWith(".reason") && !ENVELOPE_KEYS.has(k),
+  );
   const withReasons = seriesKeys.filter((k) => `${k}.reason` in metrics);
   check("C-6: every metric carries an explicit reason field",
     withReasons.length === seriesKeys.length,

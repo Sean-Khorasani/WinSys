@@ -336,19 +336,33 @@ function init() {
           api.get("/api/connections"),
           api.get("/api/metrics/now"),
           api.get("/api/capabilities"),
-          api.get("/api/processes"),
+          // limit=200 rather than the server default: the Overview wants the top
+          // 8 by CPU and the Processes page sorts and filters client-side, so the
+          // table never needed all 500 rows in one poll. The unmeasurable-last
+          // ordering means the limit must be generous or the system processes
+          // that cannot be timed would crowd out the real ones.
+          api.get("/api/processes?sort=cpu&limit=200"),
           api.get("/api/network/summary"),
           api.get("/api/geo/summary"),
           api.get("/api/system/info"),
         ]);
+      const processRows = processes.processes || [];
       store.set({
         connections: connections.connections || [],
         metrics,
         capabilities,
-        processes: processes.processes || [],
+        processes: processRows,
+        // Whether the process list is a real reading or "not sampled yet". The
+        // Overview shows an empty state rather than a zero when it is false.
+        processesKnown: processes.known !== false,
+        processCount: processes.total ?? null,
+        processSampleAgeMs: processes.ageMs ?? null,
         networkSummary,
         geoSummary,
         systemInfo,
+        // Lifted out of the metrics payload so a page does not have to reach
+        // into metrics["sys.uptimeSeconds"] to label itself.
+        sysUptime: metrics["sys.uptimeSeconds"] ?? null,
         status: "online",
         lastUpdate: new Date(),
       });

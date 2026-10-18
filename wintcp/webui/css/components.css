@@ -576,7 +576,10 @@
   border-radius: 2px;
 }
 
-/* ---- KPI card ---- */
+/* ---- KPI card ----
+   Six cards in a row at 1 rem gap. The figure row puts the number and its
+   sparkline on one baseline so the eye can compare levels across the row without
+   reading six different numbers first. */
 .kpi-card {
   display: flex;
   flex-direction: column;
@@ -587,6 +590,13 @@
   border-radius: var(--radius);
   box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
 }
+.kpi-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 1.25rem;
+}
 .kpi-label {
   font-size: 0.75rem;
   font-weight: 500;
@@ -594,6 +604,27 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+.kpi-figure {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.kpi-spark {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  /* An empty sparkline slot must not collapse the card to a shorter height than
+     its neighbours in the same row; the row would then be ragged. */
+  min-height: 2rem;
+  min-width: 108px;
+}
+.kpi-spark-row { display: block; line-height: 0; }
+.kpi-spark svg { display: block; }
+.kpi-foot { min-height: 1rem; }
 .kpi-value {
   font-size: 1.875rem;
   font-weight: 600;
@@ -608,19 +639,146 @@
 /* The em-dash placeholder for an unavailable reading, with the endpoint's
    reason on hover. */
 .kpi-value-unavailable { color: var(--muted-foreground); }
+/* A card whose metric could not be measured is visibly set back, so a row of
+   six is not read as "this machine is idle". */
+.kpi-card-unknown { border-style: dashed; }
+.kpi-card-unknown .kpi-value { color: var(--muted-foreground); }
+
 .kpi-delta {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 0.25rem;
   font-size: 0.8125rem;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.kpi-delta.up { color: var(--success); }
-.kpi-delta.down { color: var(--destructive); }
-.kpi-spark {
-  height: 2rem;
-  margin-top: 0.5rem;
+/* Direction, not judgement: "up" on disk write is not good news and "down" on
+   disk write is not bad, so these carry an arrow glyph and no moral colour.
+   Only the flat case is muted. */
+.kpi-delta-up::before { content: "\2191"; }
+.kpi-delta-down::before { content: "\2193"; }
+.kpi-delta-flat { color: var(--muted-foreground); }
+.kpi-delta-up, .kpi-delta-down { color: var(--muted-foreground); }
+
+.kpi-value-line { display: flex; align-items: baseline; gap: 0.375rem; }
+.kpi-line-hint {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
+/* ---- Bar list (top-N cards) ---- */
+.bar-list { display: flex; flex-direction: column; gap: 0.375rem; margin: 0; padding: 0; list-style: none; }
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(0, 8rem) 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+.bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: plaintext;
+}
+.bar-track {
+  position: relative;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--chart-1);
+}
+.bar-row:nth-child(2n) .bar-fill { background: var(--chart-2); }
+.bar-row:nth-child(3n) .bar-fill { background: var(--chart-3); }
+.bar-value { color: var(--muted-foreground); }
+.bar-row-unknown .bar-value { color: var(--muted-foreground); }
+
+/* ---- Volume rows ---- */
+.volume-list { display: flex; flex-direction: column; gap: 0.625rem; }
+.volume-row {
+  display: grid;
+  grid-template-columns: minmax(0, 9rem) minmax(4rem, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+.volume-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.volume-track {
+  position: relative;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.volume-fill { display: block; height: 100%; background: var(--chart-2); }
+.volume-fill-warn { background: var(--destructive); }
+.volume-value { color: var(--muted-foreground); white-space: nowrap; }
+
+/* ---- Definition list of static facts ---- */
+.fact-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.375rem 1rem;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+.fact-list dt { color: var(--muted-foreground); }
+.fact-list dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Listening-socket exposure tiles ---- */
+.exposure-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+}
+.exposure-cell {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--muted);
+  text-align: center;
+}
+.exposure-value { font-size: 1.5rem; font-weight: 600; line-height: 1.2; }
+.exposure-label { font-size: 0.75rem; color: var(--muted-foreground); }
+
+/* ---- Compact process mini-table (Overview) ---- */
+.proc-mini { display: flex; flex-direction: column; gap: 0.375rem; }
+.proc-mini-row {
+  display: grid;
+  grid-template-columns: minmax(0, 10rem) 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+.proc-mini-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: plaintext;
+}
+.proc-mini-bar {
+  position: relative;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.proc-mini-fill { display: block; height: 100%; background: var(--chart-1); }
+.proc-mini-value { color: var(--muted-foreground); white-space: nowrap; }
+.proc-mini-age { margin-top: 0.75rem; }
 
 /* ---- Status pill ---- */
 .status-pill {

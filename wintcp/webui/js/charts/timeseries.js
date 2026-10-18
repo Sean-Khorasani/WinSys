@@ -105,14 +105,29 @@ function baseOptions(height, seriesDefs) {
   return {
     width: 600,
     height,
-    legend: { show: seriesDefs.length > 1 },
+    // uPlot's legend is a per-series render hook, so the x series can be dropped
+    // outright. `label: ""` alone was not enough: uPlot fell back to its default
+    // "Time" heading and printed an empty value beside it, so every chart carried
+    // a "Time: --" entry that names the axis rather than any data. Returning
+    // false from the hook hides the row completely.
+    legend: {
+      show: seriesDefs.length > 1,
+      live: true,
+      markers: (u, seriesIdx) => ({
+        fill: u.series[seriesIdx].stroke || "#888888",
+        stroke: "#ffffff",
+        width: 7,
+        height: 7,
+      }),
+    },
     cursor: { drag: { x: false, y: false } },
     scales,
     axes,
     // A null sample stays null: uPlot draws a gap, so "no data" is visibly
     // different from a flat line at zero (C-6).
     series: [
-      { label: "" },
+      // The x series carries no stroke and must not appear in the legend.
+      { label: "", ...{ live: false }, legend: false },
       ...seriesDefs.map((def, i) => ({
         label: def.label,
         ...(def.scale ? { scale: def.scale } : {}),
@@ -214,9 +229,14 @@ export function repaintCharts() {
       if (axis.grid) axis.grid.stroke = palette.grid;
       if (axis.ticks) axis.ticks.stroke = palette.grid;
     });
+    // Index 0 of uPlot's series array is the x axis, which is not a data
+    // series and has no stroke. The FIRST DATA series is at index 1 and must
+    // take palette.series[0] - mapping on the raw index made every chart start
+    // at the second colour, which is why a two-line chart showed the same hue
+    // for both lines after a theme switch while the initial paint was correct.
     entry.chart.series.forEach((s, i) => {
       if (i === 0) return;
-      s.stroke = palette.series[i % palette.series.length];
+      s.stroke = palette.series[(i - 1) % palette.series.length];
     });
     entry.chart.redraw();
   }
