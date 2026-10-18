@@ -521,6 +521,53 @@ bool IsValidJsonObject(const std::string& text) {
     return JsonValidator(text).IsObject();
 }
 
+// Scan a JSON object for a top-level string field named `key`. Returns true on
+// success and writes the unescaped value to `out`. A minimal extractor: the
+// config is small (kMaxBodyBytes) and validated before this is called, so a
+// bounded linear scan is sufficient and allocation-free.
+bool ExtractJsonString(const std::string& text, const std::string& key,
+                       std::string* out) {
+    if (out == nullptr) return false;
+    const std::string needle = "\"" + key + "\"";
+    size_t pos = 0;
+    for (;;) {
+        pos = text.find(needle, pos);
+        if (pos == std::string::npos) return false;
+        size_t p = pos + needle.size();
+        // Skip whitespace between key and ':'.
+        while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+        if (p >= text.size() || text[p] != ':') { ++pos; continue; }
+        ++p;
+        while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+        if (p >= text.size() || text[p] != '"') { ++pos; continue; }
+        ++p;
+        out->clear();
+        while (p < text.size()) {
+            const char c = text[p++];
+            if (c == '"') return true;
+            if (c < 0x20) return false;
+            if (c == '\\') {
+                if (p >= text.size()) return false;
+                const char e = text[p++];
+                switch (e) {
+                    case '"':  out->push_back('"');  break;
+                    case '\\': out->push_back('\\'); break;
+                    case '/':  out->push_back('/');  break;
+                    case 'b':  out->push_back('\b'); break;
+                    case 'f':  out->push_back('\f'); break;
+                    case 'n':  out->push_back('\n'); break;
+                    case 'r':  out->push_back('\r'); break;
+                    case 't':  out->push_back('\t'); break;
+                    default: return false;
+                }
+            } else {
+                out->push_back(c);
+            }
+        }
+        return false;
+    }
+}
+
 // Strict decimal integer parse. Digits only, no sign, no whitespace, no
 // trailing junk, and no overflow. Never throws, never allocates.
 // std::stoull/std::stoul are the wrong tool for untrusted query strings: they
@@ -654,6 +701,58 @@ bool WriteFileAtomic(const std::wstring& path, const std::string& body) {
         return false;
     }
     return true;
+}
+
+// Load the GeoIP database referenced by config.geoIpDbPath or
+// config.preferences.geoIpDbPath, if any. Logs the outcome. A missing/empty
+// path is not an error (GeoIP is optional). Designed to be called at service
+// startup and again after the config is persisted.
+void LoadGeoIpFromConfig(ServerContext& context) {
+    std::string configText;
+    if (!ReadFileBounded(context.configPath, kMaxBodyBytes, &configText)) {
+        return;  // First run: no persisted config yet.
+    }
+    std::string dbPathUtf8;
+    ExtractJsonString(configText, "geoIpDbPath", &dbPathUtf8);
+    if (dbPathUtf8.empty()) {
+        // v3 shape: look under config.preferences.geoIpDbPath.
+        size_t prefStart = configText.find("\"preferences\"");
+        if (prefStart != std::string::npos) {
+            size_t colon = configText.find(':', prefStart + 13);
+            if (colon != std::string::npos) {
+                size_t brace = configText.find('{', colon);
+                if (brace != std::string::npos) {
+                    size_t depth = 0;
+                    size_t end = brace;
+                    for (size_t p = brace; p < configText.size(); ++p) {
+                        if (configText[p] == '{') ++depth;
+                        else if (configText[p] == '}') {
+                            if (--depth == 0) { end = p; break; }
+                        }
+                    }
+                    std::string prefsText = configText.substr(brace, end - brace + 1);
+                    ExtractJsonString(prefsText, "geoIpDbPath", &dbPathUtf8);
+                }
+            }
+        }
+    }
+    if (dbPathUtf8.empty()) {
+        return;  // Not configured: GeoIP stays unloaded, which is fine.
+    }
+    std::wstring dbPath;
+    if (!Utf8ToWide(dbPathUtf8, &dbPath)) {
+        WriteWebUiLog(context, WebUiLogLevel::Warn,
+                      "geoIpDbPath in config is not valid UTF-8");
+        return;
+    }
+    std::wstring error;
+    if (context.source.LoadGeoIp(dbPath.c_str(), &error)) {
+        WriteWebUiLog(context, WebUiLogLevel::Info,
+                      "GeoIP database loaded from " + WideToUtf8(dbPath));
+    } else {
+        WriteWebUiLog(context, WebUiLogLevel::Error,
+                      "GeoIP database failed to load: " + WideToUtf8(error));
+    }
 }
 
 bool AppendAudit(ServerContext& context, const std::string& event) {
@@ -2560,6 +2659,9 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             response.body = ErrorJson("configuration could not be saved");
             return response;
         }
+        // The config changed on disk - reload GeoIP from the new path, if any.
+        // A clear or invalid path unloads the previous database.
+        LoadGeoIpFromConfig(context);
         response.body = "{\"ok\":true}";
         return response;
     }
@@ -3075,6 +3177,10 @@ int RunWebUiServer() {
         WriteWebUiLog(context, WebUiLogLevel::Warn,
                       "metrics sampler did not start; metrics read as null");
     }
+    // Load the GeoIP database from the persisted config, if configured. Done
+    // after the metrics sampler and before the accept loop, so the first /api/
+    // requests see the country/ASN enrichment already wired up.
+    LoadGeoIpFromConfig(context);
     // Connection refresher. Started AFTER Winsock, because CmdListInto reads
     // the IP Helper tables and a socket stack that is not up yet would make
     // every refresh fail.
