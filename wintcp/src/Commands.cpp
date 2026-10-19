@@ -867,7 +867,8 @@ std::string RenderJsonRows(const std::vector<Connection>& rows,
         }
         if (webMetadata) {
             if (needComma) out += ",";
-            out += "\"id\":" + std::to_string(c.id);
+            out += "\"hostname\":\"" + JsonEscapeA(c.display.hostname) + "\"";
+            out += ",\"id\":" + std::to_string(c.id);
             out += ",\"removed\":";
             out += (c.flags & kRowRemoved) != 0 ? "true" : "false";
             out += ",\"socketRxBytes\":";
