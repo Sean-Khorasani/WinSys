@@ -127,6 +127,33 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
   margin-bottom: 1.5rem;
 }
 @media (max-width: 1400px) { .card-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 800px) { .card-grid-3, .card-grid-2 { grid-template-columns: 1fr; } }
+
+/* Connection states mini-grid on the Overview page */
+.state-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.state-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  background: var(--accent, #f1f5f9);
+  border: 1px solid var(--border);
+}
+.state-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.state-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground);
+}
 @media (max-width: 1024px) {
   .card-grid-3, .card-grid-2 { grid-template-columns: minmax(0, 1fr); }
 }
