@@ -1,7 +1,6 @@
 // pages/automations.js - Automations page.
 //
-// Three views with real panels: the template catalogue (40 templates, only the
-// ones with an evaluator can actually run), the audit/event trail, and the
+// Three views with real panels: CLI playbooks, the audit/event trail, and the
 // script workbench where scripts are written, validated, run, and saved.
 //
 // The script engine (parseScript, executeScriptNodes, etc.) lives in
@@ -12,9 +11,7 @@ import { h, clear } from "../h.js";
 import { createTabs } from "../ui/tabs.js";
 import { emptyState, card, cardHeader, cardTitle, cardDescription, cardContent, cardFooter } from "../ui/card.js";
 import { badge } from "../ui/badge.js";
-import { dialog } from "../ui/dialog.js";
 import { api } from "../api.js";
-import { isTemplateReady } from "../monitors.js";
 import {
   parseScript,
   scriptCommandNodes,
@@ -52,7 +49,7 @@ export async function renderAutomations(page, store) {
       h("div", {},
         h("h1", { class: "page-title" }, "Automations"),
         h("p", { class: "page-description" },
-          "Monitor templates, the audit trail, and the script workbench"),
+          "CLI playbooks, the audit trail, and the script workbench"),
       ),
     ),
     h("div", { class: "auto-layout" }),
@@ -119,66 +116,33 @@ export async function renderAutomations(page, store) {
       return emptyState({}, "No templates", "The catalogue file did not load.");
     }
 
-    const ready = templates.filter((t) => isTemplateReady(t.id));
-    const pending = templates.filter((t) => !isTemplateReady(t.id));
-
     const host = h("div", { class: "tab-panel-body" });
-
     host.append(h("p", { class: "muted text-sm proc-note" },
-      `${ready.length} of ${templates.length} templates have an evaluator and can run today. ` +
-      `The rest are prepared: the template exists, the capability it needs is not wired up, ` +
-      `and WinTCP says so rather than accepting it and quietly doing nothing.`));
-
-    host.append(h("h3", { class: "card-title", style: "margin-top: 1rem" },
-      `Ready (${ready.length})`));
-    if (ready.length === 0) {
-      host.append(emptyState({}, "No template can run",
-        "This build exposes the catalogue but no evaluator."));
-    } else {
-      host.append(templateCardList(ready, templates, scriptsState));
-    }
-
-    if (pending.length > 0) {
-      host.append(h("h3", { class: "card-title", style: "margin-top: 1.5rem" },
-        `Prepared, capability pending (${pending.length})`));
-      host.append(templateCardList(pending, templates, scriptsState));
-    }
+      "These are on-demand CLI playbooks, not active detectors or saved monitor rules. " +
+      "Open a script to review, edit, and run it. For background connection-change logging, " +
+      "use the CLI monitor command; this page does not evaluate monitor rules."));
+    host.append(templateCardList(templates, scriptsState));
     return host;
   }
 
-  function templateCardList(templates, allTemplates, state) {
+  function templateCardList(templates, state) {
     const list = h("div", { class: "template-grid" });
     for (const t of templates) {
-      const isReady = isTemplateReady(t.id);
       const cardEl = h("div", { class: "template-card", tabindex: 0 },
         h("div", { class: "template-card-head" },
           h("div", {},
             h("span", { class: "template-id num" }, `${t.id || "-"} · ${t.category || ""}`),
             h("h3", {}, t.title || "(unnamed)"),
           ),
-          h("span", { class: isReady ? "ready-badge" : "planned-badge" },
-            isReady ? "MONITOR READY" : "PREPARED"),
+          h("span", { class: "catalog-badge" }, "CLI PLAYBOOK"),
         ),
         t.summary ? h("p", {}, t.summary) : null,
-        h("div", { class: "template-meta" },
-          t.data ? h("span", { class: "muted text-sm" }, t.data) : null,
-          t.risk ? h("span", { class: "muted text-sm" }, t.risk) : null,
-        ),
         h("div", { class: "template-actions" },
-          t.response ? h("small", { class: "template-response" }, t.response) : null,
-          h("div", { class: "template-action-buttons" },
-            h("button", {
-              class: "btn btn-sm btn-quiet",
-              type: "button",
-              onclick: () => loadTemplateScript(t, true, state),
-            }, "Open script"),
-            h("button", {
-              class: `btn btn-sm ${isReady ? "" : "btn-quiet"}`,
-              type: "button",
-              disabled: !isReady,
-              onclick: () => addMonitorRule(t, state),
-            }, isReady ? "Add monitor" : "No monitor evaluator"),
-          ),
+          h("button", {
+            class: "btn btn-sm btn-quiet",
+            type: "button",
+            onclick: () => loadTemplateScript(t, true, state),
+          }, "Open script"),
         ),
       );
       list.append(cardEl);
@@ -194,22 +158,6 @@ export async function renderAutomations(page, store) {
     state._template = template;
     // Switch to the Scripts tab and load the editor.
     tabs.select("scripts", true);
-  }
-
-  function addMonitorRule(template, state) {
-    // In the new UI, monitors are a config-level concept. For now, show a notice.
-    // The legacy addRule() logic would go here when monitors are fully migrated.
-    const d = dialog({
-      class: "notice-dialog",
-      "aria-label": "Monitor configuration",
-    },
-      h("p", {},
-        `Template ${template.id} (${template.title}) is monitor-ready. ` +
-        "Adding a monitor rule persists it to the local config and starts evaluation " +
-        "on the next poll. This feature is being migrated to the control room."),
-    );
-    page.append(d);
-    if (d.showModal) d.showModal();
   }
 
   // ---- Events & audit tab ----
@@ -518,7 +466,7 @@ export async function renderAutomations(page, store) {
     const saved = getSavedScripts().filter((item) =>
       `${item.name || ""} ${item.templateId || ""} ${item.content || ""}`.toLowerCase().includes(q));
     const templates = scriptsState.templates.filter((t) =>
-      `${t.id || ""} ${t.category || ""} ${t.title || ""} ${t.data || ""} ${t.script || ""}`.toLowerCase().includes(q));
+      `${t.id || ""} ${t.category || ""} ${t.title || ""} ${t.summary || ""} ${t.script || ""}`.toLowerCase().includes(q));
     const savedList = page.querySelector("#my-script-list");
     const tmplList = page.querySelector("#script-template-list");
     if (savedList) {
