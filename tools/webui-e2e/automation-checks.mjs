@@ -419,6 +419,9 @@ const API_TESTS = [
   { name: "GET /api/metrics/now returns object", url: "/api/metrics/now", method: "GET", expectFn: "validObject" },
   { name: "GET /api/system/info returns object", url: "/api/system/info", method: "GET", expectFn: "validObject" },
   { name: "GET /api/connections returns array", url: "/api/connections", method: "GET", expectFn: "connectionsArray" },
+  { name: "GET /api/firewall returns availability-aware installed rules", url: "/api/firewall", method: "GET", expectFn: "firewallInventory" },
+  { name: "Peer-block preview returns the deterministic rule identity without applying it", url: "/api/block/preview", method: "POST",
+    form: { address: "203.0.113.7", port: "443" }, expectFn: "peerBlockPreview" },
   { name: "GET /api/processes returns array", url: "/api/processes", method: "GET", expectFn: "processesArray" },
   { name: "GET /api/network/summary returns object", url: "/api/network/summary", method: "GET", expectFn: "validObject" },
   { name: "GET /api/geo/summary returns object", url: "/api/geo/summary", method: "GET", expectFn: "validObject" },
@@ -474,11 +477,43 @@ async function runApiTests(page) {
       isArray: (data) => Array.isArray(data),
       templatesValid: (data) => Array.isArray(data) && data.every((t) => "id" in t && "title" in t),
       connectionsArray: (data) => Array.isArray(data.connections),
+      firewallInventory: (data) => typeof data.available === "boolean" &&
+        Array.isArray(data.rules) &&
+        Array.isArray(data.warnings) && data.warnings.every((warning) => typeof warning === "string") &&
+        typeof data.activeProfileKnown === "boolean" &&
+        (data.activeProfileTypes === null || Number.isInteger(data.activeProfileTypes)) &&
+        (data.activeProfileKnown || typeof data.activeProfileReason === "string") &&
+        typeof data.scope === "string" &&
+        (data.available || typeof data.reason === "string") &&
+        data.rules.every((rule) =>
+          typeof rule.name === "string" &&
+          (rule.ownership === "wintcp" || rule.ownership === "windows") &&
+          (rule.enabled === null || typeof rule.enabled === "boolean") &&
+          (rule.blocking === null || typeof rule.blocking === "boolean") &&
+          (rule.enabled !== null || typeof rule.enabledReason === "string") &&
+          (rule.blocking !== null || typeof rule.blockingReason === "string") &&
+          (rule.direction === null || Number.isInteger(rule.direction)) &&
+          (rule.action === null || Number.isInteger(rule.action)) &&
+          (rule.protocol === null || Number.isInteger(rule.protocol)) &&
+          (rule.profiles === null || Number.isInteger(rule.profiles)) &&
+          (rule.localAddrs === null || typeof rule.localAddrs === "string") &&
+          (rule.application === null || typeof rule.application === "string") &&
+          (rule.service === null || typeof rule.service === "string") &&
+          (rule.direction !== null || typeof rule.directionReason === "string") &&
+          (rule.action !== null || typeof rule.actionReason === "string") &&
+          (rule.protocol !== null || typeof rule.protocolReason === "string") &&
+          (rule.profiles !== null || typeof rule.profilesReason === "string") &&
+          (rule.localAddrs !== null || typeof rule.localAddrsReason === "string") &&
+          (rule.application !== null || typeof rule.applicationReason === "string") &&
+          (rule.service !== null || typeof rule.serviceReason === "string")),
       processesArray: (data) => Array.isArray(data.processes),
       cliResult: (data) => "exitCode" in data || data.ok === true,
       cliError: (data) => data.ok === false || "error" in data,
       cliStatResult: (data) => data.exitCode === 0 && data.ok === true,
       hasNonce: (data) => typeof data.nonce === "string" && data.nonce.length > 0,
+      peerBlockPreview: (data) => data.ok === true && typeof data.nonce === "string" &&
+        typeof data.ruleName === "string" && data.ruleName.length > 0 &&
+        typeof data.plan === "string" && data.plan.startsWith(`rule ${data.ruleName}\r\n`),
       configSaved: (data) => data.ok === true,
     };
 
@@ -525,11 +560,211 @@ async function runApiTests(page) {
         results.push({ name: t.name, pass: false, detail: err.message });
       }
     }
+    try {
+      const snapshotResponse = await fetch("/api/connections", { headers: { "X-WinTCP-Token": token } });
+      const snapshot = await snapshotResponse.json();
+      const row = snapshot.connections?.find((item) => !item.removed && typeof item.idExact === "string");
+      if (!row) {
+        results.push({ name: "Web connections include exact decimal IDs for action capture", pass: false, detail: "No live row exposed idExact" });
+      } else {
+        const target = {
+          idExact: row.idExact,
+          processInstanceId: row.processInstanceId || "",
+          pid: String(row.pid ?? ""),
+          proto: String(row.proto ?? ""),
+          local: String(row.local ?? ""),
+          lport: String(row.lport ?? ""),
+          remote: String(row.remote ?? ""),
+          rport: String(row.rport ?? ""),
+          state: String(row.state ?? ""),
+        };
+        const previewResponse = await fetch("/api/connections/action/preview", {
+          method: "POST",
+          headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify(target),
+        });
+        const preview = await previewResponse.json();
+        results.push({
+          name: "Exact connection preview returns explicit capability and privilege state",
+          pass: previewResponse.status === 200 && typeof preview.canExecute === "boolean" &&
+            typeof preview.requiresElevation === "boolean" &&
+            (preview.canExecute ? typeof preview.nonce === "string" : typeof preview.reason === "string"),
+          detail: "status=" + previewResponse.status,
+        });
+        const staleResponse = await fetch("/api/connections/action/preview", {
+          method: "POST",
+          headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({ ...target, state: "__stale_target__" }),
+        });
+        results.push({
+          name: "A mismatched connection tuple is refused before a close preview is issued",
+          pass: staleResponse.status === 409,
+          detail: "status=" + staleResponse.status,
+        });
+        const reusedPidResponse = await fetch("/api/connections/action/preview", {
+          method: "POST",
+          headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...target,
+            processInstanceId: target.processInstanceId + ":different-lifetime",
+          }),
+        });
+        results.push({
+          name: "A reused PID with a different captured process lifetime is refused",
+          pass: reusedPidResponse.status === 409,
+          detail: "status=" + reusedPidResponse.status,
+        });
+      }
+      const malformed = await fetch("/api/connections/action/preview", {
+        method: "POST",
+        headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ idExact: "1" }),
+      });
+      results.push({
+        name: "Connection close preview rejects incomplete target identities",
+        pass: malformed.status === 400,
+        detail: "status=" + malformed.status,
+      });
+      const unknownPreview = await fetch("/api/connections/action/execute", {
+        method: "POST",
+        headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ nonce: "00000000000000000000000000000000" }),
+      });
+      results.push({
+        name: "Connection close execution refuses an unknown or already-consumed preview",
+        pass: unknownPreview.status === 410,
+        detail: "status=" + unknownPreview.status,
+      });
+      const invalidRulePreview = await fetch("/api/firewall/rule/preview", {
+        method: "POST",
+        headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "", operation: "disable" }),
+      });
+      results.push({
+        name: "Firewall rule preview refuses an empty target without changing policy",
+        pass: invalidRulePreview.status === 400,
+        detail: "status=" + invalidRulePreview.status,
+      });
+      const firewall = await (await fetch("/api/firewall", { headers: { "X-WinTCP-Token": token } })).json();
+      const activeProfileShape = typeof firewall.activeProfileKnown === "boolean" &&
+        (firewall.activeProfileKnown
+          ? Number.isInteger(firewall.activeProfileTypes)
+          : typeof firewall.activeProfileReason === "string");
+      results.push({
+        name: "Firewall inventory reports the active profile or an explicit unknown reason",
+        pass: activeProfileShape,
+        detail: JSON.stringify({ activeProfileKnown: firewall.activeProfileKnown,
+          activeProfileTypes: firewall.activeProfileTypes,
+          activeProfileReason: firewall.activeProfileReason }),
+      });
+      const unknownRulePreview = await fetch("/api/firewall/rule/preview", {
+        method: "POST",
+        headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "WinTCP nonexistent fixture rule", operation: "remove" }),
+      });
+      results.push({
+        name: "Firewall rule preview refuses a missing rule without changing policy",
+        pass: unknownRulePreview.status === (firewall.available ? 409 : 503),
+        detail: "status=" + unknownRulePreview.status,
+      });
+      const readOnlyRule = firewall.rules?.find((rule) => rule.ownership === "windows");
+      const readOnlyPreview = readOnlyRule ? await fetch("/api/firewall/rule/preview", {
+        method: "POST",
+        headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: readOnlyRule.name, operation: "remove" }),
+      }) : null;
+      results.push({
+        name: "Windows-managed firewall rules cannot enter the WinTCP mutation flow",
+        pass: !readOnlyRule || readOnlyPreview.status === 403,
+        detail: readOnlyRule ? "status=" + readOnlyPreview.status : "no Windows-managed rules were returned",
+      });
+      const unknownRuleAction = await fetch("/api/firewall/rule/execute", {
+        method: "POST",
+        headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ nonce: "11111111111111111111111111111111" }),
+      });
+      results.push({
+        name: "Firewall rule execution rejects an unknown one-time token",
+        pass: unknownRuleAction.status === 410,
+        detail: "status=" + unknownRuleAction.status,
+      });
+    } catch (err) {
+      results.push({ name: "Connection close preview API checks complete", pass: false, detail: err.message });
+    }
     return results;
   }, API_TESTS);
 
   for (const r of results) {
     check(r.name, r.pass, r.detail);
+  }
+}
+
+async function runConfigConflictTests(page) {
+  const results = await page.evaluate(async () => {
+    const { api } = await import("./js/api.js");
+    const initial = await api.get("/api/config", { responseMeta: true });
+    const repeated = await api.get("/api/config", { responseMeta: true });
+    const attempts = await Promise.all([
+      api.post("/api/config", { ...initial.data, conflictWinner: "first" }, { headers: { "If-Match": initial.etag } })
+        .then(() => 200).catch((error) => error.status),
+      api.post("/api/config", { ...initial.data, conflictWinner: "second" }, { headers: { "If-Match": initial.etag } })
+        .then(() => 200).catch((error) => error.status),
+    ]);
+    const after = await api.get("/api/config", { responseMeta: true });
+    let staleRefused = false;
+    try { await api.post("/api/config", initial.data, { headers: { "If-Match": initial.etag } }); }
+    catch (error) { staleRefused = error.status === 412 && typeof error.body.error === "string"; }
+    const preserved = await api.get("/api/config");
+    return [
+      { name: "Config GET supplies a stable quoted revision", pass: /^\"[^\"]+\"$/.test(initial.etag) && initial.etag === repeated.etag },
+      { name: "Only one concurrent write can consume the same config revision", pass: attempts.filter((status) => status === 200).length === 1 && attempts.filter((status) => status === 412).length === 1 },
+      { name: "A successful config write advances its revision", pass: initial.etag !== after.etag },
+      { name: "Stale config writes return structured 412 errors without changing disk", pass: staleRefused && preserved.conflictWinner === after.data.conflictWinner },
+    ];
+  });
+  for (const result of results) check(result.name, result.pass);
+}
+
+async function runExternalConfigTests(page) {
+  const profile = process.env.WINTCP_TEST_PROFILE;
+  if (!profile) {
+    console.log("[skip] External config checks require the isolated profile runner.");
+    return;
+  }
+  const { readFile, writeFile, unlink, access } = await import("node:fs/promises");
+  const { dirname, basename, join, resolve } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const scratch = dirname(resolve(profile));
+  if (dirname(scratch) !== resolve(tmpdir()) || !basename(scratch).startsWith("wintcp-webui-checks-") || basename(profile) !== "profile") {
+    throw new Error("Refusing external-edit tests outside an isolated dashboard profile");
+  }
+  const filename = join(profile, "config.json");
+  const original = await readFile(filename, "utf8");
+  const snapshot = () => page.evaluate(async () => {
+    const { api } = await import("./js/api.js");
+    return api.get("/api/config", { responseMeta: true });
+  });
+  try {
+    const before = await snapshot();
+    await writeFile(filename, JSON.stringify({ ...JSON.parse(original), externallyEdited: "preserved" }), "utf8");
+    const external = await snapshot();
+    check("External config edits advance the effective revision", external.etag !== before.etag && external.data.externallyEdited === "preserved");
+    const stale = await page.evaluate(async (revision) => {
+      const { api } = await import("./js/api.js");
+      try { await api.post("/api/config", { version: 3 }, { headers: { "If-Match": revision } }); }
+      catch (error) { return error.status; }
+      return 200;
+    }, before.etag);
+    check("A stale browser cannot overwrite an external config edit", stale === 412 && JSON.parse(await readFile(filename, "utf8")).externallyEdited === "preserved");
+    await writeFile(filename, "{invalid", "utf8");
+    const recovered = await snapshot();
+    check("Corrupt configuration reads recover to valid defaults without rewriting the file", recovered.data.version === 3 && recovered.etag !== external.etag && await readFile(filename, "utf8") === "{invalid");
+    await unlink(filename);
+    const missing = await snapshot();
+    const absent = await access(filename).then(() => false).catch(() => true);
+    check("Missing configuration reads supply defaults and a revision without creating a file", missing.data.version === 3 && Boolean(missing.etag) && absent);
+  } finally {
+    await writeFile(filename, original, "utf8");
   }
 }
 
@@ -626,6 +861,7 @@ async function testGeoIpSettings(page) {
 
 // ---- Desktop Notifications tests (UI-based) ----
 async function testNotifications(page) {
+  await page.context().grantPermissions(["notifications"], { origin: new URL(url).origin });
   await page.goto(`${url}#/settings`, { waitUntil: "networkidle" });
   await page.waitForSelector(".page-title", { timeout: 10000 });
   await page.waitForTimeout(800);
@@ -1015,6 +1251,7 @@ const context = await browser.newContext({
 const testPage = await context.newPage();
 
 const consoleErrors = [];
+let savedConfig = null;
 testPage.on("console", (m) => {
   if (m.type() === "error") consoleErrors.push(m.text());
 });
@@ -1027,16 +1264,22 @@ try {
   // Save current config before mutating it, so we can restore it at the end.
   // The test suite writes a GeoIP path, toggles notifications, etc. - all of
   // which must be undone so the user does not lose their real settings.
-  let savedConfig = null;
   try {
     savedConfig = await testPage.evaluate(async () => {
       const r = await fetch("/api/config");
       return await r.json();
     });
-  } catch { /* will be null → restore skipped */ }
+  } catch (error) {
+    throw new Error(`Cannot preserve the original configuration: ${error.message}`);
+  }
+  const backupDirectory = resolve(repo, "temp", "webui-reports");
+  await mkdir(backupDirectory, { recursive: true });
+  await writeFile(resolve(backupDirectory, "automation-config-backup.json"), JSON.stringify(savedConfig, null, 2), "utf8");
 
   console.log("\n=== API Contract Tests ===");
   await runApiTests(testPage);
+  await runConfigConflictTests(testPage);
+  await runExternalConfigTests(testPage);
 
   console.log("\n=== GeoIP Settings Tests ===");
   await testGeoIpSettings(testPage);
@@ -1053,26 +1296,6 @@ try {
   console.log("\n=== Cleanup ===");
   await cleanupTestScripts(testPage);
 
-   // Restore the original config if we captured one.
-  if (savedConfig) {
-    try {
-      await testPage.evaluate(async (cfg) => {
-        const meta = document.querySelector('meta[name="wintcp-api-token"]');
-        const tok = meta ? meta.content : "";
-        const r = await fetch("/api/config", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-WinTCP-Token": tok, "Origin": window.location.origin },
-          body: JSON.stringify(cfg),
-        });
-        return r.ok;
-      }, savedConfig);
-      console.log("Original config restored.");
-      check("Config restored after tests", true);
-    } catch (err) {
-      check("Config restore after tests", false, err.message);
-    }
-  }
-
   // Filter out expected HTTP errors from API contract tests (403/400 from
   // intentionally unauthorized CLI calls are test assertions, not bugs).
   const unexpectedErrors = consoleErrors.filter((e) =>
@@ -1083,10 +1306,22 @@ try {
 } catch (err) {
   check("Test suite did not throw", false, err.message);
 } finally {
+  if (savedConfig) {
+    try {
+      const restored = await testPage.evaluate(async (config) => {
+        const { api } = await import("./js/api.js");
+        await api.updateConfig(() => config);
+        return true;
+      }, savedConfig);
+      check("Config restored after tests", restored);
+    } catch (error) {
+      check("Config restored after tests", false, error.message);
+    }
+  }
   await browser.close();
 }
 
-const out = resolve(repo, "docs", "img");
+const out = resolve(repo, "temp", "webui-reports");
 await mkdir(out, { recursive: true });
 await writeFile(
   resolve(out, "automation-report.json"),
@@ -1097,5 +1332,5 @@ await writeFile(
 );
 
 console.log(`\n${passed + failed} checks, ${failed} failed.`);
-console.log(`Report: docs/img/automation-report.json`);
+console.log(`Report: temp/webui-reports/automation-report.json`);
 process.exit(failed === 0 ? 0 : 1);
