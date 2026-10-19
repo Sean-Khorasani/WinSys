@@ -137,11 +137,31 @@ struct BlockedRule {
     std::wstring localPorts;    // get_LocalPorts, verbatim
     std::wstring remotePorts;   // get_RemotePorts, verbatim
     bool enabled = false;
+    bool enabledKnown = false;
     // True when the rule is an OUTBOUND BLOCK. A tagged rule the user turned
     // into a rule (disabled it, flipped it to allow, or changed direction) is
     // reflected here rather than assumed, and the viewer says so - a block
     // that is not blocking is the one thing this surface must not hide.
     bool isBlocking = false;
+    bool blockingKnown = false;
+    bool remoteAddrsKnown = false;
+    bool localPortsKnown = false;
+    bool remotePortsKnown = false;
+    std::wstring localAddrs;
+    std::wstring application;
+    std::wstring service;
+    LONG direction = 0;
+    LONG action = 0;
+    LONG protocol = 0;
+    LONG profiles = 0;
+    bool localAddrsKnown = false;
+    bool applicationKnown = false;
+    bool serviceKnown = false;
+    bool directionKnown = false;
+    bool actionKnown = false;
+    bool protocolKnown = false;
+    bool profilesKnown = false;
+    bool wintcpOwned = true;
 };
 
 // List the tagged rules the firewall still reports, in ledger order.
@@ -150,16 +170,26 @@ struct BlockedRule {
 // is the same rule CountWinTcpRules follows.
 bool ListBlockedRules(std::vector<BlockedRule>* out, std::wstring* error);
 
+// Read the policy collection without limiting results to WinTCP's ledger.
+// Rules the collection omits but WinTCP can still retrieve by exact name are
+// merged from the ledger; this is a best-effort inventory, not an effective-
+// policy or reachability verdict.
+// Optional profile outputs report INetFwPolicy2::CurrentProfileTypes; a failed
+// read leaves the mask at zero, known=false, and does not fail rule inventory.
+bool ListFirewallInventory(std::vector<BlockedRule>* out, std::wstring* error,
+                           std::wstring* warning = nullptr,
+                           long* activeProfileTypes = nullptr,
+                           bool* activeProfileKnown = nullptr);
+
 // Delete ONE tagged rule by name, and drop that name from the ledger so a
 // later RemoveAllWinTcpRules does not go looking for it. Returns false with
 // the reason in 'error'.
 //
 // The ledger keeps its "endpoint\tports" pair SHAPE on rewrite: the removed
 // name is blanked in place rather than the line being dropped or
-// re-serialised. That matters because CountWinTcpRules and
-// RemoveAllWinTcpRules both split on the tab and read the FIRST field, so a
-// dropped or reshaped line would change what `blocks` counts - and the
-// viewer is not allowed to change that number as a side effect of looking.
+// re-serialised. CountWinTcpRules reads the first field to count blocked peers;
+// RemoveAllWinTcpRules visits every non-empty field to remove every rule.
+// Dropping or reshaping a line would change what `blocks` counts.
 bool RemoveBlockedRule(const std::wstring& name, std::wstring* error);
 
 // Enable or disable ONE tagged rule, leaving it installed.
@@ -186,12 +216,25 @@ bool SetBlockedRuleEnabled(const std::wstring& name, bool enabled,
 // is NOT a name, and a line with no tab yields its single name.
 std::vector<std::wstring> SplitLedgerNames(const std::wstring& line);
 
+// Flatten all names from ledger lines. A pair line contributes both rules;
+// a line with a blank field contributes only its remaining non-empty name.
+std::vector<std::wstring> CollectLedgerRuleNames(
+    const std::vector<std::wstring>& lines);
+
+// Return the peer-count field: field zero for a pair, or the whole line for a
+// legacy single-name entry. A blank first field stays blank.
+std::wstring LedgerPeerName(const std::wstring& line);
+
 // Blank every occurrence of 'name' in 'line' IN PLACE, leaving the tab
 // separators where they are so the field count does not change. Returns
 // true when anything was blanked. This is the whole trick behind not
 // disturbing CountWinTcpRules, which splits on the tab and reads field 0.
 bool BlankLedgerName(const std::wstring& line, const std::wstring& name,
                      std::wstring* out);
+
+// True only for the documented HRESULTs that mean an Item lookup found no
+// rule. Other COM failures must not be mistaken for an absent rule.
+bool IsMissingFirewallRuleResult(HRESULT result);
 
 // Parse the ledger's bytes into rule-name pairs. PURE - no file, no
 // registry, no environment - so the selftest can drive it with hostile input
@@ -304,6 +347,7 @@ struct FwRule {
     // firewall will accept, because the firewall is the authority on address
     // syntax and a second parser here would be a second place to disagree.
     std::wstring remoteAddress = L"*";
+    std::wstring localAddress = L"*";
 
     // Port fields, in the firewall's own list syntax: "*", "443",
     // "1-1024", "80,443". "*" means any.
@@ -319,6 +363,8 @@ struct FwRule {
 
     // Optional service scope ("*" or a service short name). Empty means any.
     std::wstring service;
+
+    LONG profiles = 0x7fffffffL;
 
     // Human label, appended to the rule name within the 255-character cap.
     std::wstring label;
