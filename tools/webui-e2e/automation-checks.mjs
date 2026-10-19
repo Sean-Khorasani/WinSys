@@ -679,21 +679,17 @@ async function testAutomationsPage(page) {
   await page.click('button[role="tab"]:has-text("Templates")');
   await page.waitForTimeout(1000);
 
-  // Check template cards render with ready badges
-  const readyCount = await page.locator(".ready-badge").count();
-  check("Templates tab shows ready badges", readyCount > 0, `${readyCount} ready badges`);
-
-  // Check planned badges exist too (templates without ready:true)
-  const plannedCount = await page.locator(".planned-badge").count();
-  check("Templates tab shows planned badges for unready", plannedCount >= 0, `${plannedCount} planned badges`);
+  const playbookCount = await page.locator(".template-card .catalog-badge").count();
+  check("Templates are labeled as CLI playbooks", playbookCount > 0, `${playbookCount} playbooks`);
+  const disclaimer = await page.locator(".tab-panel-body").getByText(/not active detectors or saved monitor rules/).count();
+  check("Templates clarify they are not active monitors", disclaimer > 0);
 
   // Check "Open script" buttons exist
   const openButtons = await page.locator("button", { hasText: "Open script" }).count();
   check("Templates have 'Open script' buttons", openButtons > 0, `${openButtons} buttons`);
 
-  // Check "Add monitor" buttons exist for ready templates
   const monitorButtons = await page.locator("button", { hasText: "Add monitor" }).count();
-  check("Ready templates have 'Add monitor' buttons", monitorButtons > 0, `${monitorButtons} buttons`);
+  check("Playbooks do not offer a nonfunctional monitor action", monitorButtons === 0, `${monitorButtons} buttons`);
 
   // Click "Open script" on first template
   const firstOpenBtn = page.locator("button", { hasText: "Open script" }).first();
