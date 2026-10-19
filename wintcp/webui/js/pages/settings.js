@@ -75,6 +75,7 @@ function select(props, options, current) {
 function buildConfigBody(config, prefs) {
   const base = config || {};
   return {
+    ...base,
     version: 3,
     theme: prefs.theme,
     accent: prefs.accent,
@@ -83,7 +84,7 @@ function buildConfigBody(config, prefs) {
     units: prefs.units,
     geoIpDbPath: prefs.geoIpDbPath,
     desktopNotifications: prefs.desktopNotifications,
-    preferences: { ...prefs },
+    preferences: { ...base.preferences, ...prefs },
     rules: base.rules || [],
     scripts: base.scripts || [],
     presets: base.presets || [],
@@ -99,6 +100,30 @@ function buildConfigBody(config, prefs) {
 
 export async function renderSettings(page, store) {
   page._settingsState = { prefs: { ...DEFAULT_PREFS }, config: null };
+  const settingsState = page._settingsState;
+  let disposed = false;
+  const requests = new AbortController();
+  let pending = null;
+  let dirty = {};
+  let saving = {};
+  let configSyncGeneration = 0;
+  let unsubscribeConfigChanges = () => {};
+  let notificationPermissionStatus = null;
+  let onPermissionChange = null;
+  let onRestored = null;
+  page._settingsDestroy = () => {
+    disposed = true;
+    configSyncGeneration++;
+    unsubscribeConfigChanges();
+    document.removeEventListener("visibilitychange", reconcileNotificationPermission);
+    if (notificationPermissionStatus && onPermissionChange) {
+      notificationPermissionStatus.onchange = null;
+    }
+    requests.abort();
+    if (pending !== null) clearTimeout(pending);
+    if (Object.keys(dirty).length) doSave({});
+    if (onRestored) page.removeEventListener("settings:restored", onRestored);
+  };
   clear(page);
   page.append(
     h("div", { class: "page-heading" },
@@ -127,12 +152,14 @@ export async function renderSettings(page, store) {
 
   let config;
   try {
-    config = await api.get("/api/config");
+    config = await api.get("/api/config", { signal: requests.signal });
   } catch (err) {
+    if (disposed) return;
     clear(grid);
     grid.append(h("p", { class: "text-danger" }, "Could not load settings: " + err.message));
     return;
   }
+  if (disposed) return;
 
   page._settingsState.config = config;
   const prefs = {
@@ -148,53 +175,92 @@ export async function renderSettings(page, store) {
   const schemaVersion = config.version || 2;
 
   const status = h("p", { class: "settings-status muted", role: "status" }, "");
+  if (prefs.desktopNotifications &&
+      (!("Notification" in window) || Notification.permission !== "granted")) {
+    prefs.desktopNotifications = false;
+    status.textContent = "Desktop notifications need browser permission before they can be enabled.";
+  }
 
   // Debounced auto-save for live controls (selects, toggles).
-  let pending = null;
   function scheduleSave(patch) {
+    Object.assign(dirty, patch);
     clearTimeout(pending);
     pending = setTimeout(() => {
-      doSave(patch);
+      pending = null;
+      doSave({});
     }, 250);
   }
 
   async function doSave(patch) {
-    const ov = page._settingsState;
+    const ov = settingsState;
     if (!ov) return;
+    if (pending !== null) clearTimeout(pending);
+    pending = null;
     // Merge patch into prefs
     const merged = { ...ov.prefs, ...patch };
     ov.prefs = merged;
+    Object.assign(dirty, patch);
+    const savePatch = { ...dirty };
+    dirty = {};
+    Object.assign(saving, savePatch);
     status.textContent = "Saving...";
     status.className = "settings-status muted";
     try {
-      await api.post("/api/config", buildConfigBody(ov.config, merged));
-      ov.config = { ...ov.config, ...merged, preferences: { ...merged } };
+      ov.config = await api.updateConfig((current) => {
+        const latest = Object.fromEntries(Object.keys(DEFAULT_PREFS).map((key) =>
+          [key, readPref(current, key, DEFAULT_PREFS[key])]));
+        return buildConfigBody(current, { ...latest, ...savePatch });
+      });
+      for (const [key, value] of Object.entries(savePatch)) {
+        if (Object.is(saving[key], value)) delete saving[key];
+      }
+      const acknowledged = Object.fromEntries(Object.keys(DEFAULT_PREFS).map((key) =>
+        [key, readPref(ov.config, key, DEFAULT_PREFS[key])]));
+      const synced = {};
+      for (const [key, value] of Object.entries(acknowledged)) {
+        if (!Object.hasOwn(dirty, key) && !Object.hasOwn(saving, key) &&
+            !Object.is(ov.prefs[key], value)) {
+          synced[key] = value;
+        }
+      }
+      ov.prefs = { ...ov.prefs, ...synced };
+      if (Object.keys(synced).length) applyPrefs(synced);
+      if (disposed) return;
       status.textContent = "Saved.";
       status.className = "settings-status muted";
       // Apply immediately for appearance settings
-      applyPrefs(merged);
     } catch (err) {
+      for (const [key, value] of Object.entries(savePatch)) {
+        if (Object.is(saving[key], value)) delete saving[key];
+      }
+      dirty = { ...savePatch, ...dirty };
+      if (disposed) return;
       status.textContent = "Not saved: " + err.message;
       status.className = "settings-status text-danger";
     }
   }
 
   function applyPrefs(p) {
-    if (p.theme !== undefined) {
-      const resolved = p.theme === "system"
-        ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-        : p.theme;
-      document.documentElement.setAttribute("data-theme", resolved);
-    }
-    if (p.accent !== undefined) document.documentElement.setAttribute("data-accent", p.accent);
-    if (p.density !== undefined) document.body.classList.toggle("density-compact", p.density === "compact");
+    store.set(p);
+    document.dispatchEvent(new CustomEvent("wintcp:preferences", { detail: p }));
   }
 
   function applyAndSchedule(patch) {
+    if (disposed) return;
     const ov = page._settingsState;
     ov.prefs = { ...ov.prefs, ...patch };
     applyPrefs(patch);
     scheduleSave(patch);
+  }
+
+  function reconcileNotificationPermission() {
+    if (disposed || !("Notification" in window) || Notification.permission === "granted") return;
+    const toggle = page.querySelector('[aria-label="Desktop notifications"]');
+    if (!toggle?.checked) return;
+    toggle.checked = false;
+    status.textContent = "Desktop notifications were turned off because browser permission is no longer granted.";
+    status.className = "settings-status text-danger";
+    applyAndSchedule({ desktopNotifications: false });
   }
 
   // Save all current prefs immediately (triggered by Save button).
@@ -210,7 +276,9 @@ export async function renderSettings(page, store) {
     if (!ov) return;
     ov.prefs = { ...DEFAULT_PREFS };
     // Re-render the form with defaults
-    await doSave({});
+    applyPrefs(DEFAULT_PREFS);
+    await doSave(DEFAULT_PREFS);
+    if (disposed) return;
     // Trigger a re-render to reflect defaults in the form
     const evt = new Event("settings:restored", { bubbles: true });
     page.dispatchEvent(evt);
@@ -264,7 +332,30 @@ export async function renderSettings(page, store) {
           type: "checkbox",
           "aria-label": "Desktop notifications",
           checked: prefs.desktopNotifications ? "" : null,
-          onchange: (e) => applyAndSchedule({ desktopNotifications: e.target.checked }),
+          onchange: async (event) => {
+            const enabled = event.target.checked;
+            if (enabled) {
+              let permission;
+              try {
+                permission = "Notification" in window
+                  ? await Notification.requestPermission() : "unsupported";
+              } catch (error) {
+                if (disposed) return;
+                event.target.checked = false;
+                status.textContent = "Notification permission could not be requested: " + error.message;
+                return;
+              }
+              if (disposed) return;
+              if (permission !== "granted") {
+                event.target.checked = false;
+                status.textContent = permission === "unsupported"
+                  ? "Desktop notifications are unavailable in this browser."
+                  : "Notification permission was not granted. Enable it in the browser's site settings.";
+                return;
+              }
+            }
+            applyAndSchedule({ desktopNotifications: enabled });
+          },
         })),
       h("p", { class: "settings-description" },
         "Requires notification permission. The browser will prompt the first time this is enabled."),
@@ -293,7 +384,6 @@ export async function renderSettings(page, store) {
              class: "geoip-file-input",
              type: "file",
              accept: ".mmdb,application/octet-stream",
-             class: "geoip-file-input",
              onchange: async (e) => {
                const file = e.target.files[0];
                if (!file) return;
@@ -301,7 +391,9 @@ export async function renderSettings(page, store) {
                try {
                  status.textContent = `Uploading "${file.name}" (${fmtBytes(file.size)})...`;
                  status.className = "settings-status";
-                 const result = await api.upload("/api/geoip/upload", file, file.name);
+                 const result = await api.upload("/api/geoip/upload", file, file.name,
+                   { signal: requests.signal });
+                 if (disposed) return;
                  if (result.path) {
                    input.value = result.path;
                    applyAndSchedule({ geoIpDbPath: result.path });
@@ -311,6 +403,7 @@ export async function renderSettings(page, store) {
                    status.className = "settings-status error";
                  }
                } catch (err) {
+                 if (disposed) return;
                  status.textContent = `Upload failed: ${err.message}`;
                  status.className = "settings-status error";
                }
@@ -348,16 +441,75 @@ export async function renderSettings(page, store) {
 
   grid.append(appearance, polling, notifications, geoIp, configCard);
 
+  onPermissionChange = reconcileNotificationPermission;
+  document.addEventListener("visibilitychange", reconcileNotificationPermission);
+  if (navigator.permissions?.query) {
+    navigator.permissions.query({ name: "notifications" }).then((permission) => {
+      if (disposed) return;
+      notificationPermissionStatus = permission;
+      permission.onchange = onPermissionChange;
+      reconcileNotificationPermission();
+    }).catch(() => {});
+  }
+
+  const controlLabels = {
+    theme: "Theme",
+    accent: "Accent",
+    density: "Density",
+    refreshSeconds: "Refresh interval",
+    units: "Units",
+    geoIpDbPath: "Database path",
+    desktopNotifications: "Desktop notifications",
+  };
+  unsubscribeConfigChanges = api.subscribeConfigChanges(async () => {
+    const generation = ++configSyncGeneration;
+    try {
+      const fresh = await api.get("/api/config", { signal: requests.signal });
+      if (disposed || generation !== configSyncGeneration) return;
+      settingsState.config = fresh;
+      const remotePrefs = Object.fromEntries(Object.keys(DEFAULT_PREFS).map((key) =>
+        [key, readPref(fresh, key, DEFAULT_PREFS[key])]));
+      const patch = {};
+      for (const [key, value] of Object.entries(remotePrefs)) {
+        if (!Object.hasOwn(dirty, key) && !Object.hasOwn(saving, key) &&
+            !Object.is(settingsState.prefs[key], value)) {
+          patch[key] = value;
+        }
+      }
+      if (Object.keys(patch).length === 0) return;
+      settingsState.prefs = { ...settingsState.prefs, ...patch };
+      for (const [key, value] of Object.entries(patch)) {
+        const control = page.querySelector(`[aria-label="${controlLabels[key]}"]`);
+        if (!control) continue;
+        if (control.type === "checkbox") control.checked = Boolean(value);
+        else control.value = String(value);
+      }
+      applyPrefs(patch);
+      if (Object.keys(dirty).length === 0 && Object.keys(saving).length === 0) {
+        status.textContent = "Updated from another tab.";
+        status.className = "settings-status muted";
+      }
+    } catch (error) {
+      if (!disposed && error.name !== "AbortError") {
+        status.textContent = "Could not sync settings from another tab: " + error.message;
+        status.className = "settings-status text-danger";
+      }
+    }
+  });
+
   // Auto-save after a short idle period so manual edits are not lost.
-  page.addEventListener("settings:restored", () => {
+  onRestored = () => {
+    page._settingsDestroy?.();
     renderSettings(page, store).catch((err) => {
       clear(grid);
       grid.append(h("p", { class: "text-danger" }, "Could not reload settings: " + err.message));
     });
-  });
+  };
+  page.addEventListener("settings:restored", onRestored);
 
   try {
-    const audit = await api.get("/api/audit");
+    const audit = await api.get("/api/audit", { signal: requests.signal });
+    if (disposed) return;
     const entries = Array.isArray(audit) ? audit : Array.isArray(audit.entries) ? audit.entries : [];
     grid.append(card({},
       cardHeader({}, cardTitle({}, "Audit trail")),
@@ -374,6 +526,7 @@ export async function renderSettings(page, store) {
       ),
     ));
   } catch {
+    if (disposed) return;
     grid.append(card({},
       cardHeader({}, cardTitle({}, "Audit trail")),
       cardContent({}, emptyState({}, "Audit trail unavailable",
