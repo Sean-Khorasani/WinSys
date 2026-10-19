@@ -19,6 +19,8 @@ export function createColumnLayoutControls(table, {
 
   let disposed = false;
   let editGeneration = 0;
+  let configReadGeneration = 0;
+  let locallyEdited = false;
   let saveTimer = null;
   let layout = defaults;
 
@@ -42,7 +44,10 @@ export function createColumnLayoutControls(table, {
           },
         },
       }));
-      if (!disposed && snapshot === layout) status.textContent = "Layout saved";
+      if (!disposed && snapshot === layout) {
+        locallyEdited = false;
+        status.textContent = "Layout saved";
+      }
     } catch (error) {
       if (!disposed) status.textContent = `Layout not saved: ${error.message}`;
     }
@@ -64,6 +69,7 @@ export function createColumnLayoutControls(table, {
 
   function apply(next, focusKey = "") {
     editGeneration++;
+    locallyEdited = true;
     normalized(next);
     renderPanel(focusKey);
     saveSoon();
@@ -140,17 +146,25 @@ export function createColumnLayoutControls(table, {
   }
 
   renderPanel();
-  api.get("/api/config", { signal: loadController.signal }).then((config) => {
-    if (disposed || editGeneration !== 0) return;
-    const saved = config.preferences?.tableLayouts?.[layoutKey];
-    if (saved && saved.version === 1) {
-      normalized(saved);
-      renderPanel();
-      status.textContent = "Saved layout loaded";
+  async function loadSavedLayout(remote = false) {
+    const generation = ++configReadGeneration;
+    try {
+      const config = await api.get("/api/config", { signal: loadController.signal });
+      if (disposed || generation !== configReadGeneration || locallyEdited) return;
+      const saved = config.preferences?.tableLayouts?.[layoutKey];
+      if (saved && saved.version === 1) {
+        normalized(saved);
+        renderPanel();
+        status.textContent = remote ? "Layout synchronized from another tab" : "Saved layout loaded";
+      }
+    } catch (error) {
+      if (!disposed && error.name !== "AbortError") status.textContent = "Using current layout; saved layout could not be read";
     }
-  }).catch((error) => {
-    if (!disposed && error.name !== "AbortError") status.textContent = "Using default layout";
+  }
+  const unsubscribeConfig = api.subscribeConfigChanges(() => {
+    if (!disposed && !locallyEdited && saveTimer === null) loadSavedLayout(true);
   });
+  loadSavedLayout();
 
   return {
     element: details,
@@ -164,6 +178,7 @@ export function createColumnLayoutControls(table, {
     },
     destroy() {
       disposed = true;
+      unsubscribeConfig();
       loadController.abort();
       if (saveTimer !== null) {
         clearTimeout(saveTimer);
