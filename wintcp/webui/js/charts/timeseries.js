@@ -150,6 +150,7 @@ function baseOptions(height, seriesDefs) {
  */
 export async function createTimeseries(container, opts = {}) {
   const up = await loadUPlot();
+  if (!container.isConnected) throw new DOMException("Chart view was closed", "AbortError");
   const el = document.createElement("div");
   el.className = "chart-host";
   el.style.height = `${opts.height || 200}px`;
@@ -171,7 +172,9 @@ export async function createTimeseries(container, opts = {}) {
   // height, and it re-derives it as 0 here - the canvas ends up with a real
   // width and a zero-height backing store, so nothing is ever painted and the
   // chart shows only its legend.
+  let destroyed = false;
   const resize = () => {
+    if (destroyed) return;
     const width = el.clientWidth;
     const height = el.clientHeight || opts.height || 200;
     if (width > 0 && (Math.abs(width - chart.width) > 1 || chart.height !== height)) {
@@ -181,7 +184,7 @@ export async function createTimeseries(container, opts = {}) {
   const observer = new ResizeObserver(resize);
   observer.observe(el);
   // clientWidth is 0 until the element has been laid out.
-  requestAnimationFrame(resize);
+  const frame = requestAnimationFrame(resize);
 
   const entry = {
     chart,
@@ -195,6 +198,9 @@ export async function createTimeseries(container, opts = {}) {
       chart.setData(built, true);
     },
     destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      cancelAnimationFrame(frame);
       observer.disconnect();
       liveCharts.delete(entry);
       chart.destroy();
