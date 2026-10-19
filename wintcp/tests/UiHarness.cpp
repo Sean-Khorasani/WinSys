@@ -916,6 +916,109 @@ const int v1 = static_cast<int>(Num(w, "visibleCol", "1"));
 Check(v0 >= 0 && v1 >= 0, "SMOKE column machinery: visible columns resolve",
       "VisibleToCol returned -1 for a shown column");
 
+int processVisible = -1;
+for (long visible = 0; visible < Num(w, "offeredCount"); ++visible) {
+    if (Num(w, "visibleCol", std::to_string(visible).c_str()) == COL_PROCESS) {
+        processVisible = static_cast<int>(visible);
+        break;
+    }
+}
+if (processVisible < 0) {
+    Skip("SMOKE header click sorts by process name",
+         "the process column is not visible");
+} else {
+    const long previousColumn = Num(w, "sortColumn");
+    const long previousAscending = Num(w, "sortAscending");
+    NMLISTVIEW click = {};
+    click.hdr.hwndFrom = ::GetDlgItem(hwnd, IDC_LIST);
+    click.hdr.idFrom = IDC_LIST;
+    click.hdr.code = LVN_COLUMNCLICK;
+    click.iSubItem = processVisible;
+    ::SendMessageW(hwnd, WM_NOTIFY, IDC_LIST,
+                   reinterpret_cast<LPARAM>(&click));
+    const long expectedAscending = previousColumn == COL_PROCESS
+        ? (previousAscending == 0 ? 1 : 0) : 1;
+    Check(Num(w, "sortColumn") == COL_PROCESS &&
+              Num(w, "sortAscending") == expectedAscending,
+          "SMOKE header click resolves the visible process column",
+          Of(w, "sortColumn").c_str());
+    const auto processRowsSorted = [&w, processVisible](bool ascending,
+                                                         std::string* detail) {
+        bool sawUnknown = false;
+        std::wstring previous;
+        long unknownRow = -1;
+        const long count = Num(w, "rowCount");
+        for (long row = 0; row < count; ++row) {
+            const std::wstring arg = std::to_wstring(row) + L"," +
+                                     std::to_wstring(processVisible);
+            const wchar_t* const text = w.UiProbe(L"cellText", arg.c_str());
+            const std::wstring current = text != nullptr ? text : L"";
+            if (current == L"—") {
+                sawUnknown = true;
+                unknownRow = row;
+                continue;
+            }
+            if (sawUnknown) {
+                if (detail != nullptr) {
+                    const std::wstring priorArg =
+                        std::to_wstring(unknownRow) + L"," +
+                        std::to_wstring(COL_PROCESS);
+                    const std::wstring currentArg =
+                        std::to_wstring(row) + L"," +
+                        std::to_wstring(COL_PROCESS);
+                    const wchar_t* priorText =
+                        w.UiProbe(L"rowCell", priorArg.c_str());
+                    const std::wstring priorModel =
+                        priorText != nullptr ? priorText : L"";
+                    const wchar_t* currentText =
+                        w.UiProbe(L"rowCell", currentArg.c_str());
+                    const std::wstring currentModel =
+                        currentText != nullptr ? currentText : L"";
+                    *detail = "row " + std::to_string(row) + " cell=" +
+                              W(current.c_str()) + " model=" +
+                              W(currentModel.c_str()) +
+                              " follows row " + std::to_string(unknownRow) +
+                              " cell=— model=" +
+                              W(priorModel.c_str());
+                }
+                return false;
+            }
+            if (!previous.empty()) {
+                const int cmp = ::_wcsicmp(previous.c_str(), current.c_str());
+                if (ascending ? cmp > 0 : cmp < 0) {
+                    if (detail != nullptr)
+                        *detail = "row " + std::to_string(row - 1) + " (" +
+                                  W(previous.c_str()) + ") then row " +
+                                  std::to_string(row) + " (" +
+                                  W(current.c_str()) + ")";
+                    return false;
+                }
+            }
+            previous = current;
+        }
+        return true;
+    };
+    std::string processOrderDetail;
+    Check(processRowsSorted(expectedAscending != 0, &processOrderDetail),
+          "SMOKE process rows follow the selected name order",
+          processOrderDetail);
+    ::SendMessageW(hwnd, WM_NOTIFY, IDC_LIST,
+                   reinterpret_cast<LPARAM>(&click));
+    Check(Num(w, "sortColumn") == COL_PROCESS &&
+              Num(w, "sortAscending") != expectedAscending,
+          "SMOKE process header toggles sort direction",
+          Of(w, "sortAscending").c_str());
+    Check(Num(w, "sortOrderError") == -1,
+          "SMOKE the sorted model remains ordered after direction changes",
+          Of(w, "sortOrderError").c_str());
+    processOrderDetail.clear();
+    Check(processRowsSorted(expectedAscending == 0, &processOrderDetail),
+          "SMOKE the second process sort direction reverses name order",
+          processOrderDetail);
+}
+Check(Num(w, "trackSelectEnabled") == 0,
+      "SMOKE moving the pointer does not enable row selection");
+
 // What the list view ACTUALLY DREW, not what the store holds.
 //
 // Every other check here reads the model, and a model that is full says
