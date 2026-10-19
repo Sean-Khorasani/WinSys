@@ -73,19 +73,23 @@ std::map<DWORD, ProcStats> ProcStatsSampler::Sample(
         if (!seen.emplace(pid, true).second) continue;
 
         ProcStats ps;
-        HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
-                                     PROCESS_VM_READ,
-                                 FALSE, pid);
-        if (h == nullptr) continue;   // exited / protected -> unknown
+        HANDLE h = ::OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+        const bool fullQuery = h != nullptr;
+        if (h == nullptr)
+            h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (h == nullptr) continue;
 
         // --- CPU times (need the handle before memory/IO anyway) ---------
         FILETIME cr {}, ex {}, kr {}, us {};
         if (::GetProcessTimes(h, &cr, &ex, &kr, &us)) {
+            ps.processCreateTime = cr;
+            ps.processCreateKnown = true;
             const ULONGLONG procTime =
                 FileTimeToU64(kr) + FileTimeToU64(us);
             auto it = prev_.find(pid);
-            if (it == prev_.end()) {
-                prev_[pid] = CpuPrev{procTime, nowTick, -1.0};
+            if (it == prev_.end() ||
+                ::CompareFileTime(&cr, &it->second.processCreateTime) != 0) {
+                prev_[pid] = CpuPrev{procTime, nowTick, -1.0, cr};
             } else if (nowTick > it->second.tickMs &&
                        nowTick - it->second.tickMs >= kMinSampleMs) {
                 const ULONGLONG wall100ns =
@@ -126,22 +130,23 @@ std::map<DWORD, ProcStats> ProcStatsSampler::Sample(
         // this call resolves out of kernel32 and psapi.dll is never loaded. The
         // gate would have been a LoadLibrary for nothing. See kDelayedDlls in
         // WinCaps.cpp - the link line is not evidence of a dependency.
-        PROCESS_MEMORY_COUNTERS_EX pmc = {};
-        pmc.cb = sizeof(pmc);
-        if (::GetProcessMemoryInfo(
-                h, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
-                sizeof(pmc))) {
-            ps.memKnown = true;
-            ps.memWs = pmc.WorkingSetSize;
-            ps.memPrivate = pmc.PrivateUsage;
-        }
+        if (fullQuery) {
+            PROCESS_MEMORY_COUNTERS_EX pmc = {};
+            pmc.cb = sizeof(pmc);
+            if (::GetProcessMemoryInfo(
+                    h, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                    sizeof(pmc))) {
+                ps.memKnown = true;
+                ps.memWs = pmc.WorkingSetSize;
+                ps.memPrivate = pmc.PrivateUsage;
+            }
 
-        // --- disk / device transfer counters -------------------------------
-        IO_COUNTERS io = {};
-        if (::GetProcessIoCounters(h, &io)) {
-            ps.ioKnown = true;
-            ps.ioRead = io.ReadTransferCount;
-            ps.ioWrite = io.WriteTransferCount;
+            IO_COUNTERS io = {};
+            if (::GetProcessIoCounters(h, &io)) {
+                ps.ioKnown = true;
+                ps.ioRead = io.ReadTransferCount;
+                ps.ioWrite = io.WriteTransferCount;
+            }
         }
 
         ::CloseHandle(h);
