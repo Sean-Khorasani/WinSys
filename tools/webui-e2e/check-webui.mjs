@@ -27,7 +27,7 @@ async function collectJs(dir, acc = []) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === "vendor" || entry.name === "legacy") continue;
+       if (entry.name === "vendor") continue;
       await collectJs(full, acc);
     } else if (extname(entry.name) === ".js") {
       acc.push(full);
