@@ -3,6 +3,7 @@
 // See BuildInfo.h.
 
 #include "BuildInfo.h"
+#include "Version.h"
 
 #include "WinCaps.h"   // the optional-capability block in AboutText
 
@@ -75,7 +76,10 @@ std::wstring ShortcutsText() {
 
 std::wstring AboutText(const BuildSummary& s, bool verbose) {
     std::wstring out;
-    out += L"WinTCP 1.0.0\r\n\r\n";
+    out += L"WinTCP ";
+    out += std::to_wstring(WINTCP_VERSION_MAJOR) + L"." +
+           std::to_wstring(WINTCP_VERSION_MINOR) + L"." +
+           std::to_wstring(WINTCP_VERSION_PATCH) + L"\r\n\r\n";
     out += L"A live view of every TCP and UDP endpoint on this machine "
            L"(IPv4 + IPv6), with the process that owns it, read through the "
            L"IP Helper API (GetExtendedTcpTable / GetExtendedUdpTable).\r\n";
