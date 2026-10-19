@@ -869,6 +869,13 @@ std::string RenderJsonRows(const std::vector<Connection>& rows,
             if (needComma) out += ",";
             out += "\"hostname\":\"" + JsonEscapeA(c.display.hostname) + "\"";
             out += ",\"id\":" + std::to_string(c.id);
+            out += ",\"idExact\":\"" + std::to_string(c.id) + "\"";
+            out += ",\"processInstanceId\":";
+            out += c.procMeta.processCreateKnown
+                ? ("\"" + std::to_string(c.identity.pid) + ":" +
+                    std::to_string(c.procMeta.processCreate.dwHighDateTime) + ":" +
+                    std::to_string(c.procMeta.processCreate.dwLowDateTime) + "\"")
+                : "null";
             out += ",\"removed\":";
             out += (c.flags & kRowRemoved) != 0 ? "true" : "false";
             out += ",\"socketRxBytes\":";
@@ -2573,18 +2580,14 @@ CommandResult KillPid(DWORD pid, const FILETIME& create, bool createKnown,
         return r;
     }
     if (!mo.yes) return Refused("kill PID " + std::to_string(pid));
-    if (createKnown) {
-        std::wstring verr;
-        if (!ProcessResolver::VerifyProcess(pid, create, true, verr)) {
-            CommandResult r;
-            r.exitCode = kExitFail;
-            r.err = "kill: PID " + std::to_string(pid) +
-                    " no longer matches (" + WideToUtf8(verr) +
-                    "); refusing.\r\n";
-            return r;
-        }
+    if (!createKnown) {
+        CommandResult r;
+        r.exitCode = kExitFail;
+        r.err = "kill: process lifetime was not captured; refresh and try again.\r\n";
+        return r;
     }
-    HANDLE h = ::OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
+                             PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
     if (h == nullptr) {
         CommandResult r;
         r.exitCode = kExitFail;
@@ -2592,6 +2595,15 @@ CommandResult KillPid(DWORD pid, const FILETIME& create, bool createKnown,
         ::swprintf_s(buf, L"kill: OpenProcess(%lu) failed: %ls.\r\n", pid,
                      FormatSystemError(::GetLastError()).c_str());
         r.err = WideToUtf8(buf);
+        return r;
+    }
+    std::wstring verificationError;
+    if (!ProcessResolver::VerifyProcessHandle(h, create, verificationError)) {
+        ::CloseHandle(h);
+        CommandResult r;
+        r.exitCode = kExitFail;
+        r.err = "kill: PID " + std::to_string(pid) + " refused because " +
+                WideToUtf8(verificationError) + ".\r\n";
         return r;
     }
     bool ok = false;
@@ -2790,19 +2802,67 @@ CommandResult CmdKill(SnapshotSource& source, DWORD pid,
             break;
         }
     }
-    const FILETIME noCreate = {};
+    FILETIME processCreate = {};
+    bool processCreateKnown = false;
+    for (const ProcessRecord& process : EnumerateProcesses(true)) {
+        if (process.pid == pid) {
+            processCreate = process.processCreate;
+            processCreateKnown = process.processCreateKnown;
+            break;
+        }
+    }
     return KillPid(pid,
-                   rep != nullptr ? rep->procMeta.processCreate : noCreate,
-                   rep != nullptr && rep->procMeta.processCreateKnown,
+                   processCreate,
+                   processCreateKnown,
                    rep != nullptr ? rep->display.processName : std::wstring(), mo);
 }
 
+std::string ConnectionCloseCapabilityReason(const Connection& c,
+                                            bool elevated) {
+    if ((c.flags & kRowRemoved) != 0)
+        return "This endpoint is retained history and is no longer live.";
+    if (c.identity.protocol != IPPROTO_TCP)
+        return "Windows teardown supports TCP connections only.";
+    if (c.identity.family != AF_INET)
+        return "Windows exposes no public IPv6 connection teardown.";
+    if (c.identity.state != MIB_TCP_STATE_ESTAB)
+        return "Only established TCP connections can be closed.";
+    if (c.identity.pid == 0 || !c.procMeta.processCreateKnown)
+        return "The owning process lifetime is unknown, so this target cannot be verified.";
+    if (c.identity.pid == 4)
+        return "The System process cannot be safely verified as a user-process target.";
+    if (!elevated)
+        return "Closing a TCP connection requires an elevated WinTCP process.";
+    return {};
+}
+
 CommandResult CloseRow(const Connection& c, const MutateOptions& mo) {
-    if (c.identity.protocol != IPPROTO_TCP || c.identity.family != AF_INET) {
+    if ((c.flags & kRowRemoved) != 0) {
+        CommandResult result;
+        result.exitCode = kExitFail;
+        result.err = "close: this connection is retained history and is no longer live.\r\n";
+        return result;
+    }
+    if (c.identity.protocol != IPPROTO_TCP || c.identity.family != AF_INET ||
+        c.identity.state != MIB_TCP_STATE_ESTAB) {
         CommandResult r;
         r.exitCode = kExitFail;
         r.err = "close: only established IPv4 TCP connections can be closed "
                 "(Windows exposes no public IPv6 teardown).\r\n";
+        return r;
+    }
+    if (c.identity.pid == 0 || !c.procMeta.processCreateKnown) {
+        CommandResult r;
+        r.exitCode = kExitFail;
+        r.err = "close: the owning process lifetime is unknown, so this target "
+                "cannot be verified. Refresh and try again.\r\n";
+        return r;
+    }
+    if (c.identity.pid == 4) {
+        CommandResult r;
+        r.exitCode = kExitFail;
+        r.err = "close: the System process cannot be safely verified as a "
+                "user-process target.\r\n";
         return r;
     }
     // SetTcpEntry refuses without elevation, so say so up front instead of
@@ -2824,6 +2884,16 @@ CommandResult CloseRow(const Connection& c, const MutateOptions& mo) {
         return r;
     }
     if (!mo.yes) return Refused("close connection");
+    std::wstring processError;
+    if (!ProcessResolver::VerifyProcess(c.identity.pid, c.procMeta.processCreate,
+                                        c.procMeta.processCreateKnown,
+                                        processError)) {
+        CommandResult r;
+        r.exitCode = kExitFail;
+        r.err = "close: target process verification failed: " +
+                WideToUtf8(processError) + "\r\n";
+        return r;
+    }
     std::wstring cerr;
     if (!CloseTcpConnection(c, cerr)) {
         CommandResult r;
@@ -2912,6 +2982,11 @@ CommandResult CmdKillSelect(SnapshotSource& source, const std::wstring& select,
 bool ConnectionToBlockRequest(const Connection& c, BlockRequest* out,
                               std::wstring* whyNot) {
     if (out == nullptr) return false;
+    if ((c.flags & kRowRemoved) != 0) {
+        if (whyNot != nullptr)
+            *whyNot = L"This connection is retained history and is no longer live.";
+        return false;
+    }
     if (c.identity.protocol != IPPROTO_TCP || c.identity.state == MIB_TCP_STATE_LISTEN ||
         c.identity.state == 0) {
         if (whyNot != nullptr)
@@ -3090,9 +3165,12 @@ CommandResult CmdRule(const RuleRequest& req, bool dryRun, bool yes) {
         return bad;
     }
     r.remoteAddress = req.address;
+    r.localAddress = req.localAddress.empty() ? L"*" : req.localAddress;
     r.localPorts = req.localPorts.empty() ? L"*" : req.localPorts;
     r.remotePorts = req.remotePorts.empty() ? L"*" : req.remotePorts;
+    r.profiles = req.profiles;
     r.processPath = req.process;
+    r.service = req.service;
     r.label = req.label;
 
     // The full plan is printed for a dry run, INCLUDING the name the rule will
@@ -3117,6 +3195,8 @@ CommandResult CmdRule(const RuleRequest& req, bool dryRun, bool yes) {
     plan += WideToUtf8(req.address);
     plan += "  proto=";
     plan += WideToUtf8(req.proto);
+    if (r.localAddress != L"*")
+        plan += "  local-address=" + WideToUtf8(r.localAddress);
     if (!req.localPorts.empty() || !req.remotePorts.empty()) {
         plan += "  local-ports=" + WideToUtf8(r.localPorts);
         plan += "  remote-ports=" + WideToUtf8(r.remotePorts);
@@ -3124,6 +3204,11 @@ CommandResult CmdRule(const RuleRequest& req, bool dryRun, bool yes) {
     if (!req.process.empty()) {
         plan += "  process=" + WideToUtf8(req.process);
     }
+    if (!req.service.empty()) {
+        plan += "  service=" + WideToUtf8(req.service);
+    }
+    if (req.profiles != 0x7fffffffL)
+        plan += "  profiles=" + std::to_string(req.profiles);
     plan += "\r\n";
     {
         CommandResult pre;
