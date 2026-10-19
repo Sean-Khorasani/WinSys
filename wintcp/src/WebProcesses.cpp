@@ -17,48 +17,64 @@ namespace {
 // the process is running at a higher integrity level than we are - we get the
 // path, we do not get to touch the process. Failure is expected and cached by
 // the caller.
-std::wstring QueryImagePath(DWORD pid) {
+struct ImageQuery {
+    FILETIME processCreateTime = {};
+    bool processCreateKnown = false;
+    std::wstring path;
+};
+
+ImageQuery QueryImagePath(DWORD pid) {
+    ImageQuery image;
     HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (process == nullptr) return std::wstring();
+    if (process == nullptr) return image;
+    FILETIME exitTime {}, kernelTime {}, userTime {};
+    image.processCreateKnown = ::GetProcessTimes(
+        process, &image.processCreateTime, &exitTime, &kernelTime, &userTime) != FALSE;
     wchar_t buffer[32768];
     DWORD size = static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0]));
-    std::wstring path;
     if (::QueryFullProcessImageNameW(process, 0, buffer, &size) != FALSE) {
-        path.assign(buffer, size);
+        image.path.assign(buffer, size);
     }
     ::CloseHandle(process);
-    return path;
+    return image;
 }
 
-// The process table.
 // The process table.
 //
 // Toolhelp's CreateToolhelp32Snapshot is the enumeration: documented,
 // supported, and it returns exactly what the tree needs (name, PID, PPID).
 //
-// It does NOT return thread counts. PROCESSENTRY32W has no th32Threads field,
-// and the ANSI PROCESSENTRY32 that does have one is #defined away to the wide
-// struct by this SDK, so `threads` is reported unknown with a reason rather than
-// guessed.
-//
-// The alternative considered and rejected: NtQuerySystemInformation(class 5,
-// SystemProcessInformation) would return thread counts, working sets and CPU
-// times in one call with no per-process OpenProcess storm. Measured on this
-// machine its buffer does not match the layout winnt.h documents - the first
-// record's NextEntryOffset does not read as a plausible offset and the chain
-// ends after one record - so decoding it would mean reverse-engineering an
-// undocumented structure and then trusting it with every PID the UI shows. A
-// wrong PID is worse than an absent thread count. Documented in the "Known
-// limitations" section of docs/webui.md.
-// the UI shows "-".
+// PROCESSENTRY32W includes a thread count, so no extra per-process query is
+// needed for that column.
 }  // namespace
 
-std::wstring WebProcessSampler::ImagePath(DWORD pid) {
+std::wstring WebProcessSampler::ImagePath(DWORD pid,
+                                          const FILETIME& processCreateTime,
+                                          bool processCreateKnown) {
     const auto it = pathCache_.find(pid);
-    if (it != pathCache_.end()) return it->second;      // cached hit or cached failure
-    std::wstring path = QueryImagePath(pid);
-    pathCache_[pid] = path;
-    return path;
+    if (processCreateKnown && it != pathCache_.end() &&
+        it->second.processCreateKnown &&
+        ::CompareFileTime(&processCreateTime,
+                          &it->second.processCreateTime) == 0) {
+        return it->second.path;
+    }
+    const ImageQuery query = QueryImagePath(pid);
+    CachedImage image;
+    image.processCreateTime = query.processCreateTime;
+    image.processCreateKnown = query.processCreateKnown;
+    image.path = query.path;
+    if (processCreateKnown && image.processCreateKnown &&
+        ::CompareFileTime(&processCreateTime, &image.processCreateTime) != 0) {
+        return L"";
+    }
+    if (!image.processCreateKnown && processCreateKnown) {
+        image.processCreateTime = processCreateTime;
+        image.processCreateKnown = true;
+    }
+    if (image.processCreateKnown) {
+        pathCache_[pid] = image;
+    }
+    return image.path;
 }
 
 void WebProcessSampler::ClearPathCache() {
@@ -82,14 +98,13 @@ WebProcessSnapshot WebProcessSampler::Sample(
     entry.dwSize = sizeof(entry);
     if (::Process32FirstW(handle, &entry)) {
         do {
+            if (entry.th32ProcessID == 0) continue;
             WebProcessRow row;
             row.pid = entry.th32ProcessID;
             row.ppid = entry.th32ParentProcessID;
             row.name.assign(entry.szExeFile);
-            // threadsKnown stays false: see the note above. Reported as null with
-            // a reason rather than as 0, because "zero threads" is a claim about
-            // a live process and it is false.
-            row.threadsKnown = false;
+            row.threads = entry.cntThreads;
+            row.threadsKnown = true;
             const auto conn = connectionsByPid.find(row.pid);
             if (conn != connectionsByPid.end()) row.connections = conn->second;
             const auto listen = listenersByPid.find(row.pid);
@@ -116,7 +131,8 @@ WebProcessSnapshot WebProcessSampler::Sample(
         if (it != stats.end()) row.stats = it->second;
         // Path last: an image path cannot change during a process's lifetime, so
         // only new PIDs ever pay for the query.
-        row.path = ImagePath(row.pid);
+        row.path = ImagePath(row.pid, row.stats.processCreateTime,
+                             row.stats.processCreateKnown);
     }
     snapshot.rows = std::move(rows);
     snapshot.known = true;
@@ -127,8 +143,8 @@ WebProcessSnapshot WebProcessSampler::Sample(
 void ProcessSnapshot::Publish(const WebProcessSnapshot& snapshot) {
     std::lock_guard<std::mutex> lock(mutex_);
     snapshot_ = snapshot;
-    snapshot_.unixTime = static_cast<uint64_t>(::GetTickCount64());
     publishedTick_ = ::GetTickCount64();
+    snapshot_.sampledAtMs = static_cast<uint64_t>(publishedTick_);
 }
 
 WebProcessSnapshot ProcessSnapshot::Read() const {
