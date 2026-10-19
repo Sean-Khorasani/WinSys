@@ -82,6 +82,36 @@ code, .mono, kbd {
   color: var(--primary-foreground);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  body { color: CanvasText; background: Canvas; }
+  a { color: LinkText; }
+  button, input, select, textarea { forced-color-adjust: auto; }
+  .card, .virtual-table, .table-container, .inspector-dialog,
+  .column-layout-panel, .context-menu, .dialog {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
+  }
+  .virtual-table-header, .table thead, .tab[aria-selected="true"],
+  .tab.is-active { color: ButtonText; background: ButtonFace; border-color: ButtonText; }
+  .virtual-table-row.is-selected, .virtual-table-row.is-active {
+    color: HighlightText;
+    background: Highlight;
+    outline: 1px solid Highlight;
+  }
+  .virtual-table-row:hover:not(.is-selected) { outline: 1px dotted CanvasText; }
+  .badge { border: 1px solid currentColor; }
+}
+
 /* Utility classes */
 .sr-only {
   position: absolute;
