@@ -30,44 +30,26 @@ const UINT IDC_DLG_SCROLL = 4;
 // Logical (96 dpi) layout metrics. The renderer works in these units and
 // scales once via S(), so a DPI change is one pass over the line list rather
 // than a recomputation of every measurement.
-constexpr int kMargin = 10;
+constexpr int kMargin = 16;
 constexpr int kBtnH = 26;
 constexpr int kBtnWCpy = 90;
 constexpr int kBtnWOpen = 190;
 constexpr int kBtnWClose = 70;
-constexpr int kTitleH = 26;         // process name
-constexpr int kSubtitleH = 18;      // PID + endpoints
+constexpr int kTitleH = 36;
+constexpr int kSubtitleH = 24;
 // One field row. It was 17 before the 2026-10-05 rework and each field was
 // TWO of these (label, then value), so a section read as 34 px of stacked
 // captions. Now it is one row per field, and the extra 2 px buys the vertical
 // padding that makes a table legible rather than cramped.
-constexpr int kLineH = 19;          // one field row: label | value on one line
-constexpr int kSectionH = 24;       // section header band
-constexpr int kNoteH = 16;          // dim note under a section
-// Label column width, and the one number that decides whether the Details
-// window looks like a table or like two columns of unrelated text.
-//
-// 132 -> 172, sized from the real label vocabulary rather than by eye. The
-// longest labels BuildDetailModel emits are "Memory (working set)" (20 chars),
-// "Certificate subject" (19) and "Certificate issuer" (18); at the 96 dpi UI
-// font those measure roughly 130 px, and the label column is drawn only as far
-// as ruleX - kColGap/2. With the gutter at 148 that left ~0 px of leader for the
-// longest labels - the dots silently vanished on exactly the rows with the
-// longest text, which is where they matter most. 172 leaves ~24 px of leader
-// for the worst case and still leaves a 368 px value column at the design width
-// of 560 (228 px at the 420 px minimum, enough for an address and a port).
-constexpr int kLabelGutter = 172;
+constexpr int kLineH = 23;
+constexpr int kSectionH = 28;
+constexpr int kNoteH = 20;
+// Label column width accommodates the longest detail labels.
+constexpr int kLabelGutter = 196;
 constexpr int kScrollBarW = 14;
 
-// How the row is subdivided horizontally. `kColGap` is the clear space between
-// the end of a label and the start of its value, which is also where the dotted
-// leader is drawn - the leader is what makes the pairing read as a column
-// relationship instead of two unrelated strings on one line.
-constexpr int kColGap = 18;
-// The leader is a run of full stops rather than a drawn line, because a dotted
-// rule reads as "these belong together" while a solid one reads as a divider -
-// and it costs one DrawText instead of per-pixel plotting.
-constexpr int kLeaderDot = 3;
+// Spacing between the label and value columns.
+constexpr int kColGap = 14;
 // Vertical padding inside a field row, top and bottom, in logical px.
 constexpr int kRowPadY = 3;
 // The hairline column rule sits this far left of the value column.
@@ -78,22 +60,20 @@ constexpr int kRuleGap = 9;
 // the WM_CREATE handler - and the minimum size is a separate pair that must be
 // smaller than the design size or the window can never be opened at any DPI.
 // Naming all four makes those two relationships checkable.
-constexpr int kDesignWidth = 560;
-constexpr int kDesignHeight = 520;
-constexpr int kMinWidth = 420;
-constexpr int kMinHeight = 400;  // +80 for the tab strip over 320
+constexpr int kDesignWidth = 680;
+constexpr int kDesignHeight = 600;
+constexpr int kMinWidth = 500;
+constexpr int kMinHeight = 440;
 // The DPI a design pixel is 1:1 at, and the points->pixels divisor. Same two
 // numbers as MainWindow.cpp has; not shared because this window scales its own
 // layout and coupling the two would tie one window's geometry to the other's.
 constexpr int kDpiUnscaled = 96;
-constexpr int kPointsPerInch = 72;
-constexpr int kBaseFontPt = 9;
+constexpr int kTitleFontPt = 15;
+constexpr int kSectionFontPt = 10;
+constexpr int kNoteFontPt = 8;
 // A colour-mix weight, in percent: 10 is a faint tint, 20 a readable one.
 constexpr int kTintFaint = 10;
 constexpr int kTintBody = 20;
-// The accent bar and the leader dots. Strong enough to be seen as marks rather
-// than as a tint, weak enough not to compete with the values themselves.
-constexpr int kTintAccent = 46;
 // A section band under the pointer: stronger than the resting band
 // (kTintBody) so hover is visible, weaker than the accent bar so it
 // does not compete with it.
@@ -117,11 +97,6 @@ constexpr int kTabGap = 12;           // leading space before the first tab
 // Narrowest a tab slot may be, however short its label - "Notes" at any DPI is
 // still a clickable target, and a slot below this is not one.
 constexpr int kTabMinSlotPx = 48;
-
-// Leader dots are a DRAWN string, so their count is bounded even though the
-// from/to span arithmetic already limits it: a malformed rect must not produce
-// a megabyte-long run of periods.
-constexpr size_t kMaxLeaderDots = 512;
 
 // Dark-theme substitutes live in Theme.h (kSharedDark*): this window used
 // to carry its own copy of the same four values, and the charts window
@@ -191,6 +166,7 @@ DetailsDialog::~DetailsDialog() {
     if (brushSection_ != nullptr) ::DeleteObject(brushSection_);
     if (brushSectionHover_ != nullptr) ::DeleteObject(brushSectionHover_);
     if (brushAccent_ != nullptr) ::DeleteObject(brushAccent_);
+    if (brushRule_ != nullptr) ::DeleteObject(brushRule_);
 }
 
 int DetailsDialog::S(int px96) const {
@@ -207,6 +183,7 @@ void DetailsDialog::ApplyColors() {
     drop(brushSection_);
     drop(brushSectionHover_);
     drop(brushAccent_);
+    drop(brushRule_);
 
     // Always derive from the live system colors. Under high contrast these
     // are the scheme's own values, which is exactly what we want; in a
@@ -247,7 +224,8 @@ void DetailsDialog::ApplyColors() {
     // Stronger than the section band, because the accent bar is the thing that
     // tells the eye where one section stops and the next begins. At kTintBody
     // it was indistinguishable from the band it sat on.
-    brushAccent_ = ::CreateSolidBrush(Mix(bg, fg, kTintAccent));
+    brushAccent_ = ::CreateSolidBrush(::GetSysColor(COLOR_HIGHLIGHT));
+    brushRule_ = ::CreateSolidBrush(Mix(bg, fg, kTintFaint));
 }
 
 void DetailsDialog::CenterOnOwner(HWND owner) {
@@ -379,8 +357,8 @@ void DetailsDialog::ApplyFont(HFONT font) {
     font_ = font;   // borrowed from MainWindow; never deleted here
     if (font_ == nullptr) return;
     if (hwnd_ != nullptr) {
-        // the three derived faces are FontCache entries at fixed
-        // point sizes (11 bold ~ the old 125%, 9 mono, 8 for notes),
+        // The derived faces are FontCache entries at fixed point sizes for
+        // the title, section headings, code values and supporting notes.
         // resolved at this window's own DPI. The cache owns every
         // handle, so unlike the old CreateFontIndirect trio there is
         // nothing to delete on rebuild - and a DPI move re-resolves
@@ -390,10 +368,11 @@ void DetailsDialog::ApplyFont(HFONT font) {
         const UINT dpi = QueryDpiForWindow(hwnd_);
         if (!fontsReady_ || fontDpi_ != dpi) {
             fontDpi_ = dpi;
-            headerFont_ = FontCache::Get().Get(11, FW_BOLD, dpi);
+            titleFont_ = FontCache::Get().Get(kTitleFontPt, FW_BOLD, dpi);
+            headerFont_ = FontCache::Get().Get(kSectionFontPt, FW_BOLD, dpi);
             monoFont_ =
                 FontCache::Get().Get(kBodyPtSize, FW_NORMAL, dpi, true);
-            smallFont_ = FontCache::Get().Get(8, FW_NORMAL, dpi);
+            smallFont_ = FontCache::Get().Get(kNoteFontPt, FW_NORMAL, dpi);
             fontsReady_ = true;
             ApplyColors();
         }
@@ -500,7 +479,7 @@ void DetailsDialog::RebuildLayout() {
 
     if (!model_.title.empty()) {
         Line l;
-        l.kind = Line::SectionHeader;
+        l.kind = Line::Title;
         l.text = model_.title;
         l.height = kTitleH;
         l.section = -1;
@@ -509,7 +488,7 @@ void DetailsDialog::RebuildLayout() {
     }
     if (!model_.subtitle.empty()) {
         Line l;
-        l.kind = Line::FieldValue;
+        l.kind = Line::Subtitle;
         l.text = model_.subtitle;
         l.height = kSubtitleH;
         l.indent = 2;
@@ -542,6 +521,30 @@ void DetailsDialog::RebuildLayout() {
     const DetailTab active = model_.activeTab;
     const int m = S(kMargin);
     const int tabSlotH = S(kTabH);
+    RECT client = {};
+    if (hwnd_ != nullptr) ::GetClientRect(hwnd_, &client);
+    const int valueLeft = S(kMargin + kLabelGutter);
+    const int valueRight = client.right - S(kMargin) -
+                           ScrollBarWidth() - S(4);
+    const int valueWidth = (std::max)(S(80), valueRight - valueLeft);
+    HDC measure = hwnd_ != nullptr ? ::GetDC(hwnd_) : nullptr;
+    const auto wrappedHeight = [this, measure](const std::wstring& text,
+                                                HFONT face, int width,
+                                                int minimum) {
+        if (measure == nullptr || text.empty()) return minimum;
+        HGDIOBJ oldFont = face != nullptr ? ::SelectObject(measure, face)
+                                          : nullptr;
+        RECT measured = {0, 0, width, 0};
+        ::DrawTextW(measure, text.c_str(), static_cast<int>(text.size()),
+                    &measured, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX |
+                                   DT_EDITCONTROL);
+        if (oldFont != nullptr) ::SelectObject(measure, oldFont);
+        const UINT dpi = QueryDpiForWindow(hwnd_);
+        const int logicalTextHeight = ::MulDiv(
+            measured.bottom + 1, kDpiUnscaled, static_cast<int>(dpi));
+        return (std::max)(minimum,
+                          logicalTextHeight + 2 * kRowPadY);
+    };
     // Measure tab labels with the header font. A scratch DC is fine here:
     // at most kTabCount labels, and RebuildLayout is not on the paint path,
     // so GetPaintDC (which only works during WM_PAINT) is intentionally NOT
@@ -629,14 +632,17 @@ void DetailsDialog::RebuildLayout() {
             // two columns are aligned by position, not by text.
             l.monospace = f.monospace;
             l.section = static_cast<int>(s);
-            l.height = kLineH;
+            l.height = wrappedHeight(l.value,
+                l.monospace ? monoFont_ : font_, valueWidth, kLineH);
             push(l);
         }
         if (!sec.note.empty()) {
             Line n;
             n.kind = Line::SectionNote;
             n.text = sec.note;
-            n.height = kNoteH;
+            const int noteLeft = m + S(kLabelGutter);
+            n.height = wrappedHeight(sec.note, smallFont_,
+                (std::max)(S(80), valueRight - noteLeft), kNoteH);
             n.indent = kLabelGutter;
             n.section = static_cast<int>(s);
             push(n);
@@ -674,6 +680,7 @@ void DetailsDialog::RebuildLayout() {
             push(n);
         }
     }
+    if (measure != nullptr) ::ReleaseDC(hwnd_, measure);
     const int maxScroll = MaxScroll();
     if (scrollPos_ > maxScroll) scrollPos_ = maxScroll;
     SyncScrollBar();
@@ -730,23 +737,21 @@ void DetailsDialog::Layout(int cx, int cy) {
 }
 
 void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
-                              int m, int ruleX, bool withLeaders,
+                              int m, int ruleX,
                               int textRight, int fieldInSection) {
     // Selects the right face for this row kind. Section headers and
     // tabs keep their own faces; notes and field rows differ. Field
     // rows honour the value's monospace flag separately below (the
     // label always uses the UI face).
     //
-    // The Tab case is load-bearing: RebuildLayout measures every tab
-    // slot with headerFont_ selected, so the slot width is the BOLD
-    // face's width. Painting the label with any other face draws
-    // text narrower than the slot it owns - the tabs then sit in
-    // oversized, unevenly-spaced slots and the active highlight is
-    // wider than its label, which reads as "mis-aligned". Measure
-    // and paint must agree, so the Tab face IS headerFont_.
+    // RebuildLayout measures each tab slot with the bold face, leaving
+    // enough room for the active tab's emphasis.
     const HFONT face =
-        (l.kind == Line::SectionHeader) ? headerFont_
-        : (l.kind == Line::Tab)          ? headerFont_
+        (l.kind == Line::Title)          ? titleFont_
+        : (l.kind == Line::SectionHeader) ? headerFont_
+        : (l.kind == Line::Tab)          ?
+              ((l.section == static_cast<int>(model_.activeTab))
+                   ? headerFont_ : font_)
         : (l.kind == Line::SectionNote)   ? smallFont_
         : l.monospace                     ? monoFont_
                                           : font_;
@@ -816,66 +821,35 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
         }
     }
 
+    if (l.kind == Line::Title) {
+        ::SetTextColor(mem, clrHeader_);
+        if (brushAccent_ != nullptr) {
+            RECT accent = {m, y + S(7), m + S(3), y + lh - S(7)};
+            ::FillRect(mem, &accent, brushAccent_);
+        }
+        RECT title = {m + S(10), y, textRight, y + lh};
+        ::DrawTextW(mem, l.text.c_str(), static_cast<int>(l.text.size()),
+                    &title, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX |
+                                DT_END_ELLIPSIS);
+        return;
+    }
+
     if (l.kind == Line::FieldRow) {
         // ---- the two columns -------------------------------------
         // Label, in the gutter. Ellipsised, because a label that overruns
         // its column would otherwise push into the value.
         ::SetTextColor(mem, clrDim_);
-        RECT labelRect = {m, y, ruleX - S(kColGap) / 2, y + lh};
+        RECT labelRect = {m, y + S(kRowPadY),
+                          ruleX - S(kColGap) / 2, y + lh - S(kRowPadY)};
         ::DrawTextW(mem, l.text.c_str(),
                     static_cast<int>(l.text.size()), &labelRect,
-                    DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX |
+                    DT_SINGLELINE | DT_TOP | DT_NOPREFIX |
                         DT_END_ELLIPSIS);
 
-        // The dotted leader between them. Measured from the label that was
-        // actually drawn, so it starts where the text ends rather than at a
-        // guessed offset - with DT_END_ELLIPSIS the drawn label may be
-        // shorter than the original string.
-        //
-        // the old form overwrote labelRect.right with labelRect.left
-        // and then asked `want.cx < labelRect.right` - a text WIDTH against
-        // an x COORDINATE, true only left of ~100 px - so leaders almost
-        // never drew. The bound is the label column's width now, compared
-        // before anything is overwritten; the full label must fit
-        // unellipsised, so the drawn end is exactly left + want.cx.
-        if (brushAccent_ != nullptr && withLeaders && !l.text.empty() &&
-            !l.value.empty()) {
-            const int labelColR = ruleX - S(kColGap) / 2;
-            const int labelAvail = labelColR - labelRect.left;
-            SIZE want = {};
-            ::GetTextExtentPoint32W(
-                mem, l.text.c_str(), static_cast<int>(l.text.size()), &want);
-            if (want.cx > 0 && want.cx < labelAvail) {
-                SIZE dotSize = {};
-                ::GetTextExtentPoint32W(mem, L"..", 2, &dotSize);
-                const int step = (std::max)(
-                    1, static_cast<int>(dotSize.cx) / 2 + S(kLeaderDot));
-                const int from =
-                    (std::min)(static_cast<int>(labelRect.left + want.cx),
-                               static_cast<int>(labelRect.right)) +
-                    S(kColGap) / 2;
-                const int to = ruleX - S(kColGap) / 2 - S(kRuleGap) / 2;
-                std::wstring dots;
-                for (int dx = from; dx < to; dx += step) {
-                    dots.push_back(L'.');
-                    if (dots.size() >= kMaxLeaderDots) break;
-                }
-                if (!dots.empty() && clrDim_ != 0) {
-                    ::SetTextColor(mem, clrDim_);
-                    RECT dotRect = {from, y, to, y + lh};
-                    ::DrawTextW(mem, dots.c_str(),
-                                static_cast<int>(dots.size()), &dotRect,
-                                DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-                }
-            }
-        }
-
-        // The hairline between the two columns, inset from the leader so it
-        // never touches the value text.
-        if (brushAccent_ != nullptr) {
+        if (brushRule_ != nullptr) {
             RECT rule = {ruleX, y + S(kRowPadY), ruleX + 1,
                          y + lh - S(kRowPadY)};
-            ::FillRect(mem, &rule, brushAccent_);
+            ::FillRect(mem, &rule, brushRule_);
         }
 
         // Value, starting at a fixed x so the column is aligned regardless of
@@ -885,17 +859,18 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
         ::SetTextColor(mem, clrText_);
         const HFONT valueFace = l.monospace ? monoFont_ : font_;
         if (valueFace != nullptr) ::SelectObject(mem, valueFace);
-        RECT valueRect = {m + S(kLabelGutter), y, textRight, y + lh};
+        RECT valueRect = {m + S(kLabelGutter), y + S(kRowPadY),
+                          textRight, y + lh - S(kRowPadY)};
         ::DrawTextW(mem, l.value.c_str(),
                     static_cast<int>(l.value.size()), &valueRect,
-                    DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX |
-                        DT_END_ELLIPSIS);
+                    DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
         return;
     }
 
     // Single-column rows: subtitle, note, connection line.
     ::SetTextColor(mem,
-                   (l.kind == Line::SectionNote)     ? clrDim_
+                   (l.kind == Line::SectionNote || l.kind == Line::Subtitle)
+                       ? clrDim_
                    : (l.kind == Line::SectionHeader) ? clrHeader_
                                                             : clrText_);
     // A section header carries a collapse chevron in the margin,
@@ -904,7 +879,13 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
     const int left = (l.kind == Line::SectionHeader)
                          ? m + S(kChevronGutter)
                          : m + S(l.indent);
-    RECT draw = {left, y, textRight, y + lh};
+    RECT draw = {left, y + (l.kind == Line::SectionNote ? S(kRowPadY) : 0),
+                 textRight, y + lh};
+    if (l.kind == Line::SectionNote) {
+        ::DrawTextW(mem, l.text.c_str(), static_cast<int>(l.text.size()),
+                    &draw, DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+        return;
+    }
     ::DrawTextW(mem, l.text.c_str(), static_cast<int>(l.text.size()),
                 &draw,
                 DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX |
@@ -952,8 +933,8 @@ void DetailsDialog::OnPaint() {
                 if (tabBarY_ + tabBarH_ > 0 && tabBarY_ < cy) {
                     for (const Line& t : lines_) {
                         if (!t.pinned || t.kind != Line::Tab) continue;
-                        PaintLine(mem, t, tabBarY_, S(t.height), cx, m,
-                                  ruleX, false, headerRight);
+        PaintLine(mem, t, tabBarY_, S(t.height), cx, m,
+                                  ruleX, headerRight);
                     }
                 }
                 y += tabBarH_;
@@ -962,7 +943,7 @@ void DetailsDialog::OnPaint() {
         }
         const int lh = S(l.height);
         if (y + lh > 0 && y < cy)
-            PaintLine(mem, l, y, lh, cx, m, ruleX, false, headerRight);
+            PaintLine(mem, l, y, lh, cx, m, ruleX, headerRight);
         y += lh;
     }
     const int headerBottom = y;   // one past the last pinned line
@@ -1003,7 +984,7 @@ void DetailsDialog::OnPaint() {
         // Clipped to the BODY, not the client rect. `y < contentBottom` also
         // stops a row being drawn when only its very bottom edge is inside.
         if (y + lh > headerBottom && y < contentBottom)
-            PaintLine(mem, l, y, lh, cx, m, ruleX, true, bodyRight,
+            PaintLine(mem, l, y, lh, cx, m, ruleX, bodyRight,
                       fieldInSection);
         y += lh;
     }
@@ -1184,6 +1165,7 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_SIZE:
             Layout(LOWORD(lParam), HIWORD(lParam));
+            RebuildLayout();
             ::InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_GETMINMAXINFO: {
