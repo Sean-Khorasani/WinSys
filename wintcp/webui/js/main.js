@@ -9,8 +9,8 @@ import { icon } from "./icons.js";
 import { fmtNum, fmtBytes, fmtPct, fmtDuration } from "./format.js";
 import { renderOverview, updateOverview } from "./pages/overview.js";
 import { renderPerformance, updatePerformance } from "./pages/performance.js";
-import { renderProcesses } from "./pages/processes.js";
-import { renderNetwork } from "./pages/network.js";
+import { renderProcesses, updateProcesses } from "./pages/processes.js";
+import { renderNetwork, updateNetwork } from "./pages/network.js";
 import { renderMap, updateMap } from "./pages/map.js";
 import { renderAutomations } from "./pages/automations.js";
 import { renderBlocks } from "./pages/blocks.js";
@@ -44,6 +44,11 @@ export const store = createStore({
   processTreemapMetric: "memWs",
   processSortKey: null,
   processSortDir: null,
+  processFilter: "",
+  processTableScrollTop: 0,
+  networkFilter: "",
+  networkTableScrollTop: 0,
+  networkListeningScrollTop: 0,
 });
 
 // Apply theme. Charts resolve design tokens into canvas colours at build time,
@@ -145,7 +150,7 @@ function renderSidebar(container) {
           h("span", { class: "sidebar-label" }, "WinTCP"),
         ),
         h("button", {
-          class: "btn btn-ghost btn-icon btn-sm",
+          class: "btn btn-ghost btn-sm",
           onclick: () => store.set({ sidebarCollapsed: !store.get().sidebarCollapsed }),
           "aria-label": "Toggle sidebar",
         }, icon("menu", 16)),
@@ -212,6 +217,14 @@ function renderTopbar(container, handlers = {}) {
         }, icon("refresh", 16)),
         h("button", {
           class: "btn btn-ghost btn-icon btn-sm",
+          id: "topbar-pause",
+          type: "button",
+          onclick: () => handlers.onTogglePause && handlers.onTogglePause(),
+          "aria-label": store.get().paused ? "Resume live updates" : "Pause live updates",
+          title: store.get().paused ? "Resume live updates" : "Pause live updates",
+        }, store.get().paused ? "Resume" : "Pause"),
+        h("button", {
+          class: "btn btn-ghost btn-icon btn-sm",
           type: "button",
           onclick: () => {
             const current = store.get().theme;
@@ -268,6 +281,8 @@ const PAGE_LABELS = {
 const pageUpdateFns = {
   "/": updateOverview,
   "/performance": updatePerformance,
+  "/processes": updateProcesses,
+  "/network": updateNetwork,
 };
 
 // Release anything a page registered for teardown before the element is reused.
@@ -286,6 +301,10 @@ function disposePage() {
   if (typeof page._procDestroy === "function") {
     page._procDestroy();
     page._procDestroy = null;
+  }
+  if (typeof page._netDestroy === "function") {
+    page._netDestroy();
+    page._netDestroy = null;
   }
   if (typeof page._mapDestroy === "function") {
     page._mapDestroy();
@@ -386,22 +405,19 @@ function init() {
   // Start poller. One poll fans out to every read-only endpoint the pages draw
   // from, so a page switch never has to wait on the network to paint.
   const refresh = async () => {
+    if (store.get().paused) return;
     try {
       const [connections, metrics, capabilities, processes, networkSummary, geoSummary, systemInfo] =
         await Promise.all([
           api.get("/api/connections"),
           api.get("/api/metrics/now"),
           api.get("/api/capabilities"),
-          // limit=200 rather than the server default: the Overview wants the top
-          // 8 by CPU and the Processes page sorts and filters client-side, so the
-          // table never needed all 500 rows in one poll. The unmeasurable-last
-          // ordering means the limit must be generous or the system processes
-          // that cannot be timed would crowd out the real ones.
-          api.get("/api/processes?sort=cpu&limit=200"),
+          api.get("/api/processes?sort=cpu&limit=2000"),
           api.get("/api/network/summary"),
           api.get("/api/geo/summary"),
           api.get("/api/system/info"),
         ]);
+      if (store.get().paused) return;
       const processRows = processes.processes || [];
       store.set({
         connections: connections.connections || [],
@@ -413,6 +429,7 @@ function init() {
         processesKnown: processes.known !== false,
         processCount: processes.total ?? null,
         processSampleAgeMs: processes.ageMs ?? null,
+        processSampledAtMs: processes.sampledAtMs ?? null,
         networkSummary,
         geoSummary,
         systemInfo,
@@ -441,6 +458,16 @@ function init() {
    if (header) header.replaceWith(renderTopbarFragment({
      onPalette: () => palette.open(),
      onRefresh: () => refresh(),
+     onTogglePause: () => {
+       if (store.get().paused) {
+         store.set({ paused: false });
+         poller.start();
+       } else {
+         store.set({ paused: true });
+         poller.stop();
+       }
+       updateTopbarStatus();
+     },
    }));
 
   // Load the persisted preferences (theme, density, refresh cadence) once.
@@ -471,8 +498,15 @@ function updateTopbarStatus() {
   const el = document.getElementById("topbar-status");
   const status = store.get().status;
   if (el) {
-    el.textContent = status === "online" ? "Live" : "Reconnecting";
-    el.className = `topbar-status is-${status}`;
+    const held = store.get().paused;
+    el.textContent = held ? "Paused" : status === "online" ? "Live" : "Reconnecting";
+    el.className = `topbar-status is-${held ? "paused" : status}`;
+  }
+  const pauseButton = document.getElementById("topbar-pause");
+  if (pauseButton) {
+    pauseButton.textContent = store.get().paused ? "Resume" : "Pause";
+    pauseButton.setAttribute("aria-label", store.get().paused ? "Resume live updates" : "Pause live updates");
+    pauseButton.title = store.get().paused ? "Resume live updates" : "Pause live updates";
   }
   const live = document.getElementById("snapshot-status");
   const at = store.get().lastUpdate;
@@ -497,8 +531,6 @@ function pageSignature(path, state) {
   const slice = {
     "/": { n: state.connections?.length, m: state.metrics?._timestamp },
     "/performance": { m: state.metrics?._timestamp },
-    "/processes": { p: state.processes?.length, n: state.connections?.length, s: state.processSortKey, d: state.processSortDir },
-    "/network": { s: state.networkSummary, n: state.connections?.length },
     "/map": { g: state.geoSummary, n: state.connections?.length },
     "/automations": { c: state.configVersion },
     "/blocks": { c: state.configVersion },
