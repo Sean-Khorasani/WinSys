@@ -204,12 +204,21 @@ bool ListViewColumns::SyncOrderFromHeader(HWND list) {
     const int count = Header_GetItemCount(hdr);
     if (count <= 0 || static_cast<int>(visToCol_.size()) != count) return false;
 
+    std::vector<int> headerOrder(static_cast<size_t>(count), -1);
+    if (!ListView_GetColumnOrderArray(list, count, headerOrder.data()))
+        return false;
+
     // The order the control ended up in, as ColumnIds.
     std::vector<int> newVisible;
     newVisible.reserve(static_cast<size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        const int col = VisibleToCol(i);
-        if (col < 0) return false;   // inconsistent; leave the order alone
+    std::vector<bool> seen(static_cast<size_t>(count), false);
+    for (const int subItem : headerOrder) {
+        if (subItem < 0 || subItem >= count ||
+            seen[static_cast<size_t>(subItem)])
+            return false;
+        seen[static_cast<size_t>(subItem)] = true;
+        const int col = VisibleToCol(subItem);
+        if (col < 0) return false;
         newVisible.push_back(col);
     }
     if (newVisible == visToCol_) return false;   // no drag actually happened
@@ -217,9 +226,15 @@ bool ListViewColumns::SyncOrderFromHeader(HWND list) {
     // Fold the visible result back into a full-order permutation. Shared with
     // the selftest (Settings.h) so the rule cannot drift: a copy of this
     // logic in the window would be a second thing to keep correct.
+    std::uint32_t offeredVisibleMask = 0;
+    for (const int column : OfferedColumns()) {
+        if ((visibleCols_ & (std::uint32_t{1} << column)) != 0)
+            offeredVisibleMask |= std::uint32_t{1} << column;
+    }
     const std::vector<int> result =
-        FoldVisibleOrder(colOrder_, visibleCols_, newVisible);
+        FoldVisibleOrder(colOrder_, offeredVisibleMask, newVisible);
     if (result.size() != colOrder_.size()) return false;   // paranoia
+    if (result == colOrder_) return false;
     colOrder_ = result;
     // visToCol_ is deliberately NOT written here: the caller's SyncColumns
     // rebuilds it, and overwriting it first would discard the mapping the
