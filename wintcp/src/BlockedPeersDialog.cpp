@@ -7,7 +7,10 @@
 #include <algorithm>
 #include <commctrl.h>
 #include <cstring>
+#include <cwctype>
+#include <netfw.h>
 #include <shellapi.h>
+#include <sstream>
 #include <vector>
 
 #include "BlockConn.h"
@@ -30,14 +33,11 @@ enum : int {
     kIdEnable = IDOK + 3,
     kIdDisable = IDOK + 4,
     kIdOpenFirewall = IDOK + 5,
+    kIdSearch = IDOK + 6,
+    kIdDetails = IDOK + 7,
 };
 
-// Control count, in one place. cdit must match it exactly: the dialog manager
-// reads controls according to cdit, so a disagreement is an out-of-bounds read
-// inside the dialog loop, which is the failure PromptDialog.cpp documents at
-// length. Any write below that changes the count has to change this too, and
-// the selftest pins the resulting capacity.
-constexpr int kControlCount = 7;
+constexpr int kControlCount = 9;
 
 constexpr size_t Pad4(size_t bytes) { return (bytes + 3) & ~static_cast<size_t>(3); }
 
@@ -50,8 +50,10 @@ constexpr size_t kRowTextChars = 1024;
 
 struct BlockedPeersState {
     std::vector<BlockedRule> rules;
+    std::vector<BlockedRule> visibleRules;
     BlockedPeersChoice choice = BlockedPeersChoice::kRefused;
     std::wstring failure;
+    std::wstring filter;
     // Set the moment a rule is actually deleted, enabled,
     // disabled or every rule removed. The close paths report
     // kChanged only when this is set, so dismissing the viewer
@@ -213,13 +215,13 @@ std::vector<BYTE> MakeTemplate(const wchar_t* title) {
     if (!usable(sizeof(DLGTEMPLATE))) return std::vector<BYTE>();
     auto* dlg = reinterpret_cast<DLGTEMPLATE*>(p);
     dlg->style = DS_ABSALIGN | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU |
-                 DS_MODALFRAME | DS_SETFONT;
+                 WS_THICKFRAME | WS_MAXIMIZEBOX | DS_SETFONT;
     dlg->dwExtendedStyle = 0;
     dlg->cdit = static_cast<WORD>(kControlCount);
     dlg->x = 0;
     dlg->y = 0;
-    dlg->cx = 340;
-    dlg->cy = 190;
+    dlg->cx = 460;
+    dlg->cy = 310;
     p += sizeof(DLGTEMPLATE);
 
     if (!usable(4)) return std::vector<BYTE>();
@@ -239,31 +241,36 @@ std::vector<BYTE> MakeTemplate(const wchar_t* title) {
     memcpy(p, kFont, (sizeof(kFont) / sizeof(wchar_t)) * sizeof(wchar_t));
     p += fontBytes;
 
-    // a report view, not a plain list box - Rule / Remote / Status
-    // columns with a header and click-to-sort, so state is a sortable
-    // column instead of a "[disabled]" text suffix. Single-select: every
-    // action below acts on exactly one rule.
+    if (!WriteItem(&p, end,
+                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 8,
+                   8, 444, 20, kIdSearch, 0x80, L"")) {
+        return std::vector<BYTE>();
+    }
     const DWORD listStyle = WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP |
                             LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL;
-    if (!WriteItemWithClass(&p, end, listStyle, 8, 8, 320, 92, kIdList,
+    if (!WriteItemWithClass(&p, end, listStyle, 8, 32, 444, 150, kIdList,
                             L"SysListView32", nullptr)) {
         return std::vector<BYTE>();
     }
-    // Two button rows at the new readable size (the old 76x16
-    // buttons were barely tappable). Row 1: lifecycle actions.
-    // Row 2: bulk removal, Windows Firewall and Close.
+    if (!WriteItem(&p, end,
+                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE |
+                       ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
+                   8, 186, 444, 44, kIdDetails, 0x81,
+                   L"Select a rule to inspect its effective scope.")) {
+        return std::vector<BYTE>();
+    }
     if (!WriteItem(&p, end,
                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 8,
-                   106, 88, 23, kIdDelete, 0x81, L"Delete") ||
-        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 100, 106,
+                   236, 88, 23, kIdDelete, 0x81, L"Delete") ||
+        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 100, 236,
                    88, 23, kIdEnable, 0x81, L"Enable") ||
-        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 192, 106,
+        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 192, 236,
                    88, 23, kIdDisable, 0x81, L"Disable") ||
-        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 133,
+        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 263,
                    104, 23, kIdRemoveAll, 0x81, L"Remove all") ||
-        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 116, 133,
+        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 116, 263,
                    104, 23, kIdOpenFirewall, 0x81, L"Open Firewall") ||
-        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 224, 133,
+        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 224, 263,
                    104, 23, kIdClose, 0x81, L"Close")) {
         return std::vector<BYTE>();
     }
@@ -319,13 +326,76 @@ int SelectedRuleIndex(HWND list) {
 // Enable the per-rule actions only when there is a rule to act on. The
 // empty list carries a placeholder row that is not a rule, so the
 // buttons must not invite acting on it.
-void SyncActionButtons(HWND dlg, bool haveRules) {
+void SyncActionButtons(HWND dlg, bool haveSelection, bool canEnable,
+                       bool canDisable) {
     if (dlg == nullptr) return;
-    const int ids[] = {kIdDelete, kIdEnable, kIdDisable, kIdRemoveAll};
-    for (int id : ids) {
-        HWND b = ::GetDlgItem(dlg, id);
-        if (b != nullptr) ::EnableWindow(b, haveRules ? TRUE : FALSE);
+    HWND deleteButton = ::GetDlgItem(dlg, kIdDelete);
+    if (deleteButton != nullptr) ::EnableWindow(deleteButton, haveSelection ? TRUE : FALSE);
+    HWND enableButton = ::GetDlgItem(dlg, kIdEnable);
+    if (enableButton != nullptr) ::EnableWindow(enableButton, canEnable ? TRUE : FALSE);
+    HWND disableButton = ::GetDlgItem(dlg, kIdDisable);
+    if (disableButton != nullptr) ::EnableWindow(disableButton, canDisable ? TRUE : FALSE);
+}
+
+bool ContainsInsensitive(const std::wstring& value, const std::wstring& query) {
+    if (query.empty()) return true;
+    if (value.size() < query.size()) return false;
+    const auto equal = [](wchar_t left, wchar_t right) {
+        return std::towlower(left) == std::towlower(right);
+    };
+    return std::search(value.begin(), value.end(), query.begin(), query.end(),
+                       equal) != value.end();
+}
+
+bool MatchesFilter(const BlockedRule& rule, const std::wstring& query) {
+    return ContainsInsensitive(rule.name, query) ||
+           ContainsInsensitive(rule.remoteAddrs, query) ||
+           ContainsInsensitive(rule.localAddrs, query) ||
+           ContainsInsensitive(rule.remotePorts, query) ||
+           ContainsInsensitive(rule.localPorts, query) ||
+           ContainsInsensitive(rule.application, query) ||
+           ContainsInsensitive(rule.service, query);
+}
+
+std::wstring KnownField(const std::wstring& value, bool known) {
+    if (!known) return L"Unknown (not reported)";
+    return value.empty() ? L"Any" : value;
+}
+
+void UpdateRuleDetails(HWND dlg, const BlockedPeersState* st) {
+    if (dlg == nullptr || st == nullptr) return;
+    HWND list = ::GetDlgItem(dlg, kIdList);
+    const int selected = SelectedRuleIndex(list);
+    std::wstring text = L"Select a rule to inspect its effective scope.";
+    if (selected >= 0 && static_cast<size_t>(selected) < st->visibleRules.size()) {
+        const BlockedRule& rule = st->visibleRules[static_cast<size_t>(selected)];
+        const std::wstring direction = !rule.directionKnown ? L"Unknown" :
+            rule.direction == NET_FW_RULE_DIR_IN ? L"Inbound" : L"Outbound";
+        const std::wstring action = !rule.actionKnown ? L"Unknown" :
+            rule.action == NET_FW_ACTION_BLOCK ? L"Block" : L"Allow";
+        std::wstring protocol = L"Unknown";
+        if (rule.protocolKnown) {
+            protocol = rule.protocol == NET_FW_IP_PROTOCOL_TCP ? L"TCP" :
+                rule.protocol == NET_FW_IP_PROTOCOL_UDP ? L"UDP" :
+                rule.protocol == NET_FW_IP_PROTOCOL_ANY ? L"Any" :
+                std::to_wstring(rule.protocol);
+        }
+        std::wstring status = !rule.enabledKnown ? L"Unknown" :
+            rule.enabled ? L"Enabled" : L"Disabled";
+        std::wostringstream detail;
+        detail << rule.name << L"\r\n"
+               << direction << L" " << action << L" / " << protocol << L" / "
+               << status << L" / profiles "
+               << (rule.profilesKnown ? std::to_wstring(rule.profiles) : L"Unknown")
+               << L"\r\nLocal " << KnownField(rule.localAddrs, rule.localAddrsKnown)
+               << L" ports " << KnownField(rule.localPorts, rule.localPortsKnown)
+               << L"  |  Remote " << KnownField(rule.remoteAddrs, rule.remoteAddrsKnown)
+               << L" ports " << KnownField(rule.remotePorts, rule.remotePortsKnown)
+               << L"\r\nApplication " << KnownField(rule.application, rule.applicationKnown)
+               << L"  |  Service " << KnownField(rule.service, rule.serviceKnown);
+        text = detail.str();
     }
+    ::SetWindowTextW(::GetDlgItem(dlg, kIdDetails), text.c_str());
 }
 
 // The header's sort arrow follows st->sortCol/st->sortAsc, so the header
@@ -350,8 +420,7 @@ void UpdateSortIndicator(HWND list, const BlockedPeersState* st) {
 }
 
 // Create the Rule/Remote/Status columns once, sharing the list's width.
-// Fixed fractions, not persisted: the dialog is fixed-size, so the only
-// width the columns ever have is this one.
+// Fixed fractions adapt to the current client width and keep their sum exact.
 void SetupColumns(HWND list) {
     if (list == nullptr) return;
     HWND hdr = reinterpret_cast<HWND>(
@@ -383,6 +452,71 @@ void SetupColumns(HWND list) {
                        LVS_EX_LABELTIP);
 }
 
+void ResizeRuleColumns(HWND list) {
+    if (list == nullptr) return;
+    RECT rc = {};
+    ::GetClientRect(list, &rc);
+    const int total = (std::max)(60, static_cast<int>(rc.right - rc.left));
+    const int first = total * 45 / 100;
+    const int second = total * 32 / 100;
+    ::SendMessageW(list, LVM_SETCOLUMNWIDTH, kBlockedColRule, first);
+    ::SendMessageW(list, LVM_SETCOLUMNWIDTH, kBlockedColRemote, second);
+    ::SendMessageW(list, LVM_SETCOLUMNWIDTH, kBlockedColStatus,
+                   total - first - second);
+}
+
+void ResizeControls(HWND dlg) {
+    if (dlg == nullptr) return;
+    RECT client = {};
+    ::GetClientRect(dlg, &client);
+    RECT pad = {0, 0, 8, 8};
+    RECT button = {0, 0, 88, 23};
+    RECT detail = {0, 0, 400, 44};
+    RECT search = {0, 0, 400, 20};
+    ::MapDialogRect(dlg, &pad);
+    ::MapDialogRect(dlg, &button);
+    ::MapDialogRect(dlg, &detail);
+    ::MapDialogRect(dlg, &search);
+    const int margin = (std::max)(4, static_cast<int>(pad.right));
+    const int gap = (std::max)(3, static_cast<int>(pad.bottom / 2));
+    const int buttonHeight = (std::max)(20, static_cast<int>(button.bottom));
+    const int buttonY = client.bottom - margin - buttonHeight;
+    const int firstButtonY = buttonY - gap - buttonHeight;
+    const int detailBottom = firstButtonY - gap;
+    const int detailTop = (std::max)(static_cast<int>(search.bottom) + margin * 3,
+                                      detailBottom - static_cast<int>(detail.bottom));
+    const int searchHeight = (std::max)(18, static_cast<int>(search.bottom));
+    const int searchWidth = (std::max)(80, static_cast<int>(client.right) - margin * 2);
+    const int listTop = margin + searchHeight + gap;
+    const int listBottom = detailTop - gap;
+    const int listHeight = (std::max)(40, listBottom - listTop);
+    const int innerWidth = (std::max)(120, static_cast<int>(client.right) - margin * 2);
+    const int columnGap = gap * 2;
+    const int buttonWidth = (std::max)(48, (innerWidth - columnGap) / 3);
+    ::MoveWindow(::GetDlgItem(dlg, kIdSearch), margin, margin, searchWidth,
+                 searchHeight, TRUE);
+    ::MoveWindow(::GetDlgItem(dlg, kIdList), margin, listTop, innerWidth,
+                 listHeight, TRUE);
+    ::MoveWindow(::GetDlgItem(dlg, kIdDetails), margin, detailTop, innerWidth,
+                 (std::max)(static_cast<int>(detail.bottom), detailBottom - detailTop), TRUE);
+    const int x0 = margin;
+    const int x1 = x0 + buttonWidth + gap;
+    const int x2 = x1 + buttonWidth + gap;
+    ::MoveWindow(::GetDlgItem(dlg, kIdDelete), x0, firstButtonY, buttonWidth,
+                 buttonHeight, TRUE);
+    ::MoveWindow(::GetDlgItem(dlg, kIdEnable), x1, firstButtonY, buttonWidth,
+                 buttonHeight, TRUE);
+    ::MoveWindow(::GetDlgItem(dlg, kIdDisable), x2, firstButtonY, buttonWidth,
+                 buttonHeight, TRUE);
+    ::MoveWindow(::GetDlgItem(dlg, kIdRemoveAll), x0, buttonY, buttonWidth,
+                 buttonHeight, TRUE);
+    ::MoveWindow(::GetDlgItem(dlg, kIdOpenFirewall), x1, buttonY, buttonWidth,
+                 buttonHeight, TRUE);
+    ::MoveWindow(::GetDlgItem(dlg, kIdClose), x2, buttonY, buttonWidth,
+                 buttonHeight, TRUE);
+    ResizeRuleColumns(::GetDlgItem(dlg, kIdList));
+}
+
 // Render st->rules into the list: sorted, with the selection following the
 // rule it was on. keepName is the selected rule before the rebuild (empty
 // = none); the row is found by NAME because a re-sort moves indices.
@@ -390,6 +524,9 @@ void FillItems(HWND list, BlockedPeersState* st,
                const std::wstring& keepName) {
     if (list == nullptr || st == nullptr) return;
     SortRules(st);
+    st->visibleRules.clear();
+    for (const BlockedRule& rule : st->rules)
+        if (MatchesFilter(rule, st->filter)) st->visibleRules.push_back(rule);
     ::SendMessageW(list, WM_SETREDRAW, FALSE, 0);
     ::SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
     if (st->rules.empty()) {
@@ -405,9 +542,18 @@ void FillItems(HWND list, BlockedPeersState* st,
         it.pszText = place;
         ::SendMessageW(list, LVM_INSERTITEMW, 0,
                        reinterpret_cast<LPARAM>(&it));
+    } else if (st->visibleRules.empty()) {
+        LVITEMW it = {};
+        it.mask = LVIF_TEXT;
+        it.iItem = 0;
+        it.iSubItem = 0;
+        wchar_t place[] = L"(no firewall rule matches this search)";
+        it.pszText = place;
+        ::SendMessageW(list, LVM_INSERTITEMW, 0,
+                       reinterpret_cast<LPARAM>(&it));
     } else {
-        for (size_t i = 0; i < st->rules.size(); ++i) {
-            const BlockedRule& r = st->rules[i];
+        for (size_t i = 0; i < st->visibleRules.size(); ++i) {
+            const BlockedRule& r = st->visibleRules[i];
             std::wstring cells[kBlockedColCount];
             for (int c = 0; c < kBlockedColCount; ++c)
                 cells[c] = BlockedPeersCellText(r, c);
@@ -435,9 +581,9 @@ void FillItems(HWND list, BlockedPeersState* st,
     // placeholder is never selected: it is not a rule and the actions
     // refuse anything that is not one.
     int restore = -1;
-    if (!st->rules.empty()) {
-        for (size_t i = 0; i < st->rules.size(); ++i) {
-            if (st->rules[i].name == keepName) {
+    if (!st->visibleRules.empty()) {
+        for (size_t i = 0; i < st->visibleRules.size(); ++i) {
+            if (st->visibleRules[i].name == keepName) {
                 restore = static_cast<int>(i);
                 break;
             }
@@ -454,7 +600,16 @@ void FillItems(HWND list, BlockedPeersState* st,
     ::SendMessageW(list, WM_SETREDRAW, TRUE, 0);
     ::InvalidateRect(list, nullptr, TRUE);
     UpdateSortIndicator(list, st);
-    SyncActionButtons(::GetParent(list), !st->rules.empty());
+    const int selected = SelectedRuleIndex(list);
+    const BlockedRule* selectedRule = selected >= 0 &&
+        static_cast<size_t>(selected) < st->visibleRules.size()
+        ? &st->visibleRules[static_cast<size_t>(selected)] : nullptr;
+    SyncActionButtons(::GetParent(list), selectedRule != nullptr,
+        selectedRule != nullptr && selectedRule->enabledKnown && !selectedRule->enabled,
+        selectedRule != nullptr && selectedRule->enabledKnown && selectedRule->enabled);
+    HWND removeAll = ::GetDlgItem(::GetParent(list), kIdRemoveAll);
+    if (removeAll != nullptr) ::EnableWindow(removeAll, st->rules.empty() ? FALSE : TRUE);
+    UpdateRuleDetails(::GetParent(list), st);
 }
 
 // Repopulate the list from the firewall. Called on init and after every
@@ -469,8 +624,8 @@ void ReloadRules(HWND list, BlockedPeersState* st) {
     if (list == nullptr || st == nullptr) return;
     const int sel = SelectedRuleIndex(list);
     std::wstring keepName;
-    if (sel >= 0 && static_cast<size_t>(sel) < st->rules.size())
-        keepName = st->rules[static_cast<size_t>(sel)].name;
+    if (sel >= 0 && static_cast<size_t>(sel) < st->visibleRules.size())
+        keepName = st->visibleRules[static_cast<size_t>(sel)].name;
 
     std::wstring error;
     std::vector<BlockedRule> fresh;
@@ -504,8 +659,8 @@ void OnSortClick(HWND list, BlockedPeersState* st, int col) {
     }
     const int sel = SelectedRuleIndex(list);
     std::wstring keep;
-    if (sel >= 0 && static_cast<size_t>(sel) < st->rules.size())
-        keep = st->rules[static_cast<size_t>(sel)].name;
+    if (sel >= 0 && static_cast<size_t>(sel) < st->visibleRules.size())
+        keep = st->visibleRules[static_cast<size_t>(sel)].name;
     FillItems(list, st, keep);
 }
 
@@ -521,7 +676,11 @@ INT_PTR CALLBACK BlockedPeersProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_INITDIALOG: {
             HWND list = GetDlgItem(hwnd, kIdList);
+            ::SendMessageW(GetDlgItem(hwnd, kIdSearch), EM_SETCUEBANNER, TRUE,
+                           reinterpret_cast<LPARAM>(L"Filter by rule, address, application or service"));
             SetupColumns(list);
+            ResizeControls(hwnd);
+            ResizeRuleColumns(list);
             ReloadRules(list, st);
             RECT rc = {};
             ::GetWindowRect(hwnd, &rc);
@@ -535,6 +694,35 @@ INT_PTR CALLBACK BlockedPeersProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             return TRUE;
         }
+        case WM_SIZE:
+            ResizeControls(hwnd);
+            ResizeRuleColumns(GetDlgItem(hwnd, kIdList));
+            return TRUE;
+        case WM_DPICHANGED: {
+            const auto* suggested = reinterpret_cast<const RECT*>(lp);
+            if (suggested != nullptr) {
+                ::SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                               suggested->right - suggested->left,
+                               suggested->bottom - suggested->top,
+                               SWP_NOZORDER | SWP_NOACTIVATE);
+                ResizeControls(hwnd);
+                ResizeRuleColumns(GetDlgItem(hwnd, kIdList));
+            }
+            return TRUE;
+        }
+        case WM_GETMINMAXINFO: {
+            auto* limits = reinterpret_cast<MINMAXINFO*>(lp);
+            if (limits != nullptr) {
+                RECT minimum = {0, 0, 380, 275};
+                ::MapDialogRect(hwnd, &minimum);
+                limits->ptMinTrackSize.x = minimum.right +
+                    ::GetSystemMetrics(SM_CXSIZEFRAME) * 2;
+                limits->ptMinTrackSize.y = minimum.bottom +
+                    ::GetSystemMetrics(SM_CYSIZEFRAME) * 2 +
+                    ::GetSystemMetrics(SM_CYCAPTION);
+            }
+            return TRUE;
+        }
         case WM_NOTIFY: {
             // header clicks sort. The notification arrives from the
             // list's header with the list's own id, so anything else is
@@ -546,11 +734,45 @@ INT_PTR CALLBACK BlockedPeersProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 OnSortClick(GetDlgItem(hwnd, kIdList), st, hn->iItem);
                 return TRUE;
             }
+            if (nm != nullptr && nm->idFrom == kIdList &&
+                nm->code == LVN_ITEMCHANGED) {
+                auto* change = reinterpret_cast<LPNMLISTVIEW>(lp);
+                if (change != nullptr && (change->uChanged & LVIF_STATE) != 0 &&
+                    ((change->uNewState | change->uOldState) & LVIS_SELECTED) != 0) {
+                    UpdateRuleDetails(hwnd, st);
+                    const int selected = SelectedRuleIndex(GetDlgItem(hwnd, kIdList));
+                    const bool hasSelection = selected >= 0 &&
+                        static_cast<size_t>(selected) < st->visibleRules.size();
+                    const BlockedRule* selectedRule = hasSelection
+                        ? &st->visibleRules[static_cast<size_t>(selected)] : nullptr;
+                    SyncActionButtons(hwnd, hasSelection,
+                        selectedRule != nullptr && selectedRule->enabledKnown && !selectedRule->enabled,
+                        selectedRule != nullptr && selectedRule->enabledKnown && selectedRule->enabled);
+                    HWND removeAll = GetDlgItem(hwnd, kIdRemoveAll);
+                    if (removeAll != nullptr)
+                        ::EnableWindow(removeAll, st->rules.empty() ? FALSE : TRUE);
+                }
+                return TRUE;
+            }
             break;
         }
         case WM_COMMAND: {
             const int id = LOWORD(wp);
             const int code = HIWORD(wp);
+            if (id == kIdSearch && code == EN_CHANGE) {
+                HWND search = GetDlgItem(hwnd, kIdSearch);
+                const int length = ::GetWindowTextLengthW(search);
+                std::vector<wchar_t> text(static_cast<size_t>(length) + 1, L'\0');
+                ::GetWindowTextW(search, text.data(), length + 1);
+                st->filter.assign(text.data());
+                HWND list = GetDlgItem(hwnd, kIdList);
+                const int selected = SelectedRuleIndex(list);
+                const std::wstring keep = selected >= 0 &&
+                    static_cast<size_t>(selected) < st->visibleRules.size()
+                    ? st->visibleRules[static_cast<size_t>(selected)].name : L"";
+                FillItems(list, st, keep);
+                return TRUE;
+            }
             if (id == kIdClose || id == IDCANCEL) {
                 // dismissing the viewer is not a change. Only
                 // report kChanged when a rule was actually added to
@@ -588,13 +810,13 @@ INT_PTR CALLBACK BlockedPeersProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return TRUE;
                 }
                 if (sel < 0 ||
-                    static_cast<size_t>(sel) >= st->rules.size()) {
+                    static_cast<size_t>(sel) >= st->visibleRules.size()) {
                     ::MessageBoxW(hwnd, L"Select a rule first.", L"WinTCP",
                                   MB_OK | MB_ICONINFORMATION);
                     return TRUE;
                 }
                 const std::wstring name =
-                    st->rules[static_cast<size_t>(sel)].name;
+                    st->visibleRules[static_cast<size_t>(sel)].name;
                 std::wstring error;
                 bool ok = false;
                 const wchar_t* what = L"delete";
