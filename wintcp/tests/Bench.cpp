@@ -3994,7 +3994,7 @@ TestResult RunSelfTest() {
         std::vector<Connection> rows;
         Connection listen = MakeReferenceTcpRow();
         listen.identity.pid = 1;             // sorts to the head under the PID default
-        listen.identity.remotePort = 0;      // listener: RowCanEnrich can never hold
+        listen.identity.remotePort = 0;      // listener: no remote endpoint
         listen.identity.localPort = 51750;   // distinct 4-tuple from the row below
         listen.display.remoteAddress.clear();  // no join candidate (offline selftest)
         rows.push_back(listen);
