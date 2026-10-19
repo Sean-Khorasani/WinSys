@@ -135,7 +135,7 @@ try {
   await browser.close();
 }
 
-const consoleDir = resolve(repo, "docs", "img");
+const consoleDir = resolve(repo, "temp", "webui-reports");
 await mkdir(consoleDir, { recursive: true });
 
 console.log("");
@@ -148,6 +148,6 @@ await import("node:fs/promises").then((fs) =>
     "utf8",
   ),
 );
-console.log(`Report: docs/img/e2e-report.json`);
+console.log(`Report: temp/webui-reports/e2e-report.json`);
 
 process.exit(hardFailures === 0 ? 0 : 1);
