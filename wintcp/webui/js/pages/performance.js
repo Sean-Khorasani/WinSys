@@ -14,6 +14,20 @@ import { createTimeseries } from "../charts/timeseries.js";
 const UNAVAILABLE = "\u2014";
 
 export async function renderPerformance(page, store) {
+  page._perfState = {
+    charts: [],
+    hosts: null,
+    history: null,
+    lastHistoryTs: null,
+    lastCoreKeys: "",
+    lastMetricsTs: null,
+  };
+  page._chartDestroy = () => {
+    for (const chart of page._perfState.charts) {
+      try { chart.destroy(); } catch { /* already gone */ }
+    }
+    page._perfState.charts = [];
+  };
   clear(page);
   page.append(
     h("div", { class: "page-heading" },
@@ -51,6 +65,118 @@ export async function renderPerformance(page, store) {
 
   renderCoreRail(page, store.get());
   await mountCharts(page);
+}
+
+// Incremental update: refetches fresh history and updates charts via setData
+// without destroying the DOM tree. Preserves scroll position and avoids flicker.
+export async function updatePerformance(page, store) {
+  const state = store.get();
+  const ov = page._perfState;
+  if (!ov) return;
+
+  const metricsTs = state.metrics?._timestamp;
+
+  // 1. Update per-core rail if core set changed.
+  updateCoreRail(page, state, ov);
+
+  // 2. Fetch fresh history data and update charts.
+  if (metricsTs !== ov.lastHistoryTs) {
+    ov.lastHistoryTs = metricsTs;
+    await refreshCharts(page, ov);
+  }
+}
+
+function updateCoreRail(page, state, ov) {
+  const rail = page.querySelector("#perf-rail");
+  if (!rail) return;
+
+  const caps = state.capabilities;
+  const metrics = state.metrics || {};
+  const coreKeys = Object.keys(metrics)
+    .filter((k) => /^cpu\.core\.\d+$/.test(k))
+    .sort((a, b) => Number(a.split(".")[2]) - Number(b.split(".")[2]));
+
+  const keysSig = coreKeys.join(",");
+
+  // Only rebuild the rail if the set of cores changed.
+  if (keysSig === ov.lastCoreKeys) {
+    // Update values in place on existing cells.
+    const cells = rail.querySelectorAll(".core-cell");
+    if (cells.length === coreKeys.length && coreKeys.length > 0) {
+      cells.forEach((cell, i) => {
+        const key = coreKeys[i];
+        const value = metrics[key];
+        const known = value !== null && value !== undefined;
+        const pct = known ? Math.max(0, Math.min(100, value)) : 0;
+        const bar = cell.querySelector(".core-fill");
+        const val = cell.querySelector(".core-value");
+        if (bar) bar.style.width = `${pct}%`;
+        if (val) val.textContent = known ? fmtPct(value) : UNAVAILABLE;
+      });
+      return;
+    }
+  }
+
+  // Core set changed or initial render: rebuild.
+  ov.lastCoreKeys = keysSig;
+
+  if (caps && caps.perCore === false) {
+    clear(rail);
+    rail.append(card({},
+      cardHeader({}, cardTitle({}, "Per-core CPU")),
+      cardContent({}, emptyState({}, "Not available",
+        caps.perCoreReason || "This machine did not expose the per-core counter.")),
+    ));
+    return;
+  }
+
+  if (coreKeys.length === 0) {
+    clear(rail);
+    rail.append(card({},
+      cardHeader({}, cardTitle({}, "Per-core CPU")),
+      cardContent({}, emptyState({}, "Waiting for the first sample",
+        "The sampler reports per-core utilisation about a second after start.")),
+    ));
+    return;
+  }
+
+  clear(rail);
+  const list = h("div", { class: "core-grid", role: "list", "aria-label": "Per-core CPU utilisation" });
+  for (const key of coreKeys) {
+    const value = metrics[key];
+    const known = value !== null && value !== undefined;
+    const pct = known ? Math.max(0, Math.min(100, value)) : 0;
+    list.append(
+      h("div", { class: "core-cell", role: "listitem", title: known ? `${key} = ${fmtPct(value)}` : `${key}: ${metrics[`${key}.reason`] || "unavailable"}` },
+        h("div", { class: "core-index" }, key.split(".")[2]),
+        h("div", { class: "core-bar" },
+          h("div", { class: "core-fill", style: `width: ${pct}%` }),
+        ),
+        h("div", { class: "core-value num" }, known ? fmtPct(value) : UNAVAILABLE),
+      ),
+    );
+  }
+  rail.append(card({},
+    cardHeader({}, cardTitle({}, `Per-core CPU (${coreKeys.length})`)),
+    cardContent({}, list),
+  ));
+}
+
+function getHosts() {
+  return [
+    { sel: "#perf-chart", series: [
+      { key: "cpu.total", label: "CPU %" },
+      { key: "memMiB", label: "Memory (MiB)", scale: "mem" },
+    ] },
+    { sel: "#perf-disk", series: [
+      { key: "disk.readBps", label: "Read" },
+      { key: "disk.writeBps", label: "Write" },
+    ] },
+    { sel: "#perf-net", series: [
+      { key: "net.rxBps", label: "Received" },
+      { key: "net.txBps", label: "Sent" },
+    ] },
+  ];
 }
 
 function renderCoreRail(page, state) {
@@ -104,20 +230,10 @@ function renderCoreRail(page, state) {
 }
 
 async function mountCharts(page) {
-  const hosts = [
-    { sel: "#perf-chart", series: [
-      { key: "cpu.total", label: "CPU %" },
-      { key: "memMiB", label: "Memory (MiB)", scale: "mem" },
-    ] },
-    { sel: "#perf-disk", series: [
-      { key: "disk.readBps", label: "Read" },
-      { key: "disk.writeBps", label: "Write" },
-    ] },
-    { sel: "#perf-net", series: [
-      { key: "net.rxBps", label: "Received" },
-      { key: "net.txBps", label: "Sent" },
-    ] },
-  ];
+  const ov = page._perfState;
+  if (!ov) return;
+  ov.hosts = getHosts();
+  const hosts = ov.hosts;
 
   let history;
   try {
@@ -130,19 +246,25 @@ async function mountCharts(page) {
     return;
   }
 
+  ov.history = history;
   const t = Array.isArray(history.t) ? history.t : [];
   const series = history.series || {};
   const toMiB = (arr) => (arr || []).map((v) => (v === null || v === undefined ? null : v / (1024 * 1024)));
 
-  const charts = [];
+  if (t.length < 2) {
+    for (const host of hosts) {
+      const el = page.querySelector(host.sel);
+      if (el) {
+        clear(el);
+        el.append(emptyState({}, "Collecting samples", `${t.length} sample so far.`));
+      }
+    }
+    return;
+  }
+
   for (const host of hosts) {
     const el = page.querySelector(host.sel);
     if (!el) continue;
-    if (t.length < 2) {
-      clear(el);
-      el.append(emptyState({}, "Collecting samples", `${t.length} sample so far.`));
-      continue;
-    }
     const values = {};
     for (const def of host.series) {
       values[def.key] = def.key === "memMiB"
@@ -150,16 +272,104 @@ async function mountCharts(page) {
         : (series[def.key] || []);
     }
     try {
-      charts.push(await createTimeseries(el, { height: 200, data: { t, values }, series: host.series }));
+      const entry = await createTimeseries(el, { height: 200, data: { t, values }, series: host.series });
+      el._chartEntry = entry;
+      ov.charts.push(entry);
     } catch (err) {
       clear(el);
       el.append(emptyState({}, "Chart unavailable", err.message));
     }
   }
+}
 
-  page._chartDestroy = () => {
-    for (const chart of charts) {
-      try { chart.destroy(); } catch { /* already gone */ }
+async function refreshCharts(page, ov) {
+  if (!ov.hosts) ov.hosts = getHosts();
+  const hosts = ov.hosts;
+
+  let history;
+  try {
+    history = await api.get("/api/metrics/history?max=180");
+  } catch (err) {
+    return;
+  }
+
+  const t = Array.isArray(history.t) ? history.t : [];
+  const series = history.series || {};
+  const toMiB = (arr) => (arr || []).map((v) => (v === null || v === undefined ? null : v / (1024 * 1024)));
+
+  // If we have enough data and no charts mounted yet, mount them.
+  if (ov.charts.length === 0 && t.length >= 2) {
+    for (const host of hosts) {
+      const el = page.querySelector(host.sel);
+      if (!el) continue;
+      const values = {};
+      for (const def of host.series) {
+        values[def.key] = def.key === "memMiB"
+          ? toMiB(series["mem.usedBytes"])
+          : (series[def.key] || []);
+      }
+      try {
+        const entry = await createTimeseries(el, { height: 200, data: { t, values }, series: host.series });
+        el._chartEntry = entry;
+        ov.charts.push(entry);
+      } catch (err) {
+        clear(el);
+        el.append(emptyState({}, "Chart unavailable", err.message));
+      }
     }
-  };
+    ov.history = history;
+    return;
+  }
+
+  // Charts already exist — update them in place via setData.
+  if (ov.charts.length === 0) return;
+
+  ov.history = history;
+  for (let i = 0; i < ov.charts.length && i < hosts.length; i++) {
+    const host = hosts[i];
+    const entry = ov.charts[i];
+    if (!entry) continue;
+    const values = {};
+    for (const def of host.series) {
+      values[def.key] = def.key === "memMiB"
+        ? toMiB(series["mem.usedBytes"])
+        : (series[def.key] || []);
+    }
+    try {
+      entry.setData({ t, values });
+    } catch (err) {
+      console.warn("chart update failed", host.sel, err);
+    }
+  }
+
+  // Update "Collecting samples" state if we now have enough data.
+  if (t.length >= 2) {
+    for (const host of hosts) {
+      const el = page.querySelector(host.sel);
+      if (!el) continue;
+      // If the container still has the empty state child, replace it.
+      const emptyStateChild = el.querySelector(".empty-state");
+      if (emptyStateChild) {
+        clear(el);
+        try {
+          const entry = await createTimeseries(el, { height: 200, data: { t, values: buildValues(host, series, toMiB) }, series: host.series });
+          el._chartEntry = entry;
+          ov.charts.push(entry);
+        } catch (err) {
+          clear(el);
+          el.append(emptyState({}, "Chart unavailable", err.message));
+        }
+      }
+    }
+  }
+}
+
+function buildValues(host, series, toMiB) {
+  const values = {};
+  for (const def of host.series) {
+    values[def.key] = def.key === "memMiB"
+      ? toMiB(series["mem.usedBytes"])
+      : (series[def.key] || []);
+  }
+  return values;
 }
