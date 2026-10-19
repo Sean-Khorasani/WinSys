@@ -12,7 +12,7 @@
 import { h, clear } from "../h.js";
 import { createVirtualTable } from "../ui/virtualtable.js";
 import { createTabs } from "../ui/tabs.js";
-import { emptyState, card, cardHeader, cardTitle, cardContent, cardFooter } from "../ui/card.js";
+import { emptyState, refreshAction, card, cardHeader, cardTitle, cardContent, cardFooter } from "../ui/card.js";
 import { dialog, openDialog, closeDialog } from "../ui/dialog.js";
 import { api } from "../api.js";
 import { renderTreemap } from "../charts/treemap.js";
@@ -21,8 +21,10 @@ import { icon } from "../icons.js";
 import { processKey } from "../connections.js";
 import { processMenu } from "../ui/processmenu.js";
 import { closeContextMenu } from "../ui/contextmenu.js";
+import { investigateConnections, processConnectionFilter } from "../connectionfilters.js";
 import { numberComparator, textComparator } from "../sort.js";
 import { createColumnLayoutControls } from "../ui/columnlayout.js";
+import { closeInspector, openInspector, updateInspector } from "../ui/inspector.js";
 
 const UNAVAILABLE = "\u2014";
 let activeProcessDetailsDialog = null;
@@ -80,24 +82,38 @@ export async function renderProcesses(page, store) {
         h("p", { class: "page-description" },
           "Every process on this machine, with CPU, memory and I/O transfer"),
       ),
-      h("input", {
-        class: "input page-filter",
-        id: "proc-filter",
-        type: "search",
-        placeholder: "Filter by name or PID\u2026",
-        "aria-label": "Filter processes by name or PID",
-      }),
+      h("div", { class: "process-filter-control" },
+        h("input", {
+          class: "input page-filter",
+          id: "proc-filter",
+          type: "search",
+          placeholder: "Filter name, PID, path, or service\u2026",
+          "aria-label": "Filter processes by name, PID, executable path, or service",
+        }),
+        h("button", {
+          class: "btn btn-ghost btn-sm", id: "proc-filter-clear", type: "button",
+          hidden: true, "aria-label": "Clear process filter",
+          onclick: () => {
+            filterInput.value = "";
+            filterInput.dispatchEvent(new Event("input", { bubbles: true }));
+            filterInput.focus();
+          },
+        }, "Clear"),
+      ),
     ),
     layout,
   );
 
   const filterInput = page.querySelector("#proc-filter");
+  const filterClear = page.querySelector("#proc-filter-clear");
   const state = store.get();
   filterInput.value = state.processFilter || "";
+  filterClear.hidden = !filterInput.value.trim();
   let debounce = null;
   let applyFilterNow = null;
   const onFilterInput = () => {
     store.set({ processFilter: filterInput.value });
+    filterClear.hidden = !filterInput.value.trim();
     if (!applyFilterNow) return;
     if (debounce !== null) clearTimeout(debounce);
     debounce = setTimeout(() => {
@@ -109,7 +125,15 @@ export async function renderProcesses(page, store) {
 
   const waitForSample = (nextState) => {
     if (!nextState.lastUpdate || nextState.processesKnown === false) return;
-    if (!Array.isArray(nextState.processes) || nextState.processes.length === 0) return;
+    if (Array.isArray(nextState.processes) && nextState.processes.length === 0) {
+      if (!layout.querySelector(".empty-state")) {
+        clear(layout);
+        layout.append(emptyState({ action: refreshAction() }, "No processes reported",
+          "The process source returned no rows. Refresh to sample it again."));
+      }
+      return;
+    }
+    if (!Array.isArray(nextState.processes)) return;
     if (typeof page._procDestroy === "function") page._procDestroy();
     page._procDestroy = null;
     return renderProcesses(page, store);
@@ -118,6 +142,7 @@ export async function renderProcesses(page, store) {
     page._procUpdate = waitForSample;
     page._procDestroy = () => {
       closeContextMenu();
+      closeInspector({ restoreFocus: false });
       if (activeProcessDetailsDialog) closeDialog(activeProcessDetailsDialog);
       if (activeProcessBlockDialog) closeDialog(activeProcessBlockDialog);
       if (debounce !== null) clearTimeout(debounce);
@@ -127,13 +152,13 @@ export async function renderProcesses(page, store) {
   };
 
   if (!state.lastUpdate) {
-    layout.append(emptyState({}, "Waiting for the first sample",
+    layout.append(emptyState({ action: refreshAction() }, "Waiting for the first sample",
       "The browser polls the server every couple of seconds. This fills in on its own."));
     setWaitingLifecycle();
     return;
   }
   if (state.processesKnown === false) {
-    layout.append(emptyState({}, "Process table not sampled",
+    layout.append(emptyState({ action: refreshAction() }, "Process table not sampled",
       "The server has not finished its first pass. It retries every second while this page is open."));
     setWaitingLifecycle();
     return;
@@ -141,8 +166,8 @@ export async function renderProcesses(page, store) {
 
   let all = Array.isArray(state.processes) ? state.processes.slice() : [];
   if (all.length === 0) {
-    layout.append(emptyState({}, "No processes reported",
-      "The server enumerated the process table and it came back empty, which should not happen."));
+    layout.append(emptyState({ action: refreshAction() }, "No processes reported",
+      "The process source returned no rows. Refresh to sample it again."));
     setWaitingLifecycle();
     return;
   }
@@ -169,7 +194,9 @@ export async function renderProcesses(page, store) {
     const q = filterInput.value.trim().toLowerCase();
     filteredRows = q
       ? all.filter((r) => String(r.name || "").toLowerCase().includes(q) ||
-                          String(r.pid) === q)
+                          String(r.pid) === q ||
+                          String(r.path || "").toLowerCase().includes(q) ||
+                          String(r.service || "").toLowerCase().includes(q))
       : all;
     rows = applySort(filteredRows);
     if (tabs.active() === "table" && tableController) {
@@ -249,6 +276,10 @@ export async function renderProcesses(page, store) {
     if (!nextState.lastUpdate || nextState.processesKnown === false) return;
     const nextRows = Array.isArray(nextState.processes) ? nextState.processes : [];
     all = nextRows.slice();
+    const inspected = all.find((row) => `process:${processKey(row)}` === document.querySelector(".inspector-dialog")?.dataset.inspectorKey);
+    const inspectorKey = document.querySelector(".inspector-dialog")?.dataset.inspectorKey;
+    if (inspectorKey?.startsWith("process:"))
+      updateInspector(inspectorKey, inspected || null, { missing: "This process instance exited or is no longer in the sampled process list." });
     applyFilter();
   };
 
@@ -257,6 +288,7 @@ export async function renderProcesses(page, store) {
   // listener.
   page._procDestroy = () => {
     closeContextMenu();
+    closeInspector({ restoreFocus: false });
     if (activeProcessDetailsDialog) closeDialog(activeProcessDetailsDialog);
     if (activeProcessBlockDialog) closeDialog(activeProcessBlockDialog);
     if (debounce !== null) clearTimeout(debounce);
@@ -1013,38 +1045,57 @@ function showProcessApplicationRulePreview(row, allow) {
 
 function showProcessDetails(row) {
   if (activeProcessDetailsDialog) closeDialog(activeProcessDetailsDialog);
-  const d = dialog({ class: "details-dialog", "data-details-row": "proc" },
-    h("form", { method: "dialog", class: "dialog-form" },
-       h("div", { class: "dialog-header" },
-         h("h2", { class: "dialog-title" }, row.name || "(unnamed)"),
-         h("button", { type: "submit", class: "btn btn-close btn-sm", "aria-label": "Close" }),
-       ),
-      h("div", { class: "dialog-content" },
-        h("dl", { class: "detail-list" },
-          detailEntry("PID", row.pid != null ? String(row.pid) : UNAVAILABLE),
-          detailEntry("Parent PID", row.ppid != null ? String(row.ppid) : UNAVAILABLE),
-          detailEntry("Path", row.path || UNAVAILABLE),
-          detailEntry("Threads", typeof row.threads === "number" ? fmtInt(row.threads) : UNAVAILABLE),
-          detailEntry("CPU %", num(row.cpuPct) !== null ? fmtPct(row.cpuPct) : UNAVAILABLE),
-          detailEntry("Working set", byteValueKnown(row.memWs) ? fmtBytes(row.memWs) : UNAVAILABLE),
-          detailEntry("Private", byteValueKnown(row.memPrivate) ? fmtBytes(row.memPrivate) : UNAVAILABLE),
-          detailEntry("I/O read", byteValueKnown(row.ioRead) ? fmtBytes(row.ioRead) : UNAVAILABLE),
-          detailEntry("I/O write", byteValueKnown(row.ioWrite) ? fmtBytes(row.ioWrite) : UNAVAILABLE),
-          detailEntry("Connections", typeof row.connections === "number" ? fmtInt(row.connections) : UNAVAILABLE),
-          detailEntry("Listeners", typeof row.listeners === "number" ? fmtInt(row.listeners) : UNAVAILABLE),
-        ),
-      ),
-       h("div", { class: "dialog-footer" },
-         h("button", { type: "submit", class: "btn btn-close btn-sm" }, "Close"),
-       ),
-    ),
-  );
-  document.body.append(d);
-  activeProcessDetailsDialog = d;
-  d.addEventListener("close", () => {
-    if (activeProcessDetailsDialog === d) activeProcessDetailsDialog = null;
-  }, { once: true });
-  openDialog(d);
+  const inspector = openInspector({
+    key: `process:${processKey(row)}`,
+    title: row.name || "(unnamed process)",
+    subject: "process instance",
+    row,
+    sections: (process) => processInspectorSections(process || row),
+    actions: (process) => {
+      const current = process || row;
+      return [
+        { label: "Show this process's connections", onClick: () => {
+          closeInspector({ restoreFocus: false });
+          investigateConnections([processConnectionFilter(current)], "replace");
+        } },
+        ...(current.path ? [{
+          label: "Review app firewall block", className: "btn btn-destructive btn-sm",
+          title: "An executable-path rule affects every instance of this application, not only this PID.",
+          onClick: () => {
+            closeInspector({ restoreFocus: false });
+            showProcessBlockPreview(current);
+          },
+        }] : []),
+      ];
+    },
+    opener: document.activeElement,
+  });
+  inspector.dataset.detailsRow = "proc";
+}
+
+function processInspectorSections(row) {
+  const known = (value) => value != null && value !== "";
+  const field = (label, value, options = {}) => ({ label, value, copyValue: options.copy === false || !known(value) ? null : String(value), ...options });
+  return [
+    { title: "Identity", fields: [
+      field("Process", row.name || "(unnamed)"),
+      field("PID", row.pid, { mono: true }),
+      field("Parent PID", row.ppid, { mono: true, reason: known(row.ppid) ? "" : "Parent identity was not supplied by this process snapshot." }),
+      field("Process instance", row.instanceId, { mono: true, reason: known(row.instanceId) ? "" : "Creation time is unknown; PID alone is not a stable identity." }),
+      field("Executable path", row.path, { mono: true, reason: known(row.path) ? "" : "Windows did not provide a readable image path." }),
+      field("Service", row.service, { reason: known(row.service) ? "" : "Service attribution is not included in this process snapshot." }),
+    ] },
+    { title: "Activity", fields: [
+      field("Threads", typeof row.threads === "number" ? fmtInt(row.threads) : null, { copy: false }),
+      field("CPU", num(row.cpuPct) !== null ? fmtPct(row.cpuPct) : null, { copy: false, reason: num(row.cpuPct) !== null ? "" : "Windows did not provide a CPU sample for this process." }),
+      field("Working set", byteValueKnown(row.memWs) ? fmtBytes(row.memWs) : null, { copy: false, reason: byteValueKnown(row.memWs) ? "" : "Windows did not provide a working-set value." }),
+      field("Private memory", byteValueKnown(row.memPrivate) ? fmtBytes(row.memPrivate) : null, { copy: false }),
+      field("I/O read", byteValueKnown(row.ioRead) ? fmtBytes(row.ioRead) : null, { copy: false, reason: "Cumulative transfer bytes; not a rate." }),
+      field("I/O write", byteValueKnown(row.ioWrite) ? fmtBytes(row.ioWrite) : null, { copy: false, reason: "Cumulative transfer bytes; not a rate." }),
+      field("Connections", typeof row.connections === "number" ? fmtInt(row.connections) : null, { copy: false }),
+      field("Listeners", typeof row.listeners === "number" ? fmtInt(row.listeners) : null, { copy: false }),
+    ] },
+  ];
 }
 
 function detailEntry(label, value) {
