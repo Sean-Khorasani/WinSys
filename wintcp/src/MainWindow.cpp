@@ -36,6 +36,7 @@
 #include "FontCache.h"
 #include "Theme.h"       // shared palette + HighContrastActive()
 #include "Alerts.h"      // AlertEngine, ShowTrayBalloon
+#include "TextSheetDialog.h"
 #include "MainWindowInternal.h"   // shared constants + free helpers
 #include "resource.h"
 
@@ -666,6 +667,7 @@ void MainWindow::OnRefreshResult(RefreshResult* payload) {
     dnsStalledHint_.clear();
     // Monotonic stamp for the status bar's age / next-refresh countdown.
     lastRefreshTick_ = ::GetTickCount64();
+    completedRefreshCount_.fetch_add(1, std::memory_order_relaxed);
 
     // Capture selection/scroll while the old view is still consistent,
     // swap in the new snapshot, then rebuild the view and restore.
@@ -1641,7 +1643,7 @@ void MainWindow::ApplyViewWith(const std::vector<std::uint64_t>& ids,
     // rather than again below; filterProgram_ is a derived cache of v.filter,
     // kept for the two callers that ask "is a text filter active?" without
     // re-reading the box.
-    v.ApplyTo(&store_, &filterProgram_);
+    v.ApplyTo(&store_, &filterProgram_, &filterError_);
 
     // Recomputed here rather than only at startup because this is the
     // single funnel every path goes through: startup, a refresh result, a column
@@ -1772,6 +1774,8 @@ void MainWindow::ToggleTreeMode() {
 
 void MainWindow::RebuildTree() {
     if (hwndTree_ == nullptr) return;
+    const ProcessTreeViewState previousTreeState =
+        CaptureProcessTreeViewState(hwndTree_, treeProcs_);
     // Two sources, merged here and nowhere else. WHO the processes are comes
     // from one Toolhelp snapshot (EnumerateProcesses), so chrome.exe shows
     // its 32 renderers whether or not any of them holds a socket this
@@ -1783,11 +1787,12 @@ void MainWindow::RebuildTree() {
     // reported the result: "it always shows firefox.exe with one child but
     // not chrome.exe's 32 processes" - every chrome renderer between
     // requests owns no socket and was simply absent.
-    const std::vector<ProcessRecord> machine = EnumerateProcesses();
+    const std::vector<ProcessRecord> machine = EnumerateProcesses(true);
     std::unordered_map<DWORD, size_t> connByPid;
     connByPid.reserve(machine.size() * 2 + 1);
     size_t totalConnections = 0;
     for (const Connection& c : store_.Rows()) {
+        if ((c.flags & kRowRemoved) != 0) continue;
         ++connByPid[c.identity.pid];
         ++totalConnections;
     }
@@ -1799,18 +1804,24 @@ void MainWindow::RebuildTree() {
         n.ppid = r.ppid;
         n.ppidKnown = true;   // Toolhelp carries the parent on the entry
         n.name = r.name.empty() ? std::wstring(L"(unknown)") : r.name;
+        n.processCreate = r.processCreate;
+        n.processCreateKnown = r.processCreateKnown;
         auto it = connByPid.find(r.pid);
         n.connections = (it != connByPid.end()) ? it->second : 0;
         procs.push_back(std::move(n));
     }
-    // Kept: the tree's node carries only a pid, so a process with no
-    // connection row (most of the tree) still has to be able to show its
-    // Details. A copy, because the fill's own vector is its input and this
-    // outlives the call.
+    // Keep the exact process snapshot alive: tree items store indices into
+    // this copy, including processes that have no connection row.
     treeProcs_ = procs;
 
     bool depthExceeded = false;
     const size_t count = ProcessTreeFill(hwndTree_, procs, &depthExceeded);
+    RestoreProcessTreeViewState(hwndTree_, procs, previousTreeState);
+    if (previousTreeState.caret.has_value() &&
+        FindProcessTreeInstance(procs, *previousTreeState.caret) == nullptr) {
+        ::SendMessageW(hwndTree_, TVM_SELECTITEM, TVGN_CARET, 0);
+        SelectViewRowForProcess(*previousTreeState.caret);
+    }
     // What the fill actually drew, and how many processes it drew FROM. The
     // second number is what a check compares the tree with: enumerating
     // again would be a second, later snapshot of a machine that keeps
@@ -1831,8 +1842,11 @@ void MainWindow::RebuildTree() {
             it.mask = TVIF_PARAM | TVIF_HANDLE;
             it.hItem = caret;
             if (::SendMessageW(hwndTree_, TVM_GETITEMW, 0,
-                               reinterpret_cast<LPARAM>(&it)))
-                SelectViewRowForPid(static_cast<DWORD>(it.lParam));
+                               reinterpret_cast<LPARAM>(&it))) {
+                const ProcessTreeNode* process =
+                    TreeProcessForItemData(it.lParam);
+                if (process != nullptr) SelectViewRowForProcess(*process);
+            }
         }
     }
     std::wstring text = std::to_wstring(count) + L" processes, " +
@@ -1849,22 +1863,20 @@ void MainWindow::RebuildTree() {
     UpdateStatusBar(lastError_);
 }
 
-bool MainWindow::SelectViewRowForPid(DWORD pid) {
-    if (list_.Handle() == nullptr || pid == 0) return false;
+bool MainWindow::SelectViewRowForProcess(const ProcessTreeNode& process) {
+    if (list_.Handle() == nullptr) return false;
+    LVITEMW clear = {};
+    clear.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    ::SendMessageW(list_.Handle(), LVM_SETITEMSTATE, static_cast<WPARAM>(-1),
+                   reinterpret_cast<LPARAM>(&clear));
+    if (process.pid == 0 || !process.processCreateKnown) return false;
     // The VIEW, not the rows: the command handlers read the selection through
     // store_.ViewRow(item), so a row outside a filtered view must not be
     // selected - it would make every command act on something the user
     // cannot see.
-    const size_t count = store_.View().size();
-    size_t viewIdx = count;
-    for (size_t v = 0; v < count; ++v) {
-        const Connection* c = store_.ViewRow(v);
-        if (c != nullptr && c->identity.pid == pid) {
-            viewIdx = v;
-            break;
-        }
-    }
-    if (viewIdx == count) return false;
+    const std::optional<size_t> viewIdx =
+        FindProcessTreeViewRow(store_.Rows(), store_.View(), process);
+    if (!viewIdx.has_value()) return false;
     LVITEMW st = {};
     st.mask = LVIF_STATE;
     st.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
@@ -1874,43 +1886,36 @@ bool MainWindow::SelectViewRowForPid(DWORD pid) {
     sel.mask = LVIF_STATE;
     sel.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
     sel.state = LVIS_SELECTED | LVIS_FOCUSED;
-    ::SendMessageW(list_.Handle(), LVM_SETITEMSTATE, static_cast<WPARAM>(viewIdx),
+    ::SendMessageW(list_.Handle(), LVM_SETITEMSTATE,
+                   static_cast<WPARAM>(*viewIdx),
                    reinterpret_cast<LPARAM>(&sel));
-    ::SendMessageW(list_.Handle(), LVM_ENSUREVISIBLE, static_cast<WPARAM>(viewIdx),
+    ::SendMessageW(list_.Handle(), LVM_ENSUREVISIBLE,
+                   static_cast<WPARAM>(*viewIdx),
                    FALSE);
     return true;
 }
 
-const ProcessTreeNode* MainWindow::TreeProcessForPid(DWORD pid) const {
-    // The tree's node carries only a pid, so a process that owns NO
-    // connection has no row to map to - and its Details still has to work,
-    // because that is most of the tree (chrome's renderers between requests,
-    // the System process, and every idle service). The name comes from the
-    // list the fill drew.
-    if (pid == 0) return nullptr;
-    for (const ProcessTreeNode& p : treeProcs_)
-        if (p.pid == pid) return &p;
-    return nullptr;
+const ProcessTreeNode* MainWindow::TreeProcessForItemData(LPARAM itemData) const {
+    return ProcessTreeNodeForItemData(treeProcs_, itemData);
 }
 
-void MainWindow::ShowDetailsForTreePid(DWORD pid) {
-    if (SelectViewRowForPid(pid)) {
+void MainWindow::ShowDetailsForTreeItemData(LPARAM itemData) {
+    const ProcessTreeNode* process = TreeProcessForItemData(itemData);
+    if (process == nullptr) return;
+    if (SelectViewRowForProcess(*process)) {
         ShowDetailsOfSelectedRow();
         return;
     }
-    // No connection row: build the process dossier from the tree's own data
-    // instead of doing nothing. A synthetic row carries only what is known
-    // (pid, name), and the details model answers the process questions from
-    // that - the same window Task Manager opens for a process with no
-    // sockets. The row is not stored anywhere and never appears in the list.
-    const ProcessTreeNode* p = TreeProcessForPid(pid);
-    if (p == nullptr) return;
-    Connection c = {};
-    c.identity.pid = p->pid;
-    c.display.processName = p->name;
-    detailsPid_ = c.identity.pid;
+    Connection captured = {};
+    captured.identity.pid = process->pid;
+    captured.display.processName = process->name;
+    captured.procMeta.processCreate = process->processCreate;
+    captured.procMeta.processCreateKnown = process->processCreateKnown;
+    detailsPid_ = captured.identity.pid;
+    detailsProcessCreate_ = process->processCreate;
+    detailsProcessCreateKnown_ = process->processCreateKnown;
     detailsExitedNoted_ = false;
-    detailsModel_ = BuildDetails(c);
+    detailsModel_ = BuildDetails(captured);
     details_.SetDark(ThemeIsDark());
     details_.Show(hwnd_, font_, detailsModel_, std::wstring());
 }
@@ -2066,6 +2071,9 @@ void MainWindow::UpdateStatusBar(const std::wstring& errorText) {
         states += L"  ·  ★ ";
         states += std::to_wstring(st.pinned);
     }
+    if (!filterError_.empty())
+        states = L"Filter syntax: " + ToLowerW(filterError_) +
+                 L" (literal fallback active)";
     // A visible traffic column with no source running renders
     // as a wall of "—". Say so instead of leaving the columns silently
     // empty; real errors keep priority. Three states:
@@ -2105,6 +2113,11 @@ void MainWindow::UpdateStatusBar(const std::wstring& errorText) {
         : trafficBlocked        ? L"Traffic off - needs admin"
                                  : etw_->Running()        ? L"Ready (ETW)"
                                 : L"Ready";
+    if (errorText.empty() && !copyFeedback_.empty() &&
+        ::GetTickCount64() < copyFeedbackUntil_) {
+        right += L"  ·  ";
+        right += copyFeedback_;
+    }
     // append the DNS-stall hint so a user knows some Host cells show
     // `pending` rather than `—`.
     // the empty-state strip. One sentence per case, and the sentence is the
@@ -2367,6 +2380,30 @@ void MainWindow::OnCommand(WORD id, WORD notifyCode, HWND ctl) {
         case IDM_CTX_COPY_ALL:
             CopySelectionToClipboard(true);
             break;
+        case IDM_CTX_COPY_REMOTE_IP:
+            CopyFieldToClipboard(ConnectionsList::CopyField::RemoteIp);
+            break;
+        case IDM_CTX_COPY_HOSTNAME:
+            CopyFieldToClipboard(ConnectionsList::CopyField::Hostname);
+            break;
+        case IDM_CTX_COPY_LOCAL_ENDPOINT:
+            CopyFieldToClipboard(ConnectionsList::CopyField::LocalEndpoint);
+            break;
+        case IDM_CTX_COPY_REMOTE_ENDPOINT:
+            CopyFieldToClipboard(ConnectionsList::CopyField::RemoteEndpoint);
+            break;
+        case IDM_CTX_COPY_LOCAL_PORT:
+            CopyFieldToClipboard(ConnectionsList::CopyField::LocalPort);
+            break;
+        case IDM_CTX_COPY_REMOTE_PORT:
+            CopyFieldToClipboard(ConnectionsList::CopyField::RemotePort);
+            break;
+        case IDM_CTX_COPY_PROCESS_PATH:
+            CopyFieldToClipboard(ConnectionsList::CopyField::ProcessPath);
+            break;
+        case IDM_CTX_COPY_PROCESS_ID:
+            CopyFieldToClipboard(ConnectionsList::CopyField::ProcessId);
+            break;
         case IDM_CTX_DETAILS:
             ShowDetailsOfSelectedRow();
             break;
@@ -2627,7 +2664,7 @@ void MainWindow::OnNotify(NMHDR* hdr, LPARAM /*lParam*/) {
     if (hdr == nullptr) return;
     // in tree mode the tree is the surface, so its notifications
     // route here too. Everything the tree needs resolves to a list selection
-    // first (SelectViewRowForPid), which is what keeps the command handlers
+    // first (SelectViewRowForProcess), which is what keeps the command handlers
     // free of tree knowledge.
     if (hdr->hwndFrom == hwndTree_) {
         if (!treeMode_) return;
@@ -2642,7 +2679,7 @@ void MainWindow::OnNotify(NMHDR* hdr, LPARAM /*lParam*/) {
                 it.hItem = item;
                 if (::SendMessageW(hwndTree_, TVM_GETITEMW, 0,
                                    reinterpret_cast<LPARAM>(&it)))
-                    ShowDetailsForTreePid(static_cast<DWORD>(it.lParam));
+                    ShowDetailsForTreeItemData(it.lParam);
                 break;
             }
             case NM_RCLICK: {
@@ -2667,8 +2704,12 @@ void MainWindow::OnNotify(NMHDR* hdr, LPARAM /*lParam*/) {
                     it.mask = TVIF_PARAM | TVIF_HANDLE;
                     it.hItem = hit;
                     if (::SendMessageW(hwndTree_, TVM_GETITEMW, 0,
-                                       reinterpret_cast<LPARAM>(&it)))
-                        SelectViewRowForPid(static_cast<DWORD>(it.lParam));
+                                       reinterpret_cast<LPARAM>(&it))) {
+                        const ProcessTreeNode* process =
+                            TreeProcessForItemData(it.lParam);
+                        if (process != nullptr)
+                            SelectViewRowForProcess(*process);
+                    }
                 }
                 break;
             }
@@ -2680,8 +2721,12 @@ void MainWindow::OnNotify(NMHDR* hdr, LPARAM /*lParam*/) {
                 // act on would be two different things after the first
                 // keypress.
                 const auto* nm = reinterpret_cast<NMTREEVIEWW*>(hdr);
-                if (nm->itemNew.mask & TVIF_PARAM)
-                    SelectViewRowForPid(static_cast<DWORD>(nm->itemNew.lParam));
+                if (nm->itemNew.mask & TVIF_PARAM) {
+                    const ProcessTreeNode* process =
+                        TreeProcessForItemData(nm->itemNew.lParam);
+                    if (process != nullptr)
+                        SelectViewRowForProcess(*process);
+                }
                 break;
             }
             default:
@@ -2895,10 +2940,10 @@ void MainWindow::OnContextMenu(HWND target, int x, int y) {
             const int hit = static_cast<int>(::SendMessageW(
                 list_.Handle(), LVM_HITTEST, 0, reinterpret_cast<LPARAM>(&hti)));
             if (hit >= 0) {
-                const int selected = static_cast<int>(::SendMessageW(
-                    list_.Handle(), LVM_GETNEXTITEM, static_cast<WPARAM>(hit),
-                    MAKELPARAM(LVNI_SELECTED, 0)));
-                if (selected != hit) {
+                const UINT selected = static_cast<UINT>(::SendMessageW(
+                    list_.Handle(), LVM_GETITEMSTATE, static_cast<WPARAM>(hit),
+                    LVIS_SELECTED));
+                if ((selected & LVIS_SELECTED) == 0) {
                     LVITEMW st = {};
                     st.mask = LVIF_STATE;
                     st.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
@@ -2912,6 +2957,16 @@ void MainWindow::OnContextMenu(HWND target, int x, int y) {
                     ::SendMessageW(list_.Handle(), LVM_SETITEMSTATE,
                                    static_cast<WPARAM>(hit),
                                    reinterpret_cast<LPARAM>(&sel));
+                } else {
+                    LVITEMW focus = {};
+                    focus.stateMask = LVIS_FOCUSED;
+                    ::SendMessageW(list_.Handle(), LVM_SETITEMSTATE,
+                                   static_cast<WPARAM>(-1),
+                                   reinterpret_cast<LPARAM>(&focus));
+                    focus.state = LVIS_FOCUSED;
+                    ::SendMessageW(list_.Handle(), LVM_SETITEMSTATE,
+                                   static_cast<WPARAM>(hit),
+                                   reinterpret_cast<LPARAM>(&focus));
                 }
             }
         }
@@ -2946,6 +3001,10 @@ void MainWindow::OnContextMenu(HWND target, int x, int y) {
     // could free it. A copy would also be harmless but would copy a row whose
     // only use is four boolean reads.
     const Connection* row = list_.FirstSelectedRow();
+    const std::optional<Connection> process = SelectedProcessCopy();
+    const Connection* processRow = process.has_value() ? &*process : nullptr;
+    const bool liveRow = !treeMode_ && !groupByProcess_ && row != nullptr &&
+                         (row->flags & kRowRemoved) == 0;
     // "Close connection" only works for IPv4 - SetTcpEntry has no IPv6
     // variant (TcpTable.cpp:262 refuses it with a clear error). Disable the item
     // for IPv6 rows rather than letting the user invoke it and read the error,
@@ -2953,18 +3012,49 @@ void MainWindow::OnContextMenu(HWND target, int x, int y) {
     // greyed item is not a silent mystery (see the note above). The Block
     // item stays enabled: firewall rules are family-agnostic and stop the
     // connection from coming back, which is the right outcome for IPv6.
-    const bool isV4Tcp = (row != nullptr && row->identity.protocol == IPPROTO_TCP &&
+    const bool isV4Tcp = (liveRow && row->identity.protocol == IPPROTO_TCP &&
                           row->identity.family == AF_INET &&
                           row->identity.state != MIB_TCP_STATE_LISTEN &&
                           row->identity.state != 0);
-    const bool isV6Tcp = (row != nullptr && row->identity.protocol == IPPROTO_TCP &&
+    const bool isV6Tcp = (liveRow && row->identity.protocol == IPPROTO_TCP &&
                           row->identity.family != AF_INET &&
                           row->identity.state != MIB_TCP_STATE_LISTEN &&
                           row->identity.state != 0);
     const bool closable = isV4Tcp;
-    ::AppendMenuW(menu, MF_STRING | gray, IDM_CTX_DETAILS, L"&Details...");
+    ::AppendMenuW(menu, MF_STRING | (processRow != nullptr ? MF_ENABLED : MF_GRAYED),
+                   IDM_CTX_DETAILS, L"&Details...");
     ::AppendMenuW(menu, MF_STRING | gray, IDM_CTX_COPY_SELECTED, L"&Copy selected");
     ::AppendMenuW(menu, MF_STRING, IDM_CTX_COPY_ALL, L"Copy &all");
+    const std::vector<Connection> copyRows = SelectedCopyRows();
+    HMENU copyFields = ::CreatePopupMenu();
+    if (copyFields != nullptr) {
+        const auto appendCopyField = [&](ConnectionsList::CopyField field,
+                                         UINT id, const wchar_t* label) {
+            const bool available =
+                !ConnectionsList::CopyFieldText(copyRows, field).empty();
+            ::AppendMenuW(copyFields, MF_STRING |
+                          (available ? MF_ENABLED : MF_GRAYED), id, label);
+        };
+        appendCopyField(ConnectionsList::CopyField::RemoteIp,
+                        IDM_CTX_COPY_REMOTE_IP, L"Remote &IP");
+        appendCopyField(ConnectionsList::CopyField::Hostname,
+                        IDM_CTX_COPY_HOSTNAME, L"Remote &hostname");
+        appendCopyField(ConnectionsList::CopyField::LocalEndpoint,
+                        IDM_CTX_COPY_LOCAL_ENDPOINT, L"&Local endpoint");
+        appendCopyField(ConnectionsList::CopyField::RemoteEndpoint,
+                        IDM_CTX_COPY_REMOTE_ENDPOINT, L"&Remote endpoint");
+        appendCopyField(ConnectionsList::CopyField::LocalPort,
+                        IDM_CTX_COPY_LOCAL_PORT, L"Local &port");
+        appendCopyField(ConnectionsList::CopyField::RemotePort,
+                        IDM_CTX_COPY_REMOTE_PORT, L"Remote p&ort");
+        ::AppendMenuW(copyFields, MF_SEPARATOR, 0, nullptr);
+        appendCopyField(ConnectionsList::CopyField::ProcessPath,
+                        IDM_CTX_COPY_PROCESS_PATH, L"Executable &path");
+        appendCopyField(ConnectionsList::CopyField::ProcessId,
+                        IDM_CTX_COPY_PROCESS_ID, L"Process &PID");
+        ::AppendMenuW(menu, MF_POPUP | MF_STRING,
+                      reinterpret_cast<UINT_PTR>(copyFields), L"Copy &value");
+    }
     ::AppendMenuW(menu, MF_STRING | gray, IDM_CTX_EXPORT_SELECTION,
                    L"&Export selection...");
     // REMOVED 2026-10-05. Both menu entries that used to live here
@@ -2986,8 +3076,8 @@ void MainWindow::OnContextMenu(HWND target, int x, int y) {
     // always have: PID 4 and some service processes report a name but no
     // image path. Offering the item and then failing is worse than greying
     // it, so the predicate is the same condition the action depends on.
-    const bool hasPath = (row != nullptr && !row->display.processPath.empty() &&
-                          row->display.processPath != L"System");
+    const bool hasPath = (processRow != nullptr && !processRow->display.processPath.empty() &&
+                          processRow->display.processPath != L"System");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING | (hasPath ? MF_ENABLED : MF_GRAYED),
                   IDM_OPEN_FILE_LOCATION, L"Open file &location");
@@ -3007,7 +3097,8 @@ void MainWindow::OnContextMenu(HWND target, int x, int y) {
     //
     // ::AppendMenuW(menu, MF_STRING | (hasPath ? MF_ENABLED : MF_GRAYED),
     //               IDM_PROCESS_PROPERTIES, L"Process &properties...");
-    ::AppendMenuW(menu, MF_STRING | (row != nullptr && row->identity.protocol == IPPROTO_TCP
+    ::AppendMenuW(menu, MF_STRING | (liveRow && row->identity.protocol == IPPROTO_TCP &&
+                                         row->identity.state != MIB_TCP_STATE_LISTEN
                                          ? MF_ENABLED : MF_GRAYED),
                    IDM_BLOCK_CONNECTION, L"&Block this connection...");
     // "Block this connection..." adds Windows Firewall rules, which need
@@ -3033,9 +3124,10 @@ void MainWindow::OnContextMenu(HWND target, int x, int y) {
     // because a greyed item with no explanation is the thing users report as a
     // bug. The rule comes from Commands.cpp so the CLI applies the same one.
     const PidVerdict killVerdict =
-        PidKillVerdict(row != nullptr ? row->identity.pid : 0, ::GetCurrentProcessId(),
-                       row != nullptr);
-    const bool canEnd = (killVerdict == PidVerdict::Ok);
+        PidKillVerdict(processRow != nullptr ? processRow->identity.pid : 0,
+                       ::GetCurrentProcessId(), processRow != nullptr);
+    const bool canEnd = killVerdict == PidVerdict::Ok &&
+                        processRow->procMeta.processCreateKnown;
     ::AppendMenuW(menu, MF_STRING | (canEnd ? MF_ENABLED : MF_GRAYED),
                   IDM_CTX_KILL_PROCESS,
                   canEnd ? L"&End process..."
@@ -3162,33 +3254,124 @@ void MainWindow::CopySelectionToClipboard(bool copyAll) {
         if (n <= 0) return;
     }
     const std::wstring text = list_.SelectedRowsText(copyAll, groupByProcess_, frozen_, frozenAt_, cols_);
-    if (text.empty()) return;
-    if (!::OpenClipboard(hwnd_)) {
-        ::MessageBoxW(hwnd_, L"Could not open the clipboard.", L"WinTCP",
-                      MB_OK | MB_ICONWARNING);
+    CopyTextToClipboard(text, copyAll ? L"Copied all rows." : L"Copied selected rows.");
+}
+
+std::vector<Connection> MainWindow::SelectedCopyRows() const {
+    if (!treeMode_) return list_.SelectedRowsCopy();
+    std::vector<Connection> rows;
+    const std::optional<Connection> process = SelectedProcessCopy();
+    if (process.has_value()) rows.push_back(*process);
+    return rows;
+}
+
+void MainWindow::CopyFieldToClipboard(ConnectionsList::CopyField field) {
+    const std::vector<Connection> rows = SelectedCopyRows();
+    const std::wstring text = ConnectionsList::CopyFieldText(rows, field);
+    if (text.empty()) {
+        copyFeedback_ = L"No selected row has a known value for that field.";
+        copyFeedbackUntil_ = ::GetTickCount64() + 4000;
+        UpdateStatusBar(lastError_);
         return;
     }
-    ::EmptyClipboard();
-    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (hMem != nullptr) {
-        void* dst = ::GlobalLock(hMem);
-        if (dst != nullptr) {
-            ::memcpy(dst, text.c_str(), bytes);
-            ::GlobalUnlock(hMem);
-            if (::SetClipboardData(CF_UNICODETEXT, hMem) == nullptr)
-                ::GlobalFree(hMem);       // ownership only transfers on success
-            hMem = nullptr;
-        }
-        if (hMem != nullptr) ::GlobalFree(hMem);
+    const wchar_t* label = L"selected values";
+    switch (field) {
+        case ConnectionsList::CopyField::RemoteIp: label = L"remote IP addresses"; break;
+        case ConnectionsList::CopyField::Hostname: label = L"hostnames"; break;
+        case ConnectionsList::CopyField::LocalEndpoint: label = L"local endpoints"; break;
+        case ConnectionsList::CopyField::RemoteEndpoint: label = L"remote endpoints"; break;
+        case ConnectionsList::CopyField::LocalPort: label = L"local ports"; break;
+        case ConnectionsList::CopyField::RemotePort: label = L"remote ports"; break;
+        case ConnectionsList::CopyField::ProcessPath: label = L"executable paths"; break;
+        case ConnectionsList::CopyField::ProcessId: label = L"process IDs"; break;
     }
-    ::CloseClipboard();
+    CopyTextToClipboard(text, L"Copied " + std::wstring(label) + L".");
+}
+
+void MainWindow::CopyTextToClipboard(const std::wstring& text,
+                                     const std::wstring& successMessage,
+                                     const ClipboardApi* clipboardApi) {
+    const auto showFeedback = [this](const std::wstring& message) {
+        copyFeedback_ = message;
+        copyFeedbackUntil_ = ::GetTickCount64() + 4000;
+        UpdateStatusBar(lastError_);
+    };
+    const ClipboardApi nativeClipboard = NativeClipboardApi();
+    const ClipboardWriteStatus result = WriteClipboardText(
+        hwnd_, text, clipboardApi != nullptr ? *clipboardApi : nativeClipboard);
+    switch (result) {
+        case ClipboardWriteStatus::Copied:
+            showFeedback(successMessage);
+            break;
+        case ClipboardWriteStatus::EmptyText:
+            break;
+        case ClipboardWriteStatus::InvalidApi:
+            showFeedback(L"Copy failed: clipboard access is unavailable.");
+            break;
+        case ClipboardWriteStatus::AllocationFailed:
+            showFeedback(L"Copy failed: could not allocate clipboard memory.");
+            break;
+        case ClipboardWriteStatus::LockFailed:
+            showFeedback(L"Copy failed: could not lock clipboard memory.");
+            break;
+        case ClipboardWriteStatus::OpenFailed:
+            showFeedback(L"Copy failed: the clipboard is busy or unavailable.");
+            break;
+        case ClipboardWriteStatus::EmptyFailed:
+            showFeedback(L"Copy failed: Windows could not open the clipboard for replacement.");
+            break;
+        case ClipboardWriteStatus::SetDataFailed:
+            showFeedback(L"Copy failed: Windows rejected clipboard data; prior contents may have been cleared.");
+            break;
+    }
+    if (ClipboardNeedsManualFallback(result)) {
+        ShowTextSheet(hwnd_, L"Clipboard unavailable — select text and press Ctrl+C",
+                      text, nullptr, true);
+    }
+}
+
+std::optional<Connection> MainWindow::SelectedProcessCopy() const {
+    if (!treeMode_) return list_.SelectedCopy();
+    const HTREEITEM item = reinterpret_cast<HTREEITEM>(
+        ::SendMessageW(hwndTree_, TVM_GETNEXTITEM, TVGN_CARET, 0));
+    if (item == nullptr) return std::nullopt;
+    TVITEMW selected = {};
+    selected.mask = TVIF_PARAM | TVIF_HANDLE;
+    selected.hItem = item;
+    if (::SendMessageW(hwndTree_, TVM_GETITEMW, 0,
+                       reinterpret_cast<LPARAM>(&selected)) == 0)
+        return std::nullopt;
+    const ProcessTreeNode* node = TreeProcessForItemData(selected.lParam);
+    if (node == nullptr) return std::nullopt;
+    Connection processCopy;
+    if (MakeProcessTreeActionCopy(*node, store_.Rows(), nullptr, processCopy))
+        return processCopy;
+    Connection row;
+    row.identity.pid = node->pid;
+    row.display.processName = node->name;
+    row.procMeta.processCreate = node->processCreate;
+    row.procMeta.processCreateKnown = node->processCreateKnown;
+    if (!node->processCreateKnown) return row;
+    std::vector<Connection> rows{row};
+    ProcessResolver resolver;
+    resolver.ResolveBatch(rows);
+    if (!MakeProcessTreeActionCopy(*node, store_.Rows(), &rows[0],
+                                   processCopy))
+        return std::nullopt;
+    return processCopy;
 }
 
 void MainWindow::KillSelectedProcess() {
-    const std::optional<Connection> sel = list_.SelectedCopy();
+    const std::optional<Connection> sel = SelectedProcessCopy();
     if (!sel.has_value()) return;
     const Connection& c = *sel;
+
+    if (!c.procMeta.processCreateKnown) {
+        ::MessageBoxW(hwnd_, L"The captured process lifetime is unavailable. "
+                      L"Refresh the view before trying to end this process.",
+                      L"WinTCP - End process", MB_OK | MB_ICONWARNING);
+        return;
+    }
 
     // THE ROW IS ALREADY A COPY — `sel` above, not `rows_[n]`.
     //
@@ -3300,7 +3483,7 @@ void MainWindow::KillSelectedProcess() {
 }
 
 void MainWindow::OpenSelectedFileLocation() {
-    const std::optional<Connection> sel = list_.SelectedCopy();
+    const std::optional<Connection> sel = SelectedProcessCopy();
     if (!sel.has_value()) return;
     const Connection& c = *sel;
     if (c.display.processPath.empty() || c.display.processPath == L"System") {
@@ -3338,6 +3521,10 @@ void MainWindow::OpenSelectedFileLocation() {
 // file, and Explorer does have the verb.
 
 void MainWindow::BlockSelectedConnection() {
+    if (treeMode_ || groupByProcess_) {
+        UpdateStatusBar(L"Select an individual connection in the table to block it.");
+        return;
+    }
     const std::optional<Connection> sel = list_.SelectedCopy();
     if (!sel.has_value()) return;
     const Connection& c = *sel;
@@ -3415,11 +3602,18 @@ void MainWindow::BlockSelectedConnection() {
 }
 
 void MainWindow::CloseSelectedConnection() {
+    if (treeMode_ || groupByProcess_) {
+        UpdateStatusBar(L"Select an individual connection in the table to close it.");
+        return;
+    }
     const std::optional<Connection> sel = list_.SelectedCopy();
     if (!sel.has_value()) return;
     const Connection& c = *sel;
-    if (c.identity.protocol != IPPROTO_TCP || c.identity.state == MIB_TCP_STATE_LISTEN)
+    const std::string closeReason = ConnectionCloseCapabilityReason(c, IsElevated());
+    if (!closeReason.empty()) {
+        UpdateStatusBar(Utf8ToWide(closeReason.c_str()));
         return;
+    }
 
     // `c` is a copy (SelectedCopy): the confirm below runs a modal loop, and
     // a refresh arriving in that window reallocates rows_.
@@ -3514,13 +3708,9 @@ void MainWindow::RefreshDetailsWindow() {
     // tracked PID without showing, focusing or foregrounding anything.
     // A hidden or never-opened window is left alone.
     if (!details_.IsVisible() || detailsPid_ == 0) return;
-    const Connection* found = nullptr;
-    for (const Connection& r : store_.Rows()) {
-        if (r.identity.pid == detailsPid_ && !(r.flags & kRowRemoved)) {
-            found = &r;
-            break;
-        }
-    }
+    const Connection* found = FindProcessInstance(
+        store_.Rows(), detailsPid_, detailsProcessCreate_,
+        detailsProcessCreateKnown_);
     if (found == nullptr) {
         // Process exited (or every connection closed): keep the last
         // sample but say so once instead of silently going stale
@@ -3532,7 +3722,7 @@ void MainWindow::RefreshDetailsWindow() {
             DetailModel stale = detailsModel_;
             if (!stale.sections.empty())
                 stale.sections.back().note =
-                    L"process no longer running — showing the last sample";
+                    L"no matching live connection — showing the last sample";
             details_.UpdateModel(std::move(stale));
         }
         return;
@@ -3543,11 +3733,13 @@ void MainWindow::RefreshDetailsWindow() {
 }
 
 void MainWindow::ShowDetailsOfSelectedRow() {
-    const std::optional<Connection> sel = list_.SelectedCopy();
+    const std::optional<Connection> sel = SelectedProcessCopy();
     if (!sel.has_value()) return;
     const Connection& c = *sel;
 
     detailsPid_ = c.identity.pid;
+    detailsProcessCreate_ = c.procMeta.processCreate;
+    detailsProcessCreateKnown_ = c.procMeta.processCreateKnown;
     detailsExitedNoted_ = false;
     detailsModel_ = BuildDetails(c);
     details_.SetDark(ThemeIsDark());
@@ -3812,11 +4004,11 @@ void MainWindow::EditSelectedBookmarkNote() { bookmarks_.EditSelectedNote(); }
 // shortcut sheet is given a fixed-pitch font so its columns line up.
 namespace {
 
-constexpr int kSheetIdEdit = 1000;
-
 struct TextSheetState {
     std::wstring text;
     HFONT font = nullptr;   // a stock object when set; never owned here
+    bool selectAll = false;
+    bool initialized = false;
 };
 
 INT_PTR CALLBACK TextSheetProc(HWND dlg, UINT msg,
@@ -3826,14 +4018,19 @@ INT_PTR CALLBACK TextSheetProc(HWND dlg, UINT msg,
             auto* st = reinterpret_cast<TextSheetState*>(lParam);
             ::SetWindowLongPtrW(dlg, DWLP_USER,
                                   reinterpret_cast<LONG_PTR>(st));
-            HWND edit = ::GetDlgItem(dlg, kSheetIdEdit);
+            if (st != nullptr) st->initialized = true;
+            HWND edit = ::GetDlgItem(dlg, kTextSheetEditId);
             if (edit != nullptr && st != nullptr) {
                 ::SetWindowTextW(edit, st->text.c_str());
                 if (st->font != nullptr)
                     ::SendMessageW(edit, WM_SETFONT,
                                      reinterpret_cast<WPARAM>(st->font),
                                      TRUE);
-                ::SendMessageW(edit, EM_SETSEL, 0, 0);
+                ::SendMessageW(edit, EM_SETSEL, 0, st->selectAll ? -1 : 0);
+                if (st->selectAll) {
+                    ::SetFocus(edit);
+                    return FALSE;
+                }
             }
             return TRUE;
         }
@@ -3863,6 +4060,12 @@ size_t Pad4Local(size_t n) {
 bool WriteSheetItem(BYTE** p, BYTE* end, DWORD style, short x,
                         short y, short cx, short cy, int id,
                         WORD cls, const wchar_t* caption) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(*p);
+    const uintptr_t alignedAddress = (address + 3u) & ~static_cast<uintptr_t>(3u);
+    if (alignedAddress < address ||
+        alignedAddress - address > static_cast<uintptr_t>(end - *p))
+        return false;
+    *p = reinterpret_cast<BYTE*>(alignedAddress);
     const size_t capChars =
         (caption != nullptr) ? wcslen(caption) + 1 : 1;
     const size_t capBytes = Pad4Local(capChars * sizeof(wchar_t));
@@ -3946,12 +4149,12 @@ std::vector<BYTE> MakeTextSheetTemplate(const wchar_t* title) {
     // The scrolling text edit, then the OK button.
     if (!WriteSheetItem(&p, end,
                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER |
-                        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-                        8, 8, 424, 258, kSheetIdEdit, 0x80, nullptr) ||
+                        WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                        8, 8, 424, 258, kTextSheetEditId, 0x81, nullptr) ||
         !WriteSheetItem(&p, end,
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                             BS_DEFPUSHBUTTON,
-                        376, 274, 56, 16, IDOK, 0x81, L"OK")) {
+                        376, 274, 56, 16, IDOK, 0x80, L"OK")) {
         return std::vector<BYTE>();
     }
 
@@ -3959,11 +4162,14 @@ std::vector<BYTE> MakeTextSheetTemplate(const wchar_t* title) {
     return buf;
 }
 
-void ShowTextSheet(HWND owner, const wchar_t* title,
-                     const std::wstring& text, HFONT font) {
+}  // namespace
+
+bool ShowTextSheet(HWND owner, const wchar_t* title,
+                   const std::wstring& text, HFONT font, bool selectAll) {
     TextSheetState st;
     st.text = text;
     st.font = font;
+    st.selectAll = selectAll;
     std::vector<BYTE> tpl = MakeTextSheetTemplate(title);
     if (tpl.empty()) {
         // The template could not be built. Fall back to a message box
@@ -3971,15 +4177,19 @@ void ShowTextSheet(HWND owner, const wchar_t* title,
         // silently showing nothing.
         ::MessageBoxW(owner, text.c_str(), title,
                           MB_OK | MB_ICONINFORMATION);
-        return;
+        return false;
     }
-    ::DialogBoxIndirectParamW(::GetModuleHandleW(nullptr),
+    const INT_PTR result = ::DialogBoxIndirectParamW(::GetModuleHandleW(nullptr),
                                   reinterpret_cast<LPCDLGTEMPLATEW>(tpl.data()),
                                   owner, TextSheetProc,
                                   reinterpret_cast<LPARAM>(&st));
+    if (result == -1 || !st.initialized) {
+        ::MessageBoxW(owner, text.c_str(), title,
+                      MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+    return true;
 }
-
-}  // namespace
 
 void MainWindow::ShowAboutBox() {
     // Every line of the capability block is read from live state, not
