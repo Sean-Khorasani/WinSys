@@ -103,6 +103,7 @@ public:
     // mentions that file - so the shipped binary contains no probe code and no
     // path to any. See the header comment in UiProbe.cpp for why it moved.
     const wchar_t* UiProbe(const wchar_t* op, const wchar_t* arg) const;
+    const wchar_t* UiProbeAction(const wchar_t* op);
 
     // direct access to the change-log window for the UI harness.
     //
@@ -232,22 +233,19 @@ void InitFilterControls();
     // counts of the last rebuild. The list's own summary is meaningless
     // there, because the list is hidden and cannot be selected.
     std::wstring TreeSummary() const { return treeSummary_; }
-    // Select the first VIEW row owned by 'pid' in the (hidden) list and
+    // Select the first VIEW row owned by the captured process in the (hidden) list and
     // return true, so every command handler - Details, Copy, Export, Block,
     // Close, End process, Open file location - runs against the tree's node
     // without any of them knowing the tree exists. One selection, one
     // answer; a second mapping inside each handler is how the two would
     // drift apart.
-    bool SelectViewRowForPid(DWORD pid);
-    // The tree's process entry for 'pid', or nullptr. The tree node carries
-    // only a pid, so this is how a name is looked back up - for a process
-    // with no connection row, which is most of the tree.
-    const ProcessTreeNode* TreeProcessForPid(DWORD pid) const;
+    bool SelectViewRowForProcess(const ProcessTreeNode& process);
+    const ProcessTreeNode* TreeProcessForItemData(LPARAM itemData) const;
     // Details for a tree node: the process's first connection when it owns
     // one, and the process dossier alone when it does not. The second case
     // is why this exists - Details on a connection-less process used to do
     // nothing, which made most of the tree a dead end.
-    void ShowDetailsForTreePid(DWORD pid);
+    void ShowDetailsForTreeItemData(LPARAM itemData);
     // Status-bar panes 3 and 4, factored out so the countdown stays a pure
     // function of the last refresh tick and the auto-refresh interval.
     std::wstring SelectedSummary() const;
@@ -257,7 +255,13 @@ void InitFilterControls();
     void ExportCsv();                     // -> DoExport(false)
     std::wstring SelectedRowsText(bool copyAll) const;
     void CopySelectionToClipboard(bool copyAll);
+    void CopyFieldToClipboard(ConnectionsList::CopyField field);
+    void CopyTextToClipboard(const std::wstring& text,
+                             const std::wstring& successMessage,
+                             const ClipboardApi* clipboardApi = nullptr);
+    std::vector<Connection> SelectedCopyRows() const;
     void KillSelectedProcess();            // PID-reuse verification
+    std::optional<Connection> SelectedProcessCopy() const;
     void ShowDetailsOfSelectedRow();       // modeless details window
     // REMOVED 2026-10-05. The capability moved to the CLI as
     // `capture --text` / `capture --out`.
@@ -417,10 +421,13 @@ bool AnyTrafficColVisible() const { return cols_.AnyTrafficVisible(); }
     DetailsDialog details_;
     ChartsWindow charts_;                    // performance graphs
     DWORD detailsPid_ = 0;                   // PID the details window shows
+    FILETIME detailsProcessCreate_ = {};
+    bool detailsProcessCreateKnown_ = false;
     DetailModel detailsModel_;               // last content shown
     bool detailsExitedNoted_ = false;        // exit note shown once
     Settings settings_;
     std::vector<FilterClause> filterProgram_;
+    std::wstring filterError_;
 
     // change log: append-mode handle while logging is active
     HANDLE logFile_ = INVALID_HANDLE_VALUE;
@@ -490,10 +497,13 @@ bool AnyTrafficColVisible() const { return cols_.AnyTrafficVisible(); }
     bool etwAutoAttempted_ = false;        // at most one implicit ETW start
     HBRUSH hwndBrushWindow_ = nullptr;   // WM_CTLCOLOR* backdrop (system)
     std::wstring lastError_;
+    std::wstring copyFeedback_;
+    ULONGLONG copyFeedbackUntil_ = 0;
     std::wstring lastRefreshTime_;
     // GetTickCount64 of the last completed snapshot; drives the status bar's
     // age and next-refresh countdown. 0 = nothing has completed yet.
     ULONGLONG lastRefreshTick_ = 0;
+    std::atomic<std::uint64_t> completedRefreshCount_{0};
     // R8 liveness stamp: GetTickCount64 of the last POSTED result, success or
     // error — either proves the worker alive. lastRefreshTick_ stays
     // success-only (it drives the display age); this one drives the watchdog.
@@ -551,10 +561,8 @@ bool AnyTrafficColVisible() const { return cols_.AnyTrafficVisible(); }
     // the same rows (ProcessTreeFill). Hidden until the mode is on; the
     // list is hidden while it is.
     HWND hwndTree_ = nullptr;
-    // The process list the last tree fill drew, keyed by pid. The tree's
-    // node carries only the pid (its lParam), so looking a node's NAME back
-    // up needs its source - and a process that owns no connection has no row
-    // at all, which is the case the synthesized Details row is built from.
+    // The process list the last tree fill drew. Tree item data indexes this
+    // snapshot, including for processes with no connection row.
     std::vector<ProcessTreeNode> treeProcs_;
     // The summary the status bar shows in place of the selection count.
     std::wstring treeSummary_;
