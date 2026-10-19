@@ -11,7 +11,16 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(wintcp VERSION 1.0.0 LANGUAGES CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/wintcp/src/Version.h"
+     WINTCP_VERSION_DEFINITION
+     REGEX "^#define WINTCP_VERSION_STRING \"[0-9]+\\.[0-9]+\\.[0-9]+\"$")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" WINTCP_PROJECT_VERSION
+       "${WINTCP_VERSION_DEFINITION}")
+if(NOT WINTCP_PROJECT_VERSION)
+    message(FATAL_ERROR "Could not read WINTCP_VERSION_STRING from Version.h")
+endif()
+
+project(wintcp VERSION "${WINTCP_PROJECT_VERSION}" LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
