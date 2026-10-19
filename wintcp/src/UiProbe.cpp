@@ -265,6 +265,32 @@ if (::wcscmp(op, L"listSelectionCount") == 0) {
         ::swprintf_s(buf, L"%lld", (long long)n);
         return buf;
     }
+    if (::wcscmp(op, L"sortColumn") == 0) {
+        ::swprintf_s(buf, L"%d", store_.SortColumn());
+        return buf;
+    }
+    if (::wcscmp(op, L"sortAscending") == 0) {
+        return store_.SortAscending() ? L"1" : L"0";
+    }
+    if (::wcscmp(op, L"sortOrderError") == 0) {
+        const auto& view = store_.View();
+        for (size_t index = 1; index < view.size(); ++index) {
+            const Connection* previous = store_.ViewRow(index - 1);
+            const Connection* current = store_.ViewRow(index);
+            if (previous == nullptr || current == nullptr ||
+                ConnectionStore::CompareRows(*previous, *current,
+                    store_.SortColumn(), store_.SortAscending()) > 0) {
+                ::swprintf_s(buf, L"%zu", index);
+                return buf;
+            }
+        }
+        return L"-1";
+    }
+    if (::wcscmp(op, L"trackSelectEnabled") == 0) {
+        const DWORD styles = static_cast<DWORD>(::SendMessageW(
+            list_.Handle(), LVM_GETEXTENDEDLISTVIEWSTYLE, 0, 0));
+        return (styles & LVS_EX_TRACKSELECT) != 0 ? L"1" : L"0";
+    }
     if (::wcscmp(op, L"accRow") == 0) {
         // the accessible name|description the MSAA wrapper reports for
         // a view row, read without COM. Same builders the wrapper uses
