@@ -2088,7 +2088,7 @@ DetailModel BuildDetailModel(const Connection& c,
     add(proc, L"Name", c.display.processName);
     add(proc, L"PID", std::to_wstring(c.identity.pid));
     add(proc, L"Path", c.display.processPath);
-    add(proc, L"Command line", cmdline);
+    add(proc, L"Command line", cmdline, /*mono=*/true);
     add(proc, L"Started", created, /*mono=*/true);
     add(proc, L"Service", c.display.serviceName);
     if (c.lifetime.firstSeenTick != 0) {
@@ -2103,7 +2103,7 @@ DetailModel BuildDetailModel(const Connection& c,
     // no thread id and an AFD endpoint is owned by the process. See ProcessInfo.h.
     //
     // Rendered as ordinary fields rather than a special list: the label column
-    // is 172 px, which suits "TID 8124", and reusing the two-column table means
+    // is 184 px, which suits "TID 8124", and reusing the two-column table means
     // the section scrolls, elides and copies for free.
     //
     // Ranked by CPU time, busiest first, because that ordering is the whole
@@ -2312,13 +2312,6 @@ DetailModel BuildDetailModel(const Connection& c,
     // come from different database files, and "which country" and "which network"
     // are two questions. An org with no number still gets a row, because the name
     // is the part a reader recognises.
-    if (!c.enrichment.asnOrg.empty()) add(conn, L"AS organisation", c.enrichment.asnOrg);
-    if (c.enrichment.asnNumber != 0)
-        add(conn, L"AS number", L"AS" + std::to_wstring(c.enrichment.asnNumber));
-    // Its own row rather than being folded into Country: the two come from
-    // different database files, and "which country and which network" are two
-    // questions. An org with no number still gets a row, because the name is the
-    // part a reader recognises.
     if (!c.enrichment.asnOrg.empty()) add(conn, L"AS organisation", c.enrichment.asnOrg);
     if (c.enrichment.asnNumber != 0)
         add(conn, L"AS number", L"AS" + std::to_wstring(c.enrichment.asnNumber));
