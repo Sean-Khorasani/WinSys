@@ -1,7 +1,7 @@
 {
-  "url": "http://127.0.0.1:2144/",
-  "when": "2026-10-18T06:49:08.413Z",
-  "passed": 169,
+  "url": "http://127.0.0.1/",
+  "when": "2026-10-19T01:46:14.575Z",
+  "passed": 177,
   "failed": 0,
   "failures": [],
   "consoleErrors": [
