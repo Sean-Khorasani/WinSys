@@ -43,6 +43,7 @@
 #include "BlockConn.h"
 #include "Commands.h"
 #include "ConnectionStore.h"
+#include "Elevate.h"
 #include "Settings.h"
 #include "SocketTraffic.h"
 #include "Utils.h"
@@ -62,6 +63,7 @@ constexpr int kExpectedConfigVersion = 3;
 constexpr size_t kMaxAuditBytes = 2 * 1024 * 1024;
 constexpr size_t kAuditRetention = 1000;
 constexpr size_t kMaxPendingBlocks = 64;
+constexpr size_t kMaxPendingConnectionActions = 64;
 constexpr size_t kMaxPendingCliActions = 64;
 constexpr size_t kMaxCliArgs = 64;
 constexpr size_t kMaxCliArgBytes = 2048;
@@ -79,17 +81,34 @@ struct HttpResponse {
     int status = 200;
     std::string contentType = "application/json; charset=utf-8";
     std::string body;
+    std::string etag;
 };
 
 struct PendingBlock {
-    std::string address;
-    UINT port = 0;
+    RuleRequest rule;
+    std::string scope;
+    std::string ruleName;
     ULONGLONG expires = 0;
 };
 
 struct PendingCliAction {
     std::wstring verb;
     std::vector<std::wstring> args;
+    ULONGLONG expires = 0;
+};
+
+struct PendingConnectionAction {
+    Connection captured;
+    ULONGLONG snapshotAgeMs = 0;
+    ULONGLONG expires = 0;
+};
+
+struct PendingFirewallRuleAction {
+    BlockedRule captured;
+    RuleRequest createRequest;
+    std::string operation;
+    std::string ruleName;
+    bool create = false;
     ULONGLONG expires = 0;
 };
 
@@ -100,6 +119,10 @@ struct ServerContext {
     std::wstring dataDirectory;
     std::wstring geoIpDbDir;
     std::wstring configPath;
+    std::mutex configMutex;
+    std::mutex configApplyMutex;
+    std::string configBytes;
+    std::string configEtag;
     std::wstring auditPath;
     std::wstring logPath;
     WebUiLogLevel logLevel = WebUiLogLevel::Debug;
@@ -123,7 +146,12 @@ struct ServerContext {
     std::atomic<ULONGLONG> connectionSnapshotTick{0};
     std::atomic<bool> connectionRefreshFailed{false};
     std::map<std::string, PendingBlock> pendingBlocks;
+    std::mutex blockActionMutex;
     std::map<std::string, PendingCliAction> pendingCliActions;
+    std::mutex connectionActionMutex;
+    std::map<std::string, PendingConnectionAction> pendingConnectionActions;
+    std::mutex firewallActionMutex;
+    std::map<std::string, PendingFirewallRuleAction> pendingFirewallActions;
 };
 
 std::atomic<bool> g_stop{false};
@@ -172,7 +200,8 @@ DWORD WINAPI ConnectionRefresherThread(LPVOID param) {
         // "Someone is looking" is the same signal the metrics sampler uses: a
         // read endpoint touched the store recently.
         const ULONGLONG now = ::GetTickCount64();
-        const ULONGLONG sinceAccess = now - context->lastStoreAccess.load();
+        const ULONGLONG accessTick = context->lastStoreAccess.load();
+        const ULONGLONG sinceAccess = now >= accessTick ? now - accessTick : 0;
         const DWORD stepMs = (sinceAccess < kConnRefreshIdleMs) ? 1000
                                                                : kConnRefreshStepMs;
         ULONGLONG deadline = now + stepMs;
@@ -225,7 +254,9 @@ DWORD WINAPI ConnectionRefresherThread(LPVOID param) {
         // refresh above still runs, because a connection is what the summaries
         // are about; the process table is only worth enumerating when a request
         // will actually read it.
-        if (now - context->lastStoreAccess.load() >= kConnRefreshIdleMs) {
+        const ULONGLONG lastAccessTick = context->lastStoreAccess.load();
+        const ULONGLONG sampleTick = ::GetTickCount64();
+        if (sampleTick - lastAccessTick >= kConnRefreshIdleMs) {
             continue;
         }
 
@@ -451,7 +482,7 @@ private:
         while (!AtEnd()) {
             const unsigned char c = static_cast<unsigned char>(text_[pos_++]);
             if (c == '"') return true;
-            if (c < 0x20) return false;
+            if (static_cast<unsigned char>(c) < 0x20) return false;
             if (c != '\\') continue;
             if (AtEnd()) return false;
             const char e = text_[pos_++];
@@ -564,7 +595,7 @@ bool ExtractJsonString(const std::string& text, const std::string& key,
         while (p < text.size()) {
             const char c = text[p++];
             if (c == '"') return true;
-            if (c < 0x20) return false;
+            if (static_cast<unsigned char>(c) < 0x20) return false;
             if (c == '\\') {
                 if (p >= text.size()) return false;
                 const char e = text[p++];
@@ -629,6 +660,11 @@ std::string JsonNumber(double value) {
     return text.empty() ? "0" : text;
 }
 
+std::string JsonExactUint64(uint64_t value) {
+    const std::string digits = std::to_string(value);
+    return value <= 9007199254740991ULL ? digits : JsonQuote(digits);
+}
+
 namespace {
 
 bool GetExecutableDirectory(std::wstring* directory) {
@@ -647,6 +683,16 @@ bool GetExecutableDirectory(std::wstring* directory) {
 
 bool PrepareDataPaths(ServerContext* context) {
     if (context == nullptr) return false;
+    const DWORD overrideSize = ::GetEnvironmentVariableW(L"WINTCP_WEBUI_DATA_DIR", nullptr, 0);
+    if (overrideSize > 0) {
+        if (overrideSize > 32768) return false;
+        std::vector<wchar_t> buffer(overrideSize);
+        const DWORD length = ::GetEnvironmentVariableW(L"WINTCP_WEBUI_DATA_DIR",
+                                                        buffer.data(), overrideSize);
+        if (length == 0 || length >= overrideSize) return false;
+        context->dataDirectory.assign(buffer.data(), length);
+        if (!std::filesystem::path(context->dataDirectory).is_absolute()) return false;
+    } else {
     PWSTR local = nullptr;
     const HRESULT hr = ::SHGetKnownFolderPath(FOLDERID_LocalAppData,
                                                KF_FLAG_CREATE, nullptr, &local);
@@ -654,6 +700,7 @@ bool PrepareDataPaths(ServerContext* context) {
     std::wstring base(local);
     ::CoTaskMemFree(local);
     context->dataDirectory = base + L"\\WinTCP\\WebUi";
+    }
     std::error_code ec;
     std::filesystem::create_directories(context->dataDirectory, ec);
     if (ec) return false;
@@ -758,15 +805,21 @@ void LoadGeoIpFromConfig(ServerContext& context) {
             }
         }
     }
+    std::lock_guard<std::mutex> lock(g_storeMutex);
     if (dbPathUtf8.empty()) {
-        return;  // Not configured: GeoIP stays unloaded, which is fine.
+        context.geoIpDbPath.clear();
+        context.source.UnloadGeoIp();
+        return;
     }
     std::wstring dbPath;
     if (!Utf8ToWide(dbPathUtf8, &dbPath)) {
+        context.geoIpDbPath.clear();
+        context.source.UnloadGeoIp();
         WriteWebUiLog(context, WebUiLogLevel::Warn,
                       "geoIpDbPath in config is not valid UTF-8");
         return;
     }
+    if (dbPath == context.geoIpDbPath && context.source.GeoIpLoaded()) return;
     context.geoIpDbPath = dbPath;
     std::wstring error;
     if (context.source.LoadGeoIp(dbPath.c_str(), &error)) {
@@ -955,6 +1008,9 @@ void SendResponse(SOCKET client, const HttpResponse& response, bool headOnly) {
         case 403: reason = "Forbidden"; break;
         case 404: reason = "Not Found"; break;
         case 405: reason = "Method Not Allowed"; break;
+        case 409: reason = "Conflict"; break;
+        case 410: reason = "Gone"; break;
+        case 412: reason = "Precondition Failed"; break;
         case 413: reason = "Payload Too Large"; break;
         case 415: reason = "Unsupported Media Type"; break;
         case 431: reason = "Request Header Fields Too Large"; break;
@@ -963,7 +1019,9 @@ void SendResponse(SOCKET client, const HttpResponse& response, bool headOnly) {
         default: break;
     }
     std::ostringstream headers;
-    headers << "HTTP/1.1 " << response.status << " " << reason << "\r\n"
+    headers << "HTTP/1.1 " << response.status << " " << reason << "\r\n";
+    if (!response.etag.empty()) headers << "ETag: " << response.etag << "\r\n";
+    headers
             << "Content-Type: " << response.contentType << "\r\n"
             << "Content-Length: " << response.body.size() << "\r\n"
             << "Cache-Control: no-store\r\n"
@@ -1065,9 +1123,12 @@ std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) 
     options.signatures = true;
     std::lock_guard<std::mutex> lock(g_storeMutex);
     const CommandResult result = CmdListInto(context.source, context.store, options);
-    if (result.exitCode != kExitOk) return ErrorJson(result.err.empty()
-                                                         ? "snapshot unavailable"
-                                                         : result.err);
+    if (result.exitCode != kExitOk) {
+        context.connectionRefreshFailed.store(true);
+        return ErrorJson(result.err.empty() ? "snapshot unavailable" : result.err);
+    }
+    context.connectionSnapshotTick.store(::GetTickCount64());
+    context.connectionRefreshFailed.store(false);
     size_t socketRows = 0;
     size_t tcpRows = 0;
     for (size_t i = 0; i < context.store.View().size(); ++i) {
@@ -1132,7 +1193,10 @@ std::string CapabilitiesJson(ServerContext& context) {
     // the front end greys out what it cannot get and says why.
     const bool pdh = context.metricsCollector.IsRunning();
     const bool perCore = pdh && context.metricsCollector.PerCoreAvailable();
-    out << "{\"elevated\":false"
+    const bool elevated = IsElevated();
+    out << "{\"elevated\":" << (elevated ? "true" : "false")
+        << ",\"elevationReason\":" <<
+            (elevated ? "null" : JsonQuote("Run WinTCP as administrator for connection teardown and firewall changes"))
         << ",\"pdh\":" << (pdh ? "true" : "false")
         << ",\"pdhReason\":" << (pdh ? "null" : JsonQuote("metrics sampler did not start"))
         << ",\"perCore\":" << (perCore ? "true" : "false")
@@ -1897,6 +1961,11 @@ std::string ProcessesJson(ServerContext& context, const std::string& queryString
         if (i > 0) out << ",";
         out << "{\"pid\":" << row.pid
             << ",\"ppid\":" << row.ppid
+            << ",\"instanceId\":" << (row.stats.processCreateKnown
+                ? JsonQuote(std::to_string(row.pid) + ":" +
+                    std::to_string(row.stats.processCreateTime.dwHighDateTime) + ":" +
+                    std::to_string(row.stats.processCreateTime.dwLowDateTime))
+                : std::string("null"))
             << ",\"name\":" << JsonQuote(WideToUtf8(row.name))
             // An unreadable path is null plus a reason, never "" - an empty
             // string reads as "this process has no path", which is false.
@@ -1917,16 +1986,16 @@ std::string ProcessesJson(ServerContext& context, const std::string& queryString
             << ",\"cpuPct\":" << (row.stats.cpuKnown ? JsonNumber(row.stats.cpuPct)
                                                      : std::string("null"))
             << ",\"memWs\":" << (row.stats.memKnown
-                                    ? std::to_string(row.stats.memWs)
+                                    ? JsonExactUint64(row.stats.memWs)
                                     : std::string("null"))
             << ",\"memPrivate\":" << (row.stats.memKnown
-                                        ? std::to_string(row.stats.memPrivate)
+                                        ? JsonExactUint64(row.stats.memPrivate)
                                         : std::string("null"))
             // I/O is TRANSFER bytes - file, pipe and device - not disk-only.
             // The UI labels it that way; see docs/webui.md.
-            << ",\"ioRead\":" << (row.stats.ioKnown ? std::to_string(row.stats.ioRead)
+            << ",\"ioRead\":" << (row.stats.ioKnown ? JsonExactUint64(row.stats.ioRead)
                                                      : std::string("null"))
-            << ",\"ioWrite\":" << (row.stats.ioKnown ? std::to_string(row.stats.ioWrite)
+            << ",\"ioWrite\":" << (row.stats.ioKnown ? JsonExactUint64(row.stats.ioWrite)
                                                       : std::string("null"))
             << "}";
     }
@@ -2052,19 +2121,27 @@ std::string DiagnosticsJson(ServerContext& context) {
 }
 
 std::string FirewallRulesJson(ServerContext& context) {
-    (void)context;  // firewall ledger is independent of connection state
-    // Expose the WinTCP-tagged firewall rule ledger so templates can check
-    // whether a peer is already blocked. Enumerating the policy store requires
-    // elevation; an unreadable ledger is null with a reason, not an empty array.
+    (void)context;
     std::vector<BlockedRule> rules;
     std::wstring error;
-    const bool ok = ListBlockedRules(&rules, &error);
+    std::wstring warning;
+    long activeProfileTypes = 0;
+    bool activeProfileKnown = false;
+    const bool ok = ListFirewallInventory(&rules, &error, &warning,
+                                          &activeProfileTypes,
+                                          &activeProfileKnown);
     std::ostringstream out;
     if (!ok) {
         // A missing/empty result is NOT an error here: CountWinTcpRules returns
         // 0 with no error when there are no tagged rules.
         out << "{\"rules\":[],\"available\":" << (error.empty() ? "true" : "false")
-            << ",\"reason\":" << (error.empty() ? "null" : JsonQuote(WideToUtf8(error))) << "}";
+            << ",\"generatedAt\":" << JsonQuote(UtcTimestamp())
+            << ",\"reason\":" << (error.empty() ? "null" : JsonQuote(WideToUtf8(error)))
+            << ",\"warnings\":[]"
+            << ",\"activeProfileTypes\":null,\"activeProfileKnown\":false"
+            << ",\"activeProfileReason\":" << JsonQuote("Firewall policy is unavailable")
+            << ",\"scope\":\"Windows Firewall rules exposed by COM plus readable WinTCP-owned rules\"}"
+            ;
         return out.str();
     }
     out << "{\"rules\":[";
@@ -2073,14 +2150,185 @@ std::string FirewallRulesJson(ServerContext& context) {
         if (!first) out << ",";
         first = false;
         out << "{\"name\":" << JsonQuote(WideToUtf8(b.name))
-            << ",\"enabled\":" << (b.enabled ? "true" : "false")
-            << ",\"blocking\":" << (b.isBlocking ? "true" : "false")
-            << ",\"remoteAddrs\":" << JsonQuote(WideToUtf8(b.remoteAddrs))
-            << ",\"localPorts\":" << JsonQuote(WideToUtf8(b.localPorts))
-            << ",\"remotePorts\":" << JsonQuote(WideToUtf8(b.remotePorts)) << "}";
+            << ",\"ownership\":" << JsonQuote(b.wintcpOwned ? "wintcp" : "windows")
+            << ",\"enabled\":" << (b.enabledKnown
+                                      ? (b.enabled ? "true" : "false") : "null")
+            << ",\"enabledKnown\":" << (b.enabledKnown ? "true" : "false")
+            << ",\"enabledReason\":" <<
+                (b.enabledKnown ? "null" : JsonQuote("Windows Firewall did not return this field"))
+            << ",\"blocking\":" << (b.enabledKnown && b.blockingKnown
+                                       ? (b.enabled && b.isBlocking ? "true" : "false") : "null")
+            << ",\"blockingKnown\":" <<
+                (b.enabledKnown && b.blockingKnown ? "true" : "false")
+            << ",\"blockingReason\":" <<
+                (b.enabledKnown && b.blockingKnown ? "null" :
+                 JsonQuote("Windows Firewall did not return enabled state, direction or action"))
+            << ",\"outboundBlockRule\":" << (b.blockingKnown
+                ? (b.isBlocking ? "true" : "false") : "null")
+            << ",\"outboundBlockRuleKnown\":" << (b.blockingKnown ? "true" : "false")
+            << ",\"outboundBlockRuleReason\":" << (b.blockingKnown
+                ? "null" : JsonQuote("Windows Firewall did not return direction or action"))
+            << ",\"remoteAddrs\":" << (b.remoteAddrsKnown
+                ? JsonQuote(WideToUtf8(b.remoteAddrs)) : "null")
+            << ",\"remoteAddrsReason\":" << (b.remoteAddrsKnown
+                ? "null" : JsonQuote("Windows Firewall did not return remote addresses"))
+            << ",\"localPorts\":" << (b.localPortsKnown
+                ? JsonQuote(WideToUtf8(b.localPorts)) : "null")
+            << ",\"localPortsReason\":" << (b.localPortsKnown
+                ? "null" : JsonQuote("Windows Firewall did not return local ports"))
+            << ",\"remotePorts\":" << (b.remotePortsKnown
+                ? JsonQuote(WideToUtf8(b.remotePorts)) : "null")
+            << ",\"remotePortsReason\":" << (b.remotePortsKnown
+                ? "null" : JsonQuote("Windows Firewall did not return remote ports"))
+            << ",\"localAddrs\":" << (b.localAddrsKnown
+                ? JsonQuote(WideToUtf8(b.localAddrs)) : "null")
+            << ",\"localAddrsReason\":" << (b.localAddrsKnown
+                ? "null" : JsonQuote("Windows Firewall did not return local addresses"))
+            << ",\"application\":" << (b.applicationKnown
+                ? JsonQuote(WideToUtf8(b.application)) : "null")
+            << ",\"applicationReason\":" << (b.applicationKnown
+                ? "null" : JsonQuote("Windows Firewall did not return application scope"))
+            << ",\"service\":" << (b.serviceKnown
+                ? JsonQuote(WideToUtf8(b.service)) : "null")
+            << ",\"serviceReason\":" << (b.serviceKnown
+                ? "null" : JsonQuote("Windows Firewall did not return service scope"))
+            << ",\"direction\":" << (b.directionKnown
+                ? std::to_string(b.direction) : "null")
+            << ",\"directionReason\":" << (b.directionKnown
+                ? "null" : JsonQuote("Windows Firewall did not return direction"))
+            << ",\"action\":" << (b.actionKnown
+                ? std::to_string(b.action) : "null")
+            << ",\"actionReason\":" << (b.actionKnown
+                ? "null" : JsonQuote("Windows Firewall did not return action"))
+            << ",\"protocol\":" << (b.protocolKnown
+                ? std::to_string(b.protocol) : "null")
+            << ",\"protocolReason\":" << (b.protocolKnown
+                ? "null" : JsonQuote("Windows Firewall did not return protocol"))
+            << ",\"profiles\":" << (b.profilesKnown
+                ? std::to_string(b.profiles) : "null")
+            << ",\"profilesReason\":" << (b.profilesKnown
+                ? "null" : JsonQuote("Windows Firewall did not return profiles"))
+            << "}";
     }
-    out << "],\"available\":true,\"reason\":null}";
+    out << "],\"available\":true,\"reason\":null"
+        << ",\"activeProfileTypes\":"
+        << (activeProfileKnown ? std::to_string(activeProfileTypes) : "null")
+        << ",\"activeProfileKnown\":" << (activeProfileKnown ? "true" : "false")
+        << ",\"activeProfileReason\":"
+        << (activeProfileKnown ? "null" : JsonQuote("Windows did not return the active firewall profile"))
+        << ",\"warnings\":["
+        << (warning.empty() ? "" : JsonQuote(WideToUtf8(warning))) << "]"
+        << ",\"scope\":\"Windows Firewall rules exposed by COM plus readable WinTCP-owned rules\""
+        << ",\"generatedAt\":" << JsonQuote(UtcTimestamp()) << "}";
     return out.str();
+}
+
+bool SameFirewallRuleCapture(const BlockedRule& captured,
+                             const BlockedRule& current) {
+    return ::CompareStringOrdinal(captured.name.c_str(),
+                                  static_cast<int>(captured.name.size()),
+                                  current.name.c_str(),
+                                  static_cast<int>(current.name.size()), TRUE) ==
+               CSTR_EQUAL &&
+           captured.wintcpOwned == current.wintcpOwned &&
+           captured.enabledKnown == current.enabledKnown &&
+           (!captured.enabledKnown || captured.enabled == current.enabled) &&
+           captured.blockingKnown == current.blockingKnown &&
+           (!captured.blockingKnown || captured.isBlocking == current.isBlocking) &&
+           captured.remoteAddrsKnown == current.remoteAddrsKnown &&
+           (!captured.remoteAddrsKnown || captured.remoteAddrs == current.remoteAddrs) &&
+           captured.localAddrsKnown == current.localAddrsKnown &&
+           (!captured.localAddrsKnown || captured.localAddrs == current.localAddrs) &&
+           captured.localPortsKnown == current.localPortsKnown &&
+           (!captured.localPortsKnown || captured.localPorts == current.localPorts) &&
+           captured.remotePortsKnown == current.remotePortsKnown &&
+           (!captured.remotePortsKnown || captured.remotePorts == current.remotePorts) &&
+           captured.applicationKnown == current.applicationKnown &&
+           (!captured.applicationKnown || captured.application == current.application) &&
+           captured.serviceKnown == current.serviceKnown &&
+           (!captured.serviceKnown || captured.service == current.service) &&
+           captured.directionKnown == current.directionKnown &&
+           (!captured.directionKnown || captured.direction == current.direction) &&
+           captured.actionKnown == current.actionKnown &&
+           (!captured.actionKnown || captured.action == current.action) &&
+           captured.protocolKnown == current.protocolKnown &&
+           (!captured.protocolKnown || captured.protocol == current.protocol) &&
+           captured.profilesKnown == current.profilesKnown &&
+           (!captured.profilesKnown || captured.profiles == current.profiles);
+}
+
+std::string FirewallRuleReviewJson(const BlockedRule& rule) {
+    std::ostringstream out;
+    out << ",\"direction\":" << (rule.directionKnown
+        ? std::to_string(rule.direction) : "null")
+        << ",\"action\":" << (rule.actionKnown
+        ? std::to_string(rule.action) : "null")
+        << ",\"protocol\":" << (rule.protocolKnown
+        ? std::to_string(rule.protocol) : "null")
+        << ",\"profiles\":" << (rule.profilesKnown
+        ? std::to_string(rule.profiles) : "null")
+        << ",\"localAddresses\":" << (rule.localAddrsKnown
+        ? JsonQuote(WideToUtf8(rule.localAddrs)) : "null")
+        << ",\"remoteAddresses\":" << (rule.remoteAddrsKnown
+        ? JsonQuote(WideToUtf8(rule.remoteAddrs)) : "null")
+        << ",\"localPorts\":" << (rule.localPortsKnown
+        ? JsonQuote(WideToUtf8(rule.localPorts)) : "null")
+        << ",\"remotePorts\":" << (rule.remotePortsKnown
+        ? JsonQuote(WideToUtf8(rule.remotePorts)) : "null")
+        << ",\"application\":" << (rule.applicationKnown
+        ? JsonQuote(WideToUtf8(rule.application)) : "null")
+        << ",\"service\":" << (rule.serviceKnown
+        ? JsonQuote(WideToUtf8(rule.service)) : "null");
+    return out.str();
+}
+
+bool SameCreatedFirewallRule(const RuleRequest& request,
+                             const BlockedRule& current) {
+    const auto sameScope = [](const std::wstring& actual,
+                              const std::wstring& expected) {
+        if (actual == expected) return true;
+        const bool actualAny = actual.empty() || actual == L"*";
+        const bool expectedAny = expected.empty() || expected == L"*";
+        return actualAny && expectedAny;
+    };
+    const LONG protocol = request.proto == L"tcp" ? 6
+        : request.proto == L"udp" ? 17 : 0;
+    const LONG direction = request.inbound ? 1 : 2;
+    const LONG action = request.allow ? 1 : 0;
+    const std::wstring process = request.process.empty() ? L"" : request.process;
+    return current.wintcpOwned && current.enabledKnown && current.enabled &&
+        current.directionKnown && current.direction == direction &&
+        current.actionKnown && current.action == action &&
+        current.protocolKnown && (protocol == 0
+            ? (current.protocol == 0 || current.protocol == 256)
+            : current.protocol == protocol) &&
+        current.profilesKnown && current.profiles == request.profiles &&
+        current.localAddrsKnown && sameScope(current.localAddrs, request.localAddress) &&
+        current.remoteAddrsKnown && sameScope(current.remoteAddrs, request.address) &&
+        current.localPortsKnown && sameScope(current.localPorts,
+            request.localPorts.empty() ? L"*" : request.localPorts) &&
+        current.remotePortsKnown && sameScope(current.remotePorts,
+            request.remotePorts.empty() ? L"*" : request.remotePorts) &&
+        current.applicationKnown && sameScope(current.application, process) &&
+        current.serviceKnown && sameScope(current.service, request.service);
+}
+
+const BlockedRule* FindFirewallRule(const std::vector<BlockedRule>& rules,
+                                    const std::wstring& name,
+                                    size_t* matches) {
+    const BlockedRule* found = nullptr;
+    size_t count = 0;
+    for (const BlockedRule& rule : rules) {
+        if (::CompareStringOrdinal(rule.name.c_str(),
+                                   static_cast<int>(rule.name.size()),
+                                   name.c_str(), static_cast<int>(name.size()),
+                                   TRUE) != CSTR_EQUAL)
+            continue;
+        found = &rule;
+        ++count;
+    }
+    if (matches != nullptr) *matches = count;
+    return found;
 }
 
 bool DecodeFormValue(const std::string& raw, std::string* out) {
@@ -2500,6 +2748,83 @@ bool IsIpAddress(const std::string& address) {
            ::InetPtonA(AF_INET6, address.c_str(), &v6) == 1;
 }
 
+bool IsServiceShortName(const std::string& name) {
+    if (name.empty() || name.size() > 256) return false;
+    for (unsigned char c : name) {
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string ProcessInstanceId(const Connection& row) {
+    if (!row.procMeta.processCreateKnown) return "";
+    return std::to_string(row.identity.pid) + ":" +
+           std::to_string(row.procMeta.processCreate.dwHighDateTime) + ":" +
+           std::to_string(row.procMeta.processCreate.dwLowDateTime);
+}
+
+std::string ProcessInstanceId(const WebProcessRow& row) {
+    if (!row.stats.processCreateKnown) return "";
+    return std::to_string(row.pid) + ":" +
+           std::to_string(row.stats.processCreateTime.dwHighDateTime) + ":" +
+           std::to_string(row.stats.processCreateTime.dwLowDateTime);
+}
+
+std::string ConnectionColumnText(const Connection& row, int column) {
+    wchar_t text[kMaxColumnText] = {};
+    ConnectionStore::GetColumnText(row, column, text, kMaxColumnText);
+    return WideToUtf8(text);
+}
+
+bool MatchesCloseCapture(const std::map<std::string, std::string>& fields,
+                         const Connection& row, uint64_t* connectionId) {
+    static const char* const names[] = {
+        "idExact", "processInstanceId", "pid", "proto", "local", "lport",
+        "remote", "rport", "state",
+    };
+    if (fields.size() != sizeof(names) / sizeof(names[0])) return false;
+    for (const char* name : names) {
+        if (fields.find(name) == fields.end()) return false;
+    }
+    uint64_t id = 0, pid = 0;
+    if (!ParseUint64Strict(fields.at("idExact"), &id) ||
+        !ParseUint64Strict(fields.at("pid"), &pid) || pid > MAXDWORD) {
+        return false;
+    }
+    if (fields.at("processInstanceId") != ProcessInstanceId(row) ||
+        fields.at("pid") != std::to_string(row.identity.pid) ||
+        fields.at("proto") != ConnectionColumnText(row, COL_PROTO) ||
+        fields.at("local") != ConnectionColumnText(row, COL_LOCAL) ||
+        fields.at("lport") != ConnectionColumnText(row, COL_LPORT) ||
+        fields.at("remote") != ConnectionColumnText(row, COL_REMOTE) ||
+        fields.at("rport") != ConnectionColumnText(row, COL_RPORT) ||
+        fields.at("state") != ConnectionColumnText(row, COL_STATE)) {
+        return false;
+    }
+    if (connectionId != nullptr) *connectionId = id;
+    return true;
+}
+
+bool SameCloseIdentity(const Connection& captured, const Connection& current) {
+    if (!SameProcessLifetime(captured, current) ||
+        captured.identity.family != AF_INET ||
+        current.identity.family != AF_INET ||
+        captured.identity.protocol != IPPROTO_TCP ||
+        current.identity.protocol != IPPROTO_TCP ||
+        captured.identity.state != MIB_TCP_STATE_ESTAB ||
+        current.identity.state != MIB_TCP_STATE_ESTAB ||
+        captured.identity.localPort != current.identity.localPort ||
+        captured.identity.remotePort != current.identity.remotePort ||
+        captured.identity.local4.S_un.S_addr != current.identity.local4.S_un.S_addr ||
+        captured.identity.remote4.S_un.S_addr != current.identity.remote4.S_un.S_addr) {
+        return false;
+    }
+    return true;
+}
+
 RuleRequest BlockRequest(const std::string& address, UINT port) {
     RuleRequest request;
     request.proto = L"tcp";
@@ -2507,6 +2832,44 @@ RuleRequest BlockRequest(const std::string& address, UINT port) {
     if (port != 0) request.remotePorts = std::to_wstring(port);
     request.label = L"WinTCP Web UI peer threshold";
     return request;
+}
+
+RuleRequest ApplicationBlockRequest(const std::wstring& processPath,
+                                    bool allow = false) {
+    RuleRequest request = BlockRequest("*", 0);
+    request.process = processPath;
+    request.allow = allow;
+    request.label = allow ? L"WinTCP Web UI application allow"
+                          : L"WinTCP Web UI application block";
+    return request;
+}
+
+std::string RuleNameFromPlan(const std::string& plan) {
+    constexpr char kPrefix[] = "rule ";
+    if (plan.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0) return {};
+    const size_t end = plan.find_first_of("\r\n", sizeof(kPrefix) - 1);
+    if (end == std::string::npos || end == sizeof(kPrefix) - 1) return {};
+    return plan.substr(sizeof(kPrefix) - 1, end - (sizeof(kPrefix) - 1));
+}
+
+bool ReadConfigSnapshot(ServerContext& context, std::string* body,
+                        std::string* etag) {
+    if (!ReadFileBounded(context.configPath, kMaxBodyBytes, body) ||
+        !IsValidJsonObject(*body)) {
+        if (!ReadAsset(context, L"config.default.json", body) ||
+            !IsValidJsonObject(*body)) {
+            *body = "{\"version\":" + std::to_string(kExpectedConfigVersion) +
+                    ",\"refreshSeconds\":5,\"rules\":[]}";
+        }
+    }
+    if (context.configEtag.empty() || context.configBytes != *body) {
+        std::string revision;
+        if (!RandomHex(16, &revision)) return false;
+        context.configBytes = *body;
+        context.configEtag = "\"" + revision + "\"";
+    }
+    *etag = context.configEtag;
+    return true;
 }
 
 // Serve an HTML shell with the session token substituted into its meta tag.
@@ -2717,28 +3080,10 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         return response;
     }
     if (path == "/api/config" && request.method == "GET") {
-        if (!ReadFileBounded(context.configPath, kMaxBodyBytes, &response.body)) {
-            // First run: serve the SHIPPED default (webui\config.default.json)
-            // rather than an in-code literal, so the file the build installs is
-            // the one the server actually falls back to. A missing or malformed
-            // asset degrades to a minimal object that keeps the page usable.
-            if (!ReadAsset(context, L"config.default.json", &response.body) ||
-                !IsValidJsonObject(response.body))
-                response.body = "{\"version\":" + std::to_string(kExpectedConfigVersion) + ",\"refreshSeconds\":5,\"rules\":[]}";
-        } else if (!IsValidJsonObject(response.body)) {
-            // Corruption recovery: a persisted config that is no longer a
-            // valid JSON object is unrecoverable as-is. Serve the shipped
-            // default (current schema version) so the page stays usable, and log
-            // the recovery so an operator can restore from the .1/.2 backups.
-            // A user-owned file must never surface as a 500.
-            if (ReadAsset(context, L"config.default.json", &response.body) &&
-                IsValidJsonObject(response.body)) {
-                WriteWebUiLog(context, WebUiLogLevel::Warn,
-                    "config.json was corrupt; recovered to schema v" +
-                    std::to_string(kExpectedConfigVersion) + " defaults (restore from .1/.2)");
-            } else {
-                response.body = "{\"version\":" + std::to_string(kExpectedConfigVersion) + ",\"rules\":[]}";
-            }
+        std::lock_guard<std::mutex> lock(context.configMutex);
+        if (!ReadConfigSnapshot(context, &response.body, &response.etag)) {
+            response.status = 500;
+            response.body = ErrorJson("configuration revision could not be generated");
         }
         return response;
     }
@@ -2817,10 +3162,32 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             response.body = ErrorJson("configuration must be a bounded JSON object without the session token");
             return response;
         }
-        if (!WriteFileAtomic(context.configPath, request.body)) {
-            response.status = 500;
-            response.body = ErrorJson("configuration could not be saved");
-            return response;
+        std::lock_guard<std::mutex> applyLock(context.configApplyMutex);
+        {
+            std::lock_guard<std::mutex> lock(context.configMutex);
+            std::string current, currentEtag;
+            if (!ReadConfigSnapshot(context, &current, &currentEtag)) {
+                response.status = 500;
+                response.body = ErrorJson("configuration revision could not be read");
+                return response;
+            }
+            const auto expected = request.headers.find("if-match");
+            if (expected != request.headers.end() && expected->second != currentEtag) {
+                response.status = 412;
+                response.etag = currentEtag;
+                response.body = ErrorJson("configuration changed; reload and merge before saving");
+                return response;
+            }
+            std::string revision;
+            if (!RandomHex(16, &revision) ||
+                !WriteFileAtomic(context.configPath, request.body)) {
+                response.status = 500;
+                response.body = ErrorJson("configuration could not be saved");
+                return response;
+            }
+            context.configBytes = request.body;
+            context.configEtag = "\"" + revision + "\"";
+            response.etag = context.configEtag;
         }
         // The config changed on disk - reload GeoIP from the new path, if any.
         // A clear or invalid path unloads the previous database.
@@ -3005,6 +3372,528 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             (sensitive ? std::string(outcomeRecorded ? "true" : "false") : "null") + "}";
         return response;
     }
+    if (path == "/api/connections/action/preview" &&
+        request.method == "POST") {
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/json") ||
+            request.body.size() > 4096 || !IsValidJsonObject(request.body)) {
+            response.status = 400;
+            response.body = ErrorJson("connection preview requires a valid JSON target");
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        static const char* const captureNames[] = {
+            "idExact", "processInstanceId", "pid", "proto", "local", "lport",
+            "remote", "rport", "state",
+        };
+        for (const char* name : captureNames) {
+            std::string value;
+            if (!ExtractJsonString(request.body, name, &value)) {
+                response.status = 400;
+                response.body = ErrorJson("connection preview is missing an exact target field");
+                return response;
+            }
+            fields.emplace(name, std::move(value));
+        }
+        uint64_t requestedId = 0;
+        if (!ParseUint64Strict(fields["idExact"], &requestedId)) {
+            response.status = 400;
+            response.body = ErrorJson("connection id must be an exact decimal string");
+            return response;
+        }
+        Connection captured;
+        size_t matches = 0;
+        ULONGLONG tick = context.connectionSnapshotTick.load();
+        {
+            std::lock_guard<std::mutex> lock(g_storeMutex);
+            for (const Connection& row : context.store.Rows()) {
+                if (row.id != requestedId) continue;
+                if (!MatchesCloseCapture(fields, row, nullptr)) continue;
+                captured = row;
+                ++matches;
+            }
+        }
+        if (matches != 1) {
+            response.status = 409;
+            response.body = ErrorJson(matches == 0
+                ? "captured connection is stale or does not match the current endpoint"
+                : "captured connection identity is ambiguous");
+            return response;
+        }
+        const std::string reason =
+            ConnectionCloseCapabilityReason(captured, IsElevated());
+        std::string nonce;
+        if (reason.empty()) {
+            std::lock_guard<std::mutex> actionLock(context.connectionActionMutex);
+            for (auto it = context.pendingConnectionActions.begin();
+                 it != context.pendingConnectionActions.end();) {
+                if (it->second.expires < ::GetTickCount64())
+                    it = context.pendingConnectionActions.erase(it);
+                else
+                    ++it;
+            }
+            while (context.pendingConnectionActions.size() >=
+                   kMaxPendingConnectionActions)
+                context.pendingConnectionActions.erase(
+                    context.pendingConnectionActions.begin());
+            if (!RandomHex(16, &nonce)) {
+                response.status = 500;
+                response.body = ErrorJson("secure preview token generation failed");
+                return response;
+            }
+            const ULONGLONG now = ::GetTickCount64();
+            const ULONGLONG age = tick > 0 && now >= tick ? now - tick : 0;
+            context.pendingConnectionActions[nonce] =
+                PendingConnectionAction{captured, age, now + 30000};
+        }
+        const ULONGLONG now = ::GetTickCount64();
+        const ULONGLONG age = tick > 0 && now >= tick ? now - tick : 0;
+        response.body = "{\"ok\":true,\"canExecute\":" +
+            std::string(reason.empty() ? "true" : "false") +
+            ",\"requiresElevation\":true,\"reason\":" +
+            (reason.empty() ? "null" : JsonQuote(reason)) +
+            ",\"nonce\":" + (nonce.empty() ? "null" : JsonQuote(nonce)) +
+            ",\"expiresInMs\":" + (nonce.empty() ? "0" : "30000") +
+            ",\"snapshotKnown\":" + std::string(tick > 0 ? "true" : "false") +
+            ",\"snapshotAgeMs\":" + std::to_string(age) + "}";
+        return response;
+    }
+    if (path == "/api/connections/action/execute" &&
+        request.method == "POST") {
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        std::string nonce;
+        if (!ContentTypeIs(request, "application/json") ||
+            request.body.size() > 1024 || !IsValidJsonObject(request.body) ||
+            !ExtractJsonString(request.body, "nonce", &nonce) ||
+            nonce.size() != 32) {
+            response.status = 400;
+            response.body = ErrorJson("connection execute requires a valid one-time preview token");
+            return response;
+        }
+        PendingConnectionAction action;
+        {
+            std::lock_guard<std::mutex> actionLock(context.connectionActionMutex);
+            const auto pending = context.pendingConnectionActions.find(nonce);
+            if (pending == context.pendingConnectionActions.end() ||
+                pending->second.expires < ::GetTickCount64()) {
+                if (pending != context.pendingConnectionActions.end())
+                    context.pendingConnectionActions.erase(pending);
+                response.status = 410;
+                response.body = ErrorJson("preview expired or already used; preview the action again");
+                return response;
+            }
+            action = pending->second;
+            context.pendingConnectionActions.erase(pending);
+        }
+        Snapshot current;
+        SnapshotOptions options;
+        options.resolveProcesses = true;
+        bool enumerated = false;
+        {
+            std::lock_guard<std::mutex> lock(g_storeMutex);
+            enumerated = context.source.Build(options, &current);
+        }
+        if (!enumerated) {
+            response.status = 503;
+            response.body = ErrorJson("the connection table could not be refreshed; no action was attempted");
+            return response;
+        }
+        const Connection* target = nullptr;
+        size_t matches = 0;
+        for (const Connection& row : current.rows) {
+            if (!SameCloseIdentity(action.captured, row)) continue;
+            target = &row;
+            ++matches;
+        }
+        if (matches != 1 || target == nullptr) {
+            response.status = 409;
+            response.body = ErrorJson(matches == 0
+                ? "captured connection is gone or its process lifetime changed; no action was attempted"
+                : "captured connection is ambiguous; no action was attempted");
+            return response;
+        }
+        const std::string attempt = "{\"type\":\"connection-close-attempt\",\"connectionId\":" +
+            JsonQuote(std::to_string(action.captured.id)) +
+            ",\"pid\":" + std::to_string(action.captured.identity.pid) + "}";
+        if (!AppendAudit(context, attempt)) {
+            response.status = 500;
+            response.body = ErrorJson("connection close was not attempted because the audit log is unavailable");
+            return response;
+        }
+        MutateOptions mutate;
+        mutate.yes = true;
+        const CommandResult result = CloseRow(*target, mutate);
+        const bool ok = result.exitCode == kExitOk;
+        const std::string outcome = "{\"type\":\"connection-close\",\"connectionId\":" +
+            JsonQuote(std::to_string(action.captured.id)) +
+            ",\"result\":" + JsonQuote(ok ? "success" : "failed") + "}";
+        const bool auditRecorded = AppendAudit(context, outcome);
+        if (!ok) response.status = 409;
+        response.body = "{\"ok\":" + std::string(ok ? "true" : "false") +
+            ",\"status\":" + JsonQuote(ok ? "succeeded" : "failed") +
+            ",\"connection\":{\"status\":" +
+            JsonQuote(ok ? "succeeded" : "failed") +
+            ",\"reason\":" + (ok ? "null" : JsonQuote(result.err + result.out)) +
+            "},\"auditRecorded\":" + (auditRecorded ? "true" : "false") + "}";
+        return response;
+    }
+    if (path == "/api/firewall/rule/create/preview" && request.method == "POST") {
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = ErrorJson("rule creation preview requires form encoding");
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        static const char* const names[] = {
+            "direction", "action", "proto", "address", "localAddress",
+            "localPorts", "remotePorts", "process", "service", "profiles",
+            "label",
+        };
+        if (!ParseForm(request.body, &fields) || fields.size() !=
+                sizeof(names) / sizeof(names[0])) {
+            response.status = 400;
+            response.body = ErrorJson("rule creation preview needs the complete explicit rule form");
+            return response;
+        }
+        for (const char* name : names) {
+            if (fields.find(name) == fields.end()) {
+                response.status = 400;
+                response.body = ErrorJson("rule creation preview is missing an explicit field");
+                return response;
+            }
+        }
+        RuleRequest rule;
+        if (fields["direction"] != "inbound" && fields["direction"] != "outbound") {
+            response.status = 400;
+            response.body = ErrorJson("direction must be inbound or outbound");
+            return response;
+        }
+        if (fields["action"] != "block" && fields["action"] != "allow") {
+            response.status = 400;
+            response.body = ErrorJson("action must be block or allow");
+            return response;
+        }
+        if (fields["proto"] != "tcp" && fields["proto"] != "udp" &&
+            fields["proto"] != "any") {
+            response.status = 400;
+            response.body = ErrorJson("protocol must be tcp, udp, or any");
+            return response;
+        }
+        uint64_t profileBits = 0;
+        if (!ParseUint64Strict(fields["profiles"], &profileBits) ||
+            profileBits > 0x7fffffffULL || profileBits == 0) {
+            response.status = 400;
+            response.body = ErrorJson("profiles must be an explicit non-empty Windows profile mask");
+            return response;
+        }
+        if (!Utf8ToWide(fields["address"], &rule.address) ||
+            !Utf8ToWide(fields["localAddress"], &rule.localAddress) ||
+            !Utf8ToWide(fields["localPorts"], &rule.localPorts) ||
+            !Utf8ToWide(fields["remotePorts"], &rule.remotePorts) ||
+            !Utf8ToWide(fields["process"], &rule.process) ||
+            !Utf8ToWide(fields["service"], &rule.service) ||
+            !Utf8ToWide(fields["label"], &rule.label)) {
+            response.status = 400;
+            response.body = ErrorJson("rule fields must be valid UTF-8");
+            return response;
+        }
+        rule.inbound = fields["direction"] == "inbound";
+        rule.allow = fields["action"] == "allow";
+        rule.proto.assign(fields["proto"].begin(), fields["proto"].end());
+        rule.profiles = static_cast<LONG>(profileBits);
+        if (rule.label.empty()) rule.label = L"WinTCP Web UI custom rule";
+        const CommandResult plan = CmdRule(rule, true, false);
+        if (plan.exitCode != kExitOk) {
+            response.status = 400;
+            const std::string message = plan.err + plan.out;
+            const std::string field = ContainsIgnoreCase(message, "local address") ? "localAddress"
+                : ContainsIgnoreCase(message, "remote address") ? "address"
+                : ContainsIgnoreCase(message, "port") ? "ports"
+                : ContainsIgnoreCase(message, "protocol") ? "proto"
+                : ContainsIgnoreCase(message, "process") ? "process"
+                : ContainsIgnoreCase(message, "service") ? "service"
+                : ContainsIgnoreCase(message, "profile") ? "profiles" : "rule";
+            response.body = "{\"ok\":false,\"field\":" + JsonQuote(field) +
+                ",\"message\":" + JsonQuote(message) + "}";
+            return response;
+        }
+        const std::string ruleName = RuleNameFromPlan(plan.out);
+        if (ruleName.empty()) {
+            response.status = 500;
+            response.body = ErrorJson("rule preview did not produce an exact firewall rule identity");
+            return response;
+        }
+        if (!IsElevated()) {
+            response.body = "{\"ok\":true,\"canExecute\":false,\"requiresElevation\":true,"
+                "\"reason\":\"Run WinTCP as administrator to create firewall rules\","
+                "\"operation\":\"create\",\"nonce\":null,\"name\":" +
+                JsonQuote(ruleName) + ",\"plan\":" + JsonQuote(plan.out) + "}";
+            return response;
+        }
+        std::lock_guard<std::mutex> actionLock(context.firewallActionMutex);
+        const ULONGLONG now = ::GetTickCount64();
+        for (auto it = context.pendingFirewallActions.begin();
+             it != context.pendingFirewallActions.end();) {
+            if (it->second.expires < now) it = context.pendingFirewallActions.erase(it);
+            else ++it;
+        }
+        while (context.pendingFirewallActions.size() >= kMaxPendingBlocks)
+            context.pendingFirewallActions.erase(context.pendingFirewallActions.begin());
+        std::string nonce;
+        if (!RandomHex(16, &nonce)) {
+            response.status = 500;
+            response.body = ErrorJson("secure preview token generation failed");
+            return response;
+        }
+        PendingFirewallRuleAction pending;
+        pending.createRequest = rule;
+        pending.operation = "create";
+        pending.ruleName = ruleName;
+        pending.create = true;
+        pending.expires = now + 30000;
+        context.pendingFirewallActions[nonce] = std::move(pending);
+        response.body = "{\"ok\":true,\"canExecute\":true,\"requiresElevation\":true,"
+            "\"reason\":null,\"operation\":\"create\",\"nonce\":" +
+            JsonQuote(nonce) + ",\"expiresInMs\":30000,\"name\":" +
+            JsonQuote(ruleName) + ",\"plan\":" + JsonQuote(plan.out) + "}";
+        return response;
+    }
+    if (path == "/api/firewall/rule/preview" && request.method == "POST") {
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        std::string nameUtf8;
+        std::string operation;
+        if (!ContentTypeIs(request, "application/json") || request.body.size() > 4096 ||
+            !IsValidJsonObject(request.body) ||
+            !ExtractJsonString(request.body, "name", &nameUtf8) ||
+            !ExtractJsonString(request.body, "operation", &operation) ||
+            (operation != "enable" && operation != "disable" && operation != "remove")) {
+            response.status = 400;
+            response.body = ErrorJson("rule preview requires a rule name and enable, disable, or remove operation");
+            return response;
+        }
+        std::wstring name;
+        if (!Utf8ToWide(nameUtf8, &name) || name.empty() || name.size() > kMaxRuleNameChars) {
+            response.status = 400;
+            response.body = ErrorJson("firewall rule name is invalid");
+            return response;
+        }
+        std::vector<BlockedRule> rules;
+        std::wstring inventoryError;
+        std::wstring inventoryWarning;
+        if (!ListFirewallInventory(&rules, &inventoryError, &inventoryWarning)) {
+            response.status = 503;
+            response.body = ErrorJson("firewall inventory is unavailable: " + WideToUtf8(inventoryError));
+            return response;
+        }
+        size_t matches = 0;
+        const BlockedRule* rule = FindFirewallRule(rules, name, &matches);
+        if (matches != 1 || rule == nullptr) {
+            response.status = 409;
+            response.body = ErrorJson(matches == 0
+                ? "firewall rule is no longer present; refresh the inventory"
+                : "firewall rule identity is ambiguous; no action was prepared");
+            return response;
+        }
+        if (!rule->wintcpOwned) {
+            response.status = 403;
+            response.body = ErrorJson("only rules managed by WinTCP can be changed here");
+            return response;
+        }
+        if (operation != "remove" && !rule->enabledKnown) {
+            response.status = 409;
+            response.body = ErrorJson("Windows Firewall did not return this rule's enabled state");
+            return response;
+        }
+        if ((operation == "enable" && rule->enabled) ||
+            (operation == "disable" && !rule->enabled)) {
+            response.status = 409;
+            response.body = ErrorJson("the rule already has the requested enabled state");
+            return response;
+        }
+        const bool elevated = IsElevated();
+        if (!elevated) {
+            response.body = "{\"ok\":true,\"canExecute\":false,\"requiresElevation\":true,"
+                "\"reason\":\"Run WinTCP as administrator to change firewall rules\","
+                "\"nonce\":null,\"expiresInMs\":0,\"operation\":" + JsonQuote(operation) +
+                ",\"name\":" + JsonQuote(WideToUtf8(rule->name)) +
+                ",\"enabled\":" + (rule->enabledKnown
+                    ? (rule->enabled ? "true" : "false") : "null") +
+                ",\"ownership\":\"wintcp\",\"warning\":" +
+                    (inventoryWarning.empty() ? "null" : JsonQuote(WideToUtf8(inventoryWarning))) +
+                FirewallRuleReviewJson(*rule) + "}";
+            return response;
+        }
+        std::lock_guard<std::mutex> actionLock(context.firewallActionMutex);
+        const ULONGLONG now = ::GetTickCount64();
+        for (auto it = context.pendingFirewallActions.begin();
+             it != context.pendingFirewallActions.end();) {
+            if (it->second.expires < now) it = context.pendingFirewallActions.erase(it);
+            else ++it;
+        }
+        while (context.pendingFirewallActions.size() >= kMaxPendingBlocks)
+            context.pendingFirewallActions.erase(context.pendingFirewallActions.begin());
+        std::string nonce;
+        if (!RandomHex(16, &nonce)) {
+            response.status = 500;
+            response.body = ErrorJson("secure preview token generation failed");
+            return response;
+        }
+        PendingFirewallRuleAction action;
+        action.captured = *rule;
+        action.operation = operation;
+        action.ruleName = WideToUtf8(rule->name);
+        action.expires = now + 30000;
+        context.pendingFirewallActions[nonce] = std::move(action);
+        response.body = "{\"ok\":true,\"nonce\":" + JsonQuote(nonce) +
+            ",\"canExecute\":true,\"requiresElevation\":true,\"reason\":null,"
+            "\"expiresInMs\":30000,\"operation\":" + JsonQuote(operation) +
+            ",\"name\":" + JsonQuote(WideToUtf8(rule->name)) +
+            ",\"enabled\":" + (rule->enabledKnown
+                ? (rule->enabled ? "true" : "false") : "null") +
+            ",\"ownership\":\"wintcp\",\"warning\":" +
+                (inventoryWarning.empty() ? "null" : JsonQuote(WideToUtf8(inventoryWarning))) +
+            FirewallRuleReviewJson(*rule) + "}";
+        return response;
+    }
+    if (path == "/api/firewall/rule/execute" && request.method == "POST") {
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        std::string nonce;
+        if (!ContentTypeIs(request, "application/json") || request.body.size() > 1024 ||
+            !IsValidJsonObject(request.body) ||
+            !ExtractJsonString(request.body, "nonce", &nonce) || nonce.size() != 32) {
+            response.status = 400;
+            response.body = ErrorJson("rule execution requires a valid one-time preview token");
+            return response;
+        }
+        PendingFirewallRuleAction action;
+        {
+            std::lock_guard<std::mutex> actionLock(context.firewallActionMutex);
+            const auto pending = context.pendingFirewallActions.find(nonce);
+            if (pending == context.pendingFirewallActions.end() ||
+                pending->second.expires < ::GetTickCount64()) {
+                if (pending != context.pendingFirewallActions.end())
+                    context.pendingFirewallActions.erase(pending);
+                response.status = 410;
+                response.body = ErrorJson("preview expired or already used; preview the action again");
+                return response;
+            }
+            action = pending->second;
+            context.pendingFirewallActions.erase(pending);
+        }
+        if (action.create) {
+            std::wstring expectedName;
+            if (!Utf8ToWide(action.ruleName, &expectedName) || expectedName.empty()) {
+                response.status = 500;
+                response.body = ErrorJson("the reviewed rule identity is invalid");
+                return response;
+            }
+            const std::string attempt = "{\"type\":\"firewall-rule-attempt\",\"operation\":\"create\",\"name\":" +
+                JsonQuote(action.ruleName) + "}";
+            if (!AppendAudit(context, attempt)) {
+                response.status = 500;
+                response.body = ErrorJson("rule creation was not attempted because the audit log is unavailable");
+                return response;
+            }
+            const CommandResult created = CmdRule(action.createRequest, false, true);
+            std::vector<BlockedRule> readback;
+            std::wstring readbackError;
+            const bool readbackAvailable = ListFirewallInventory(&readback, &readbackError);
+            size_t matches = 0;
+            const BlockedRule* installed = readbackAvailable
+                ? FindFirewallRule(readback, expectedName, &matches) : nullptr;
+            const bool verified = created.exitCode == kExitOk && readbackAvailable &&
+                matches == 1 && installed != nullptr &&
+                SameCreatedFirewallRule(action.createRequest, *installed);
+            const bool alreadyPresent = created.out.find("already present;") != std::string::npos;
+            const std::string status = verified
+                ? (alreadyPresent ? "already-present" : "created")
+                : (created.exitCode != kExitOk ? "failed" :
+                   readbackAvailable ? "unverified" : "readback-unavailable");
+            const std::string audit = "{\"type\":\"firewall-rule-result\",\"operation\":\"create\",\"name\":" +
+                JsonQuote(action.ruleName) + ",\"result\":" + JsonQuote(status) + "}";
+            const bool auditRecorded = AppendAudit(context, audit);
+            const std::string reason = verified ? std::string()
+                : created.exitCode != kExitOk ? created.err + created.out
+                : !readbackAvailable ? WideToUtf8(readbackError)
+                : "Windows Firewall read-back did not match every reviewed rule field";
+            response.status = verified ? 200 : 409;
+            response.body = "{\"ok\":" + std::string(verified ? "true" : "false") +
+                ",\"operation\":\"create\",\"status\":" + JsonQuote(status) +
+                ",\"ruleStatus\":" + JsonQuote(status) +
+                ",\"name\":" + JsonQuote(action.ruleName) +
+                ",\"ruleName\":" + JsonQuote(action.ruleName) +
+                ",\"reason\":" + (verified ? "null" : JsonQuote(reason)) +
+                ",\"auditRecorded\":" + (auditRecorded ? "true" : "false") + "}";
+            return response;
+        }
+        std::vector<BlockedRule> rules;
+        std::wstring inventoryError;
+        if (!ListFirewallInventory(&rules, &inventoryError)) {
+            response.status = 503;
+            response.body = ErrorJson("firewall inventory is unavailable; no rule action was attempted");
+            return response;
+        }
+        size_t matches = 0;
+        const BlockedRule* current = FindFirewallRule(rules, action.captured.name, &matches);
+        if (matches != 1 || current == nullptr ||
+            !SameFirewallRuleCapture(action.captured, *current)) {
+            response.status = 409;
+            response.body = ErrorJson("the rule changed or disappeared after review; no action was attempted");
+            return response;
+        }
+        const std::string attempt = "{\"type\":\"firewall-rule-attempt\",\"operation\":" +
+            JsonQuote(action.operation) + ",\"name\":" + JsonQuote(WideToUtf8(action.captured.name)) + "}";
+        if (!AppendAudit(context, attempt)) {
+            response.status = 500;
+            response.body = ErrorJson("rule action was not attempted because the audit log is unavailable");
+            return response;
+        }
+        std::wstring actionError;
+        const bool changed = action.operation == "remove"
+            ? RemoveBlockedRule(action.captured.name, &actionError)
+            : SetBlockedRuleEnabled(action.captured.name, action.operation == "enable", &actionError);
+        std::vector<BlockedRule> readback;
+        std::wstring readbackError;
+        const bool readbackAvailable = ListFirewallInventory(&readback, &readbackError);
+        size_t remainingMatches = 0;
+        const BlockedRule* after = readbackAvailable
+            ? FindFirewallRule(readback, action.captured.name, &remainingMatches) : nullptr;
+        const bool verified = changed && readbackAvailable &&
+            (action.operation == "remove"
+                ? remainingMatches == 0
+                : remainingMatches == 1 && after != nullptr && after->enabledKnown &&
+                  after->enabled == (action.operation == "enable"));
+        const std::string audit = "{\"type\":\"firewall-rule-result\",\"operation\":" +
+            JsonQuote(action.operation) + ",\"name\":" + JsonQuote(WideToUtf8(action.captured.name)) +
+            ",\"result\":" + JsonQuote(verified ? "verified" : (changed ? "unverified" : "failed")) + "}";
+        const bool auditRecorded = AppendAudit(context, audit);
+        response.status = verified ? 200 : 409;
+        response.body = "{\"ok\":" + std::string(verified ? "true" : "false") +
+            ",\"status\":" + JsonQuote(verified ? "verified" : (changed ? "unverified" : "failed")) +
+            ",\"operation\":" + JsonQuote(action.operation) +
+            ",\"name\":" + JsonQuote(WideToUtf8(action.captured.name)) +
+            ",\"reason\":" + (verified ? "null" : JsonQuote(
+                !changed ? WideToUtf8(actionError) : (!readbackAvailable
+                    ? WideToUtf8(readbackError) : "Windows Firewall read-back did not match the requested change"))) +
+            ",\"auditRecorded\":" + (auditRecorded ? "true" : "false") + "}";
+        return response;
+    }
     if (path == "/api/block/preview" && request.method == "POST") {
         if (!AuthenticateMutation(context, request, &response)) {
             response.body = ErrorJson("mutation authorization failed");
@@ -3016,37 +3905,209 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             return response;
         }
         std::map<std::string, std::string> fields;
-        UINT port = 0;
-        if (!ParseForm(request.body, &fields) || fields.size() != 2 ||
-            fields.find("address") == fields.end() || fields.find("port") == fields.end() ||
-            !IsIpAddress(fields["address"]) ||
-            !ParsePort(fields["port"], &port, true)) {
+        if (!ParseForm(request.body, &fields)) {
             response.status = 400;
-            response.body = ErrorJson("block preview needs a literal IP address and port 0..65535 (0 means all remote TCP ports)");
+            response.body = ErrorJson("block preview form could not be parsed");
             return response;
         }
-        const CommandResult plan = CmdRule(BlockRequest(fields["address"], port),
-                                           true, false);
+        const auto scopeField = fields.find("scope");
+        const std::string scope = scopeField == fields.end() ? "peer" : scopeField->second;
+        RuleRequest rule;
+        if (scope == "peer") {
+            UINT port = 0;
+            const size_t expectedFields = scopeField == fields.end() ? 2 : 3;
+            if (fields.size() != expectedFields || fields.find("address") == fields.end() ||
+                fields.find("port") == fields.end() || !IsIpAddress(fields["address"]) ||
+                !ParsePort(fields["port"], &port, true)) {
+                response.status = 400;
+                response.body = ErrorJson("peer block preview needs a literal IP address and port 0..65535 (0 means all remote TCP ports)");
+                return response;
+            }
+            rule = BlockRequest(fields["address"], port);
+        } else if (scope == "application" || scope == "application-allow") {
+            uint64_t pid = 0;
+            std::wstring processPath;
+            const bool fieldsValid = fields.size() == 4 &&
+                fields.find("process") != fields.end() &&
+                fields.find("pid") != fields.end() &&
+                fields.find("instanceId") != fields.end() &&
+                ParseUint64Strict(fields["pid"], &pid) && pid > 0 && pid <= MAXDWORD &&
+                !fields["instanceId"].empty() && fields["instanceId"].size() <= 128 &&
+                Utf8ToWide(fields["process"], &processPath) && !processPath.empty();
+            if (!fieldsValid) {
+                response.status = 400;
+                response.body = ErrorJson("application block preview needs an exact process PID, lifetime, and full image path");
+                return response;
+            }
+            const WebProcessSnapshot snapshot = context.processes.Read();
+            if (!snapshot.known || context.processes.AgeMs() > 5000) {
+                response.status = 503;
+                response.body = ErrorJson("the process snapshot is unavailable or stale; refresh before reviewing an application rule");
+                return response;
+            }
+            size_t matches = 0;
+            for (const WebProcessRow& row : snapshot.rows) {
+                if (row.pid != static_cast<DWORD>(pid) ||
+                    ProcessInstanceId(row) != fields["instanceId"] ||
+                    row.path != processPath) continue;
+                ++matches;
+            }
+            if (matches != 1) {
+                response.status = 409;
+                response.body = ErrorJson("the selected process lifetime or executable path changed; refresh and review again");
+                return response;
+            }
+            rule = ApplicationBlockRequest(processPath, scope == "application-allow");
+        } else if (scope == "application-peer" || scope == "service-peer") {
+            const bool serviceScoped = scope == "service-peer";
+            static const char* const captureNames[] = {
+                "idExact", "processInstanceId", "pid", "proto", "local", "lport",
+                "remote", "rport", "state",
+            };
+            const bool capturesPresent = fields.size() == (serviceScoped ? 13 : 12) &&
+                fields.find("process") != fields.end() &&
+                (!serviceScoped || fields.find("service") != fields.end());
+            if (!capturesPresent) {
+                response.status = 400;
+                response.body = ErrorJson("application-peer preview needs the exact connection tuple and executable path");
+                return response;
+            }
+            std::map<std::string, std::string> capture;
+            for (const char* name : captureNames) {
+                const auto value = fields.find(name);
+                if (value == fields.end()) {
+                    response.status = 400;
+                    response.body = ErrorJson("application-peer preview is missing an exact connection field");
+                    return response;
+                }
+                capture.emplace(name, value->second);
+            }
+            uint64_t requestedId = 0;
+            uint64_t pid = 0;
+            UINT remotePort = 0;
+            std::wstring processPath;
+            if (!ParseUint64Strict(capture["idExact"], &requestedId) ||
+                !ParseUint64Strict(capture["pid"], &pid) || pid == 0 || pid > MAXDWORD ||
+                !ParsePort(capture["rport"], &remotePort, false) || remotePort == 0 ||
+                !IsIpAddress(capture["remote"]) ||
+                fields["instanceId"] != capture["processInstanceId"] ||
+                (serviceScoped && !IsServiceShortName(fields["service"])) ||
+                !Utf8ToWide(fields["process"], &processPath) || processPath.empty()) {
+                response.status = 400;
+                response.body = ErrorJson("application-peer preview has an invalid connection target or executable path");
+                return response;
+            }
+            Connection captured;
+            size_t matches = 0;
+            const ULONGLONG connectionTick = context.connectionSnapshotTick.load();
+            const ULONGLONG now = ::GetTickCount64();
+            if (connectionTick == 0 || now < connectionTick || now - connectionTick > 5000) {
+                response.status = 503;
+                response.body = ErrorJson("the connection snapshot is unavailable or stale; refresh before reviewing an application rule");
+                return response;
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_storeMutex);
+                for (const Connection& row : context.store.Rows()) {
+                    if (row.id != requestedId || (row.flags & kRowRemoved) != 0 ||
+                        !MatchesCloseCapture(capture, row, nullptr)) continue;
+                    captured = row;
+                    ++matches;
+                }
+            }
+            if (matches != 1 || captured.identity.protocol != IPPROTO_TCP ||
+                captured.identity.state != MIB_TCP_STATE_ESTAB ||
+                captured.display.processPath.empty() ||
+                captured.display.processPath != processPath ||
+                !captured.procMeta.processCreateKnown) {
+                response.status = 409;
+                response.body = ErrorJson("the selected connection or owning process lifetime is stale, ambiguous, or unsupported");
+                return response;
+            }
+            if (serviceScoped &&
+                (captured.display.serviceName.empty() ||
+                 WideToUtf8(captured.display.serviceName) != fields["service"])) {
+                response.status = 409;
+                response.body = ErrorJson("the selected connection has no matching known Windows service scope");
+                return response;
+            }
+            const WebProcessSnapshot snapshot = context.processes.Read();
+            if (!snapshot.known || context.processes.AgeMs() > 5000) {
+                response.status = 503;
+                response.body = ErrorJson("the process snapshot is unavailable or stale; refresh before reviewing an application rule");
+                return response;
+            }
+            size_t processMatches = 0;
+            for (const WebProcessRow& row : snapshot.rows) {
+                if (row.pid != static_cast<DWORD>(pid) ||
+                    ProcessInstanceId(row) != capture["processInstanceId"] ||
+                    row.path != processPath) continue;
+                ++processMatches;
+            }
+            if (processMatches != 1 || pid != captured.identity.pid ||
+                capture["processInstanceId"] != ProcessInstanceId(captured)) {
+                response.status = 409;
+                response.body = ErrorJson("the owning process lifetime or executable path changed; refresh and review again");
+                return response;
+            }
+            rule = BlockRequest(capture["remote"], remotePort);
+            rule.process = processPath;
+            if (serviceScoped) {
+                if (!Utf8ToWide(fields["service"], &rule.service)) {
+                    response.status = 400;
+                    response.body = ErrorJson("the Windows service short name is not valid UTF-8");
+                    return response;
+                }
+                rule.label = L"WinTCP Web UI service peer";
+            } else {
+                rule.label = L"WinTCP Web UI application peer";
+            }
+        } else {
+            response.status = 400;
+            response.body = ErrorJson("block scope must be peer, application, application-allow, application-peer, or service-peer");
+            return response;
+        }
+        const CommandResult plan = CmdRule(rule, true, false);
         if (plan.exitCode != kExitOk) {
             response.status = 400;
             response.body = "{\"ok\":false,\"message\":" + JsonQuote(plan.err + plan.out) + "}";
             return response;
         }
-        for (auto it = context.pendingBlocks.begin(); it != context.pendingBlocks.end();) {
-            if (it->second.expires < ::GetTickCount64()) it = context.pendingBlocks.erase(it);
-            else ++it;
+        const std::string ruleName = RuleNameFromPlan(plan.out);
+        if (ruleName.empty()) {
+            response.status = 500;
+            response.body = ErrorJson("block preview did not produce an exact firewall rule identity");
+            return response;
         }
-        while (context.pendingBlocks.size() >= kMaxPendingBlocks)
-            context.pendingBlocks.erase(context.pendingBlocks.begin());
+        if (!IsElevated()) {
+            response.body = "{\"ok\":true,\"canExecute\":false,\"requiresElevation\":true,"
+                "\"reason\":\"Run WinTCP as administrator to create firewall rules\","
+                "\"scope\":" + JsonQuote(scope) +
+                ",\"ruleName\":" + JsonQuote(ruleName) +
+                ",\"plan\":" + JsonQuote(plan.out) + "}";
+            return response;
+        }
         std::string nonce;
         if (!RandomHex(16, &nonce)) {
             response.status = 500;
             response.body = ErrorJson("secure preview token generation failed");
             return response;
         }
-        context.pendingBlocks[nonce] = PendingBlock{
-            fields["address"], port, ::GetTickCount64() + 30000};
-        response.body = "{\"ok\":true,\"nonce\":" + JsonQuote(nonce) +
+        {
+            std::lock_guard<std::mutex> actionLock(context.blockActionMutex);
+            for (auto it = context.pendingBlocks.begin(); it != context.pendingBlocks.end();) {
+                if (it->second.expires < ::GetTickCount64()) it = context.pendingBlocks.erase(it);
+                else ++it;
+            }
+            while (context.pendingBlocks.size() >= kMaxPendingBlocks)
+                context.pendingBlocks.erase(context.pendingBlocks.begin());
+            context.pendingBlocks[nonce] = PendingBlock{
+                rule, scope, ruleName, ::GetTickCount64() + 30000};
+        }
+        response.body = "{\"ok\":true,\"canExecute\":true,\"requiresElevation\":true,"
+                        "\"reason\":null,\"nonce\":" + JsonQuote(nonce) +
+                        ",\"scope\":" + JsonQuote(scope) +
+                        ",\"ruleName\":" + JsonQuote(ruleName) +
                         ",\"plan\":" + JsonQuote(plan.out) + "}";
         return response;
     }
@@ -3067,35 +4128,59 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             response.body = ErrorJson("block commit requires a valid one-time preview token");
             return response;
         }
-        const auto pending = context.pendingBlocks.find(fields["nonce"]);
-        if (pending == context.pendingBlocks.end() ||
-            pending->second.expires < ::GetTickCount64()) {
-            if (pending != context.pendingBlocks.end()) context.pendingBlocks.erase(pending);
-            response.status = 403;
-            response.body = ErrorJson("preview expired or already used; preview the action again");
-            return response;
+        PendingBlock action;
+        {
+            std::lock_guard<std::mutex> actionLock(context.blockActionMutex);
+            const auto pending = context.pendingBlocks.find(fields["nonce"]);
+            if (pending == context.pendingBlocks.end() ||
+                pending->second.expires < ::GetTickCount64()) {
+                if (pending != context.pendingBlocks.end()) context.pendingBlocks.erase(pending);
+                response.status = 403;
+                response.body = ErrorJson("preview expired or already used; preview the action again");
+                return response;
+            }
+            action = pending->second;
+            context.pendingBlocks.erase(pending);
         }
-        const PendingBlock action = pending->second;
-        context.pendingBlocks.erase(pending);
-        const std::string attempt = "{\"type\":\"firewall-block-attempt\",\"address\":" +
-                                    JsonQuote(action.address) + ",\"port\":" +
-                                    std::to_string(action.port) + "}";
+        const std::string attempt = "{\"type\":\"firewall-block-attempt\",\"scope\":" +
+                                    JsonQuote(action.scope) + ",\"address\":" +
+                                    JsonQuote(WideToUtf8(action.rule.address)) + ",\"remotePort\":" +
+                                    JsonQuote(WideToUtf8(action.rule.remotePorts)) +
+                                    ",\"process\":" + JsonQuote(WideToUtf8(action.rule.process)) +
+                                    ",\"ruleName\":" +
+                                    JsonQuote(action.ruleName) + "}";
         if (!AppendAudit(context, attempt)) {
             response.status = 500;
             response.body = ErrorJson("firewall action was not attempted because the audit log is unavailable");
             return response;
         }
-        const CommandResult result = CmdRule(BlockRequest(action.address, action.port),
-                                             false, true);
+        const CommandResult result = CmdRule(action.rule, false, true);
         const bool ok = result.exitCode == kExitOk;
-        const std::string event = "{\"type\":\"firewall-block\",\"address\":" +
-                                  JsonQuote(action.address) + ",\"port\":" +
-                                  std::to_string(action.port) + ",\"result\":" +
-                                  JsonQuote(ok ? "success" : "refused-or-failed") + "}";
+        const std::string actualRuleName = RuleNameFromPlan(result.out);
+        const bool alreadyPresent = result.out.find("already present; nothing added.") !=
+                                    std::string::npos;
+        const std::string event = "{\"type\":\"firewall-block\",\"scope\":" +
+                                  JsonQuote(action.scope) + ",\"address\":" +
+                                  JsonQuote(WideToUtf8(action.rule.address)) +
+                                  ",\"remotePort\":" +
+                                  JsonQuote(WideToUtf8(action.rule.remotePorts)) +
+                                  ",\"process\":" +
+                                  JsonQuote(WideToUtf8(action.rule.process)) +
+                                  ",\"result\":" +
+                                  JsonQuote(ok ? "success" : "refused-or-failed") +
+                                  ",\"ruleName\":" + JsonQuote(
+                                      actualRuleName.empty() ? action.ruleName : actualRuleName) +
+                                  ",\"ruleStatus\":" + JsonQuote(!ok ? "failed" :
+                                      (alreadyPresent ? "already-present" : "created")) + "}";
         const bool auditRecorded = AppendAudit(context, event);
         if (!ok) response.status = 403;
         response.body = "{\"ok\":" + std::string(ok ? "true" : "false") +
                         ",\"exitCode\":" + std::to_string(result.exitCode) +
+                        ",\"scope\":" + JsonQuote(action.scope) +
+                        ",\"ruleName\":" + JsonQuote(
+                            actualRuleName.empty() ? action.ruleName : actualRuleName) +
+                        ",\"ruleStatus\":" + JsonQuote(!ok ? "failed" :
+                            (alreadyPresent ? "already-present" : "created")) +
                         ",\"auditRecorded\":" + (auditRecorded ? "true" : "false") +
                         ",\"message\":" + JsonQuote(result.err + result.out) + "}";
         return response;
@@ -3303,7 +4388,7 @@ int RunWebUiServer(unsigned portHint) {
         return kExitFail;
     }
     if (!PrepareDataPaths(&context)) {
-        std::cout << "webui: could not create %LOCALAPPDATA%\\WinTCP\\WebUi\r\n";
+        std::cout << "webui: could not create the local configuration directory\r\n";
         return kExitFail;
     }
     if (!InitializeWebUiLogging(&context)) {
@@ -3417,7 +4502,7 @@ int RunWebUiServer(unsigned portHint) {
     WriteWebUiLog(context, WebUiLogLevel::Info, "listening at " + url);
     std::cout << "WinTCP Web UI listening at " << url
               << "\nLocal configuration and audit log: "
-                 "%LOCALAPPDATA%\\WinTCP\\WebUi\nPress Ctrl+C to stop.\n";
+              << WideToUtf8(context.dataDirectory) << "\nPress Ctrl+C to stop.\n";
     std::cout.flush();
     if (ShouldOpenWebUiBrowser()) {
         const HINSTANCE opened = ::ShellExecuteW(nullptr, L"open",
