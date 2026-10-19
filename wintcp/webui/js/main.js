@@ -7,8 +7,8 @@ import { createPoller } from "./poller.js";
 import { h, clear } from "./h.js";
 import { icon } from "./icons.js";
 import { fmtNum, fmtBytes, fmtPct, fmtDuration } from "./format.js";
-import { renderOverview } from "./pages/overview.js";
-import { renderPerformance } from "./pages/performance.js";
+import { renderOverview, updateOverview } from "./pages/overview.js";
+import { renderPerformance, updatePerformance } from "./pages/performance.js";
 import { renderProcesses } from "./pages/processes.js";
 import { renderNetwork } from "./pages/network.js";
 import { renderMap, updateMap } from "./pages/map.js";
@@ -40,6 +40,10 @@ export const store = createStore({
   refreshInterval: 2000,
   timeRange: "live",
   paused: false,
+  processView: "table",
+  processTreemapMetric: "memWs",
+  processSortKey: null,
+  processSortDir: null,
 });
 
 // Apply theme. Charts resolve design tokens into canvas colours at build time,
@@ -219,13 +223,6 @@ function renderTopbar(container, handlers = {}) {
           "aria-label": "Toggle theme",
           title: "Theme: " + store.get().theme,
         }, icon("sun", 16)),
-        h("button", {
-          class: "btn btn-ghost btn-icon btn-sm",
-          type: "button",
-          onclick: () => handlers.onLegacy && handlers.onLegacy(),
-          "aria-label": "Open the pre-upgrade dashboard",
-          title: "Pre-upgrade dashboard",
-        }, "Legacy"),
       ),
     ),
   );
@@ -263,6 +260,14 @@ const PAGE_LABELS = {
   "/blocks": "Blocked Peers",
   "/system": "System",
   "/settings": "Settings",
+};
+
+// Optional incremental update functions. When registered, the poller calls these
+// instead of tearing down and rebuilding the whole page DOM on every data change.
+// Pages without an entry fall back to the full re-render.
+const pageUpdateFns = {
+  "/": updateOverview,
+  "/performance": updatePerformance,
 };
 
 // Release anything a page registered for teardown before the element is reused.
@@ -376,7 +381,6 @@ function init() {
     { label: "Go to System", icon: "server", handler: () => navigate("/system") },
     { label: "Go to Settings", icon: "settings", handler: () => navigate("/settings") },
     { label: "Refresh now", icon: "refresh", handler: () => refresh() },
-    { label: "Open the pre-upgrade dashboard", icon: "chevron-right", handler: () => openLegacy() },
   ]);
 
   // Start poller. One poll fans out to every read-only endpoint the pages draw
@@ -432,41 +436,34 @@ function init() {
   const poller = createPoller(refresh, state.refreshInterval);
   poller.start();
 
-  // Now that the handlers exist, wire the top bar to them.
+   // Now that the handlers exist, wire the top bar to them.
   const header = app.querySelector(".topbar");
-  if (header) header.replaceWith(renderTopbarFragment({
-    onPalette: () => palette.open(),
-    onRefresh: () => refresh(),
-    onLegacy: () => openLegacy(),
-  }));
+   if (header) header.replaceWith(renderTopbarFragment({
+     onPalette: () => palette.open(),
+     onRefresh: () => refresh(),
+   }));
 
   // Load the persisted preferences (theme, density, refresh cadence) once.
-  api.get("/api/config").then((config) => {
-    const patch = {};
-    if (config.theme) patch.theme = config.theme;
-    if (config.accent) patch.accent = config.accent;
-    if (config.density) patch.density = config.density;
-    if (config.units) patch.units = config.units;
-    if (Number.isFinite(config.refreshSeconds)) {
-      // The server stores seconds; the poller wants milliseconds. Clamp so a
-      // hand-edited config cannot turn the dashboard into a request storm.
-      const seconds = Math.min(Math.max(config.refreshSeconds, 1), 60);
-      patch.refreshInterval = seconds * 1000;
-      poller.setInterval(seconds * 1000);
-    }
-    store.set(patch);
-    applyTheme(patch.theme || store.get().theme);
-    applyAccent(patch.accent || store.get().accent);
-    applyDensity(patch.density || store.get().density);
-  }).catch(() => { /* defaults already applied */ });
-}
-
-// Rebuild the top bar once its handlers exist. Split out because the fragment
-// needs the palette/poller, which are built after the first paint.
-function renderTopbarFragment(handlers) {
-  const holder = document.createElement("div");
-  renderTopbar(holder, handlers);
-  return holder.firstElementChild;
+   // Reads from config.preferences (v3) first, falling back to top-level (v2).
+   api.get("/api/config").then((config) => {
+     const prefs = config.preferences || config;
+     const patch = {};
+     if (prefs.theme) patch.theme = prefs.theme;
+     if (prefs.accent) patch.accent = prefs.accent;
+     if (prefs.density) patch.density = prefs.density;
+     if (prefs.units) patch.units = prefs.units;
+     if (Number.isFinite(prefs.refreshSeconds)) {
+       // The server stores seconds; the poller wants milliseconds. Clamp so a
+       // hand-edited config cannot turn the dashboard into a request storm.
+       const seconds = Math.min(Math.max(prefs.refreshSeconds, 1), 60);
+       patch.refreshInterval = seconds * 1000;
+       poller.setInterval(seconds * 1000);
+     }
+     store.set(patch);
+     applyTheme(patch.theme || store.get().theme);
+     applyAccent(patch.accent || store.get().accent);
+     applyDensity(patch.density || store.get().density);
+    }).catch(() => { /* defaults already applied */ });
 }
 
 // Mirror connection status into the top bar and the live region.
@@ -500,7 +497,7 @@ function pageSignature(path, state) {
   const slice = {
     "/": { n: state.connections?.length, m: state.metrics?._timestamp },
     "/performance": { m: state.metrics?._timestamp },
-    "/processes": { p: state.processes?.length, n: state.connections?.length },
+    "/processes": { p: state.processes?.length, n: state.connections?.length, s: state.processSortKey, d: state.processSortDir },
     "/network": { s: state.networkSummary, n: state.connections?.length },
     "/map": { g: state.geoSummary, n: state.connections?.length },
     "/automations": { c: state.configVersion },
@@ -557,6 +554,15 @@ function rerenderCurrentPage() {
     return;
   }
 
+  const updateFn = pageUpdateFns[path];
+  if (updateFn && typeof updateFn === "function") {
+    // Incremental update: patch the existing DOM in place.
+    Promise.resolve(updateFn(page, store))
+      .catch((err) => console.error("page update failed", err));
+    return;
+  }
+
+  // Full re-render path (used by pages without an incremental update function).
   const signature = pageSignature(path, store.get());
   if (signature !== null && pageSignatures.get(path) === signature) return;
   pageSignatures.set(path, signature);
@@ -573,10 +579,12 @@ function rerenderCurrentPage() {
     .catch((err) => console.error("page refresh failed", err));
 }
 
-// The pre-upgrade dashboard is a separate document at /legacy. Handing over a
-// real link keeps it a normal, bookmarkable page instead of a hidden mode.
-function openLegacy() {
-  window.location.href = "/legacy";
+// Render the top bar once its handlers exist. Split out because the fragment
+// needs the palette/poller, which are built after the first paint.
+function renderTopbarFragment(handlers) {
+  const holder = document.createElement("div");
+  renderTopbar(holder, handlers);
+  return holder.firstElementChild;
 }
 
 // Wait for DOM
