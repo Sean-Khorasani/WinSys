@@ -9,11 +9,14 @@ const configListeners = new Set();
 const configChannel = typeof BroadcastChannel === "function"
   ? new BroadcastChannel("wintcp-config-updates")
   : null;
-configChannel?.addEventListener("message", (event) => {
-  if (event.data?.type !== "updated") return;
+function notifyConfigListeners() {
   for (const listener of configListeners) {
     try { listener(); } catch (error) { console.warn("config update listener failed", error); }
   }
+}
+configChannel?.addEventListener("message", (event) => {
+  if (event.data?.type !== "updated") return;
+  notifyConfigListeners();
 });
 
 async function request(path, options = {}) {
@@ -87,6 +90,7 @@ export const api = {
             headers: { "If-Match": etag }, responseMeta: true,
           });
           configChannel?.postMessage({ type: "updated", etag: savedEtag });
+          notifyConfigListeners();
           return next;
         } catch (error) {
           if (error.status !== 412) throw error;
