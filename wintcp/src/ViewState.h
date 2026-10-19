@@ -147,7 +147,8 @@ struct ViewState {
     // re-parse the box to find out; passing it out here means the filter is
     // parsed exactly once per apply rather than twice.
     void ApplyTo(ConnectionStore* store,
-                 std::vector<FilterClause>* out = nullptr) const;
+                 std::vector<FilterClause>* out = nullptr,
+                 std::wstring* filterError = nullptr) const;
 
     // True when this view would show every row unfiltered and unsorted in the
     // default order. The CLI uses it to skip building a view at all for a bare
