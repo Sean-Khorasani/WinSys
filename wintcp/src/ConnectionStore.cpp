@@ -467,6 +467,10 @@ int CmpStr(const std::wstring& a, const std::wstring& b) {
     return a.compare(b);
 }
 
+bool IsUnknownProcessName(const std::wstring& name) {
+    return name.empty() || name == L"—";
+}
+
 int CmpInt(long long a, long long b) {
     return (a < b) ? -1 : ((a > b) ? 1 : 0);
 }
@@ -2362,7 +2366,16 @@ int ConnectionStore::CompareRows(const Connection& a, const Connection& b,
         case COL_RPORT:   cmp = CmpInt(a.identity.remotePort, b.identity.remotePort); break;
         case COL_STATE:   cmp = CmpInt(StateRank(a.identity.state), StateRank(b.identity.state)); break;
         case COL_PID:     cmp = CmpInt(a.identity.pid, b.identity.pid); break;
-        case COL_PROCESS: cmp = CmpStr(a.keys.lowerProcess, b.keys.lowerProcess); break;
+        case COL_PROCESS:
+            if (IsUnknownProcessName(a.display.processName) !=
+                IsUnknownProcessName(b.display.processName)) {
+                unknownLast = true;
+                cmp = IsUnknownProcessName(a.display.processName) ? 1 : -1;
+            } else if (!IsUnknownProcessName(a.display.processName)) {
+                cmp = ::_wcsicmp(a.display.processName.c_str(),
+                                b.display.processName.c_str());
+            }
+            break;
         case COL_SERVICE: cmp = CmpStr(a.keys.lowerService, b.keys.lowerService); break;
         case COL_HOST:    cmp = CmpStr(a.keys.lowerHost, b.keys.lowerHost); break;
         case COL_PATH:    cmp = CmpStr(a.keys.lowerPath, b.keys.lowerPath); break;
