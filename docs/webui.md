@@ -33,7 +33,7 @@ The Web UI needs the `webui` assets beside `wintcp.exe`. The native CLI and GUI 
 | **Processes** | Process table and parent/child tree, with a treemap sized by working set or CPU share. |
 | **Network** | Connection, listening, blocked-peer, and country-flow views. |
 | **Map** | Interactive country map with a globe/2D projection switch and connection markers. |
-| **Automations** | Monitor templates, local scripts, and recent events. |
+| **Automations** | CLI playbooks, local scripts, and recent events. |
 | **Blocked Peers** | WinTCP-managed firewall rules and their status. |
 | **System** | Operating-system, processor, memory, and capability information. |
 | **Settings** | Theme, display preferences, refresh interval, GeoIP paths, and audit history. |
@@ -54,7 +54,7 @@ The Flows tab groups remote peers by country. The Connections and Listening tabs
 
 The Processes page lists the process snapshot, not only processes that own a connection. Use **Table**, **Tree**, or **Treemap** to change the view; the treemap can be sized by working set or CPU share. The table includes the full process set supported by the local API, and its filter, sort, view, and scroll position stay in place as samples update. A dash indicates a value Windows could not provide, not a measured zero. On narrow screens, tables scroll horizontally rather than hiding columns.
 
-The Automations page includes monitor templates and a workbench for local WinTCP scripts. Monitor evaluation and browser notifications run only while the dashboard page is open. Closing the page stops those evaluations; it does not stop the background Web UI server. Scripts execute the adjacent `wintcp.exe` with bounded arguments and output. Sensitive actions require a separate confirmation and can still require administrator rights. The Web UI does not provide a persistent scheduler, cloud service, or remote notification service.
+The Automations page provides scenario-oriented CLI playbooks, a workbench for local WinTCP scripts, and the audit trail. The playbooks are on-demand command examples; their scenario descriptions are not active detectors, and this page does not create or evaluate monitor rules. Scripts execute the adjacent `wintcp.exe` with bounded arguments and output. Sensitive actions require a separate confirmation and can still require administrator rights. For background connection-change logging, use the CLI `monitor start` command described in the [CLI guide](cli.md). The Web UI does not provide a persistent scheduler, cloud service, or remote notification service.
 
 Firewall actions are explicit. The UI shows a preview before a supported rule is applied, records the action in the local audit trail, and does not elevate the process. Review the target and scope before confirming.
 
@@ -64,7 +64,7 @@ The Web UI uses local static assets and makes no third-party asset or analytics 
 
 Per-user configuration, audit records, and diagnostic logs are stored in `%LOCALAPPDATA%\WinTCP\WebUi`:
 
-- `config.json` stores display preferences, GeoIP paths, monitor settings, and saved scripts.
+- `config.json` stores display preferences, GeoIP paths, and saved scripts.
 - `audit.ndjson` records relevant configuration and response actions.
 - `webui.log` contains server and manager diagnostics.
 
