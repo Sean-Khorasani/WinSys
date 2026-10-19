@@ -31,46 +31,45 @@ const UINT IDC_DLG_SCROLL = 4;
 // scales once via S(), so a DPI change is one pass over the line list rather
 // than a recomputation of every measurement.
 constexpr int kMargin = 16;
-constexpr int kBtnH = 26;
+constexpr int kBtnH = 30;
 constexpr int kBtnWCpy = 90;
 constexpr int kBtnWOpen = 190;
 constexpr int kBtnWClose = 70;
 constexpr int kTitleH = 36;
 constexpr int kSubtitleH = 24;
+constexpr int kWideLabelH = 22;
 // One field row. It was 17 before the 2026-10-05 rework and each field was
 // TWO of these (label, then value), so a section read as 34 px of stacked
 // captions. Now it is one row per field, and the extra 2 px buys the vertical
 // padding that makes a table legible rather than cramped.
-constexpr int kLineH = 23;
-constexpr int kSectionH = 28;
-constexpr int kNoteH = 20;
+constexpr int kLineH = 27;
+constexpr int kSectionH = 34;
+constexpr int kNoteH = 24;
 // Label column width accommodates the longest detail labels.
-constexpr int kLabelGutter = 196;
+constexpr int kLabelGutter = 184;
 constexpr int kScrollBarW = 14;
 
 // Spacing between the label and value columns.
 constexpr int kColGap = 14;
 // Vertical padding inside a field row, top and bottom, in logical px.
 constexpr int kRowPadY = 3;
-// The hairline column rule sits this far left of the value column.
-constexpr int kRuleGap = 9;
 
 // Window geometry, authored unscaled and multiplied by the DPI ratio (S/MulDiv).
 // The design size appeared TWICE - once in the CreateWindowExW call and once in
 // the WM_CREATE handler - and the minimum size is a separate pair that must be
 // smaller than the design size or the window can never be opened at any DPI.
 // Naming all four makes those two relationships checkable.
-constexpr int kDesignWidth = 680;
-constexpr int kDesignHeight = 600;
-constexpr int kMinWidth = 500;
-constexpr int kMinHeight = 440;
+constexpr int kDesignWidth = 760;
+constexpr int kDesignHeight = 640;
+constexpr int kMinWidth = 560;
+constexpr int kMinHeight = 480;
 // The DPI a design pixel is 1:1 at, and the points->pixels divisor. Same two
 // numbers as MainWindow.cpp has; not shared because this window scales its own
 // layout and coupling the two would tie one window's geometry to the other's.
 constexpr int kDpiUnscaled = 96;
-constexpr int kTitleFontPt = 15;
-constexpr int kSectionFontPt = 10;
-constexpr int kNoteFontPt = 8;
+constexpr int kTitleFontPt = 16;
+constexpr int kSectionFontPt = 11;
+constexpr int kNoteFontPt = 9;
 // A colour-mix weight, in percent: 10 is a faint tint, 20 a readable one.
 constexpr int kTintFaint = 10;
 constexpr int kTintBody = 20;
@@ -91,8 +90,9 @@ constexpr int kChevronGutter = 14;
 // The tab bar lives in the fixed header. One slot per tab; the slot
 // width is measured from the label so short tabs don't hoard space and the
 // whole row never overflows at the design width.
-constexpr int kTabH = 24;
+constexpr int kTabH = 30;
 constexpr int kTabGap = 12;           // leading space before the first tab
+constexpr int kTabPaddingX = 12;
 
 // Narrowest a tab slot may be, however short its label - "Notes" at any DPI is
 // still a clickable target, and a slot below this is not one.
@@ -108,22 +108,6 @@ void SetChildFont(HWND hwnd, HFONT font) {
         ::SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font),
                        MAKELPARAM(TRUE, 0));
     }
-}
-
-// The roster of tabs the model actually has content for, in
-// tab-ordinal order. One derivation, shared by RebuildLayout and
-// the keyboard tab switcher, so the two can never drift apart.
-std::vector<DetailTab> TabRoster(const DetailModel& model) {
-    std::vector<DetailTab> tabs;
-    for (const DetailSection& sec : model.sections) {
-        if (sec.tab != kTabSockets &&
-            std::find(tabs.begin(), tabs.end(), sec.tab) == tabs.end())
-            tabs.push_back(sec.tab);
-    }
-    if (!model.connectionLines.empty() &&
-        std::find(tabs.begin(), tabs.end(), kTabSockets) == tabs.end())
-        tabs.push_back(kTabSockets);
-    return tabs;
 }
 
 // A small filled triangle: the collapse glyph on a section header.
@@ -262,8 +246,7 @@ void DetailsDialog::Show(HWND owner, HFONT font, const DetailModel& model,
     if (font_ != font) ApplyFont(font);
 
     const std::wstring caption =
-        L"WinTCP - Details - " +
-        (model_.title.empty() ? std::wstring(L"(none)") : model_.title);
+        L"WinTCP — Details";
     if (hwnd_ == nullptr) {
         // Idempotent registration (ERROR_CLASS_ALREADY_EXISTS is fine).
         WNDCLASSEXW wc = {};
@@ -370,8 +353,10 @@ void DetailsDialog::ApplyFont(HFONT font) {
             fontDpi_ = dpi;
             titleFont_ = FontCache::Get().Get(kTitleFontPt, FW_BOLD, dpi);
             headerFont_ = FontCache::Get().Get(kSectionFontPt, FW_BOLD, dpi);
+            bodyFont_ = FontCache::Get().Get(kBodyPtSize + 1, FW_NORMAL, dpi);
+            labelFont_ = FontCache::Get().Get(kBodyPtSize + 1, FW_MEDIUM, dpi);
             monoFont_ =
-                FontCache::Get().Get(kBodyPtSize, FW_NORMAL, dpi, true);
+                FontCache::Get().Get(kBodyPtSize + 1, FW_NORMAL, dpi, true);
             smallFont_ = FontCache::Get().Get(kNoteFontPt, FW_NORMAL, dpi);
             fontsReady_ = true;
             ApplyColors();
@@ -512,7 +497,7 @@ void DetailsDialog::RebuildLayout() {
     // an empty one. connectionLines (the Sockets tab) are counted too.
     // TabRoster() is the single derivation; the keyboard tab switcher
     // shares it so the two cannot drift.
-    const std::vector<DetailTab> tabs = TabRoster(model_);
+    const std::vector<DetailTab> tabs = AvailableDetailTabs(model_);
     // Clamp the active tab to the roster; a new model may not contain it.
     if (tabs.empty() ||
         std::find(tabs.begin(), tabs.end(), model_.activeTab) == tabs.end())
@@ -577,7 +562,8 @@ void DetailsDialog::RebuildLayout() {
             ::GetTextExtentPoint32W(hdc, l.text.c_str(),
                                     static_cast<int>(l.text.size()), &sz);
         const int slotW = (std::max)(S(kTabMinSlotPx),
-                                     static_cast<int>(sz.cx) + S(kColGap));
+                                     static_cast<int>(sz.cx) +
+                                         2 * S(kTabPaddingX));
         lines_.back().width = slotW;
         tabX += slotW + S(kTabGap);
     }
@@ -632,8 +618,17 @@ void DetailsDialog::RebuildLayout() {
             // two columns are aligned by position, not by text.
             l.monospace = f.monospace;
             l.section = static_cast<int>(s);
-            l.height = wrappedHeight(l.value,
-                l.monospace ? monoFont_ : font_, valueWidth, kLineH);
+            l.stacked = (l.text == L"Command line");
+            if (l.stacked) {
+                const int wideWidth = (std::max)(
+                    S(80), valueRight - m - S(8));
+                l.height = kWideLabelH + wrappedHeight(
+                    l.value, l.monospace ? monoFont_ : bodyFont_, wideWidth,
+                    kLineH);
+            } else {
+                l.height = wrappedHeight(l.value,
+                    l.monospace ? monoFont_ : bodyFont_, valueWidth, kLineH);
+            }
             push(l);
         }
         if (!sec.note.empty()) {
@@ -687,7 +682,7 @@ void DetailsDialog::RebuildLayout() {
 }
 
 void DetailsDialog::ActivateTab(int delta) {
-    const std::vector<DetailTab> tabs = TabRoster(model_);
+    const std::vector<DetailTab> tabs = AvailableDetailTabs(model_);
     if (tabs.size() < 2) return;
     auto it = std::find(tabs.begin(), tabs.end(), model_.activeTab);
     int idx = (it == tabs.end())
@@ -737,8 +732,7 @@ void DetailsDialog::Layout(int cx, int cy) {
 }
 
 void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
-                              int m, int ruleX,
-                              int textRight, int fieldInSection) {
+                              int m, int textRight) {
     // Selects the right face for this row kind. Section headers and
     // tabs keep their own faces; notes and field rows differ. Field
     // rows honour the value's monospace flag separately below (the
@@ -751,10 +745,10 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
         : (l.kind == Line::SectionHeader) ? headerFont_
         : (l.kind == Line::Tab)          ?
               ((l.section == static_cast<int>(model_.activeTab))
-                   ? headerFont_ : font_)
+                   ? headerFont_ : bodyFont_)
         : (l.kind == Line::SectionNote)   ? smallFont_
         : l.monospace                     ? monoFont_
-                                          : font_;
+                                          : bodyFont_;
     if (face != nullptr) ::SelectObject(mem, face);
 
     if (l.kind == Line::Tab) {
@@ -773,27 +767,32 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
                                                           : clrDim_);
         ::SetTextColor(mem, tabFg);
         const int slotW = l.width;
-        RECT tr = {l.indent, y, l.indent + slotW, y + lh};
-        if (active && brushSection_ != nullptr) ::FillRect(mem, &tr, brushSection_);
+        RECT tr = {l.indent + S(kTabPaddingX), y,
+                   l.indent + slotW - S(kTabPaddingX), y + lh};
+        if (active && brushSection_ != nullptr) {
+            RECT activeSurface = {l.indent, y + S(2),
+                                  l.indent + slotW, y + lh - S(2)};
+            HGDIOBJ oldPen = ::SelectObject(mem, ::GetStockObject(NULL_PEN));
+            HGDIOBJ oldBrush = ::SelectObject(mem, brushSection_);
+            ::RoundRect(mem, activeSurface.left, activeSurface.top,
+                        activeSurface.right, activeSurface.bottom,
+                        S(6), S(6));
+            ::SelectObject(mem, oldBrush);
+            ::SelectObject(mem, oldPen);
+        }
         ::DrawTextW(mem, l.text.c_str(), static_cast<int>(l.text.size()),
                     &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX |
                         DT_END_ELLIPSIS);
         if (active && brushAccent_ != nullptr) {
-            RECT bar = {l.indent, y + lh - S(2), l.indent + slotW, y + lh};
+            RECT bar = {l.indent + S(4), y + lh - S(2),
+                        l.indent + slotW - S(4), y + lh};
             ::FillRect(mem, &bar, brushAccent_);
         }
         return;
     }
 
-    // Alternating shading on field rows only, and a band behind every section
-    // header - the same policy as before the tab bar, routed through the painter.
-    if (l.kind == Line::FieldRow) {
-        if ((fieldInSection % 2) == 0 && brushAlternate_ != nullptr) {
-            RECT band = {0, y, cx, y + lh};
-            ::FillRect(mem, &band, brushAlternate_);
-        }
-    } else if (l.kind == Line::SectionHeader && brushSection_ != nullptr) {
-        RECT band = {0, y, cx, y + lh};
+    if (l.kind == Line::SectionHeader && brushSection_ != nullptr) {
+        RECT band = {m, y, cx - m, y + lh};
         // Hover brightens the band itself - the old code filled a
         // rect with the SAME brush the band already used, so hover
         // was invisible, and its x was a doubly-scaled S(kMargin-
@@ -804,7 +803,7 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
                            ? brushSectionHover_ : brushSection_);
         // Accent bar on EVERY section header, not only the hovered one.
         if (brushAccent_ != nullptr) {
-            RECT bar = {0, y, S(3), y + lh};
+            RECT bar = {m, y, m + S(3), y + lh};
             ::FillRect(mem, &bar, brushAccent_);
         }
         // The collapse chevron. It is the ONLY affordance that a
@@ -819,6 +818,10 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
             DrawChevron(mem, m + S(kChevronGutter) / 2, y + lh / 2,
                             S(4), !isCollapsed, clrHeader_);
         }
+    } else if (l.kind == Line::FieldRow && brushRule_ != nullptr &&
+               !l.stacked) {
+        RECT separator = {m + S(8), y + lh - 1, textRight, y + lh};
+        ::FillRect(mem, &separator, brushRule_);
     }
 
     if (l.kind == Line::Title) {
@@ -835,29 +838,47 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
     }
 
     if (l.kind == Line::FieldRow) {
-        // ---- the two columns -------------------------------------
-        // Label, in the gutter. Ellipsised, because a label that overruns
-        // its column would otherwise push into the value.
+        if (l.stacked) {
+            if (labelFont_ != nullptr) ::SelectObject(mem, labelFont_);
+            ::SetTextColor(mem, clrDim_);
+            RECT labelRect = {m + S(8), y + S(2), textRight,
+                              y + S(kWideLabelH)};
+            ::DrawTextW(mem, l.text.c_str(),
+                        static_cast<int>(l.text.size()), &labelRect,
+                        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX |
+                            DT_END_ELLIPSIS);
+            RECT codeSurface = {m + S(4), y + S(kWideLabelH),
+                                textRight, y + lh - S(2)};
+            if (brushAlternate_ != nullptr)
+                ::FillRect(mem, &codeSurface, brushAlternate_);
+            if (l.monospace && monoFont_ != nullptr)
+                ::SelectObject(mem, monoFont_);
+            else if (bodyFont_ != nullptr)
+                ::SelectObject(mem, bodyFont_);
+            ::SetTextColor(mem, clrText_);
+            RECT valueRect = {codeSurface.left + S(8),
+                              codeSurface.top + S(4),
+                              codeSurface.right - S(8),
+                              codeSurface.bottom - S(2)};
+            ::DrawTextW(mem, l.value.c_str(),
+                        static_cast<int>(l.value.size()), &valueRect,
+                        DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+            return;
+        }
+
+        if (labelFont_ != nullptr) ::SelectObject(mem, labelFont_);
         ::SetTextColor(mem, clrDim_);
         RECT labelRect = {m, y + S(kRowPadY),
-                          ruleX - S(kColGap) / 2, y + lh - S(kRowPadY)};
+                          m + S(kLabelGutter) - S(kColGap),
+                          y + lh - S(kRowPadY)};
         ::DrawTextW(mem, l.text.c_str(),
                     static_cast<int>(l.text.size()), &labelRect,
                     DT_SINGLELINE | DT_TOP | DT_NOPREFIX |
                         DT_END_ELLIPSIS);
 
-        if (brushRule_ != nullptr) {
-            RECT rule = {ruleX, y + S(kRowPadY), ruleX + 1,
-                         y + lh - S(kRowPadY)};
-            ::FillRect(mem, &rule, brushRule_);
-        }
-
-        // Value, starting at a fixed x so the column is aligned regardless of
-        // label length. Monospace only when the field asked for it; the label
-        // always uses the UI face.
-        if (font_ != nullptr) ::SelectObject(mem, font_);
+        if (bodyFont_ != nullptr) ::SelectObject(mem, bodyFont_);
         ::SetTextColor(mem, clrText_);
-        const HFONT valueFace = l.monospace ? monoFont_ : font_;
+        const HFONT valueFace = l.monospace ? monoFont_ : bodyFont_;
         if (valueFace != nullptr) ::SelectObject(mem, valueFace);
         RECT valueRect = {m + S(kLabelGutter), y + S(kRowPadY),
                           textRight, y + lh - S(kRowPadY)};
@@ -911,7 +932,16 @@ void DetailsDialog::OnPaint() {
     ::SetBkMode(mem, TRANSPARENT);
 
     const int m = S(kMargin);
-    const int ruleX = m + S(kLabelGutter) - S(kRuleGap);
+    if (tabBarH_ > 0 && brushRule_ != nullptr) {
+        RECT tabRule = {m, tabBarY_ + tabBarH_ - 1,
+                        cx - m, tabBarY_ + tabBarH_};
+        ::FillRect(mem, &tabRule, brushRule_);
+    }
+    const int footerY = cy - m - S(kBtnH) - S(8);
+    if (brushRule_ != nullptr) {
+        RECT footerRule = {m, footerY, cx - m, footerY + 1};
+        ::FillRect(mem, &footerRule, brushRule_);
+    }
 
     // --- pinned header: title + subtitle block + tab bar (fixed at the top) ---
     // Painted without the scroll offset, so the process identity and the tab
@@ -933,8 +963,8 @@ void DetailsDialog::OnPaint() {
                 if (tabBarY_ + tabBarH_ > 0 && tabBarY_ < cy) {
                     for (const Line& t : lines_) {
                         if (!t.pinned || t.kind != Line::Tab) continue;
-        PaintLine(mem, t, tabBarY_, S(t.height), cx, m,
-                                  ruleX, headerRight);
+                        PaintLine(mem, t, tabBarY_, S(t.height), cx, m,
+                                  headerRight);
                     }
                 }
                 y += tabBarH_;
@@ -943,7 +973,7 @@ void DetailsDialog::OnPaint() {
         }
         const int lh = S(l.height);
         if (y + lh > 0 && y < cy)
-            PaintLine(mem, l, y, lh, cx, m, ruleX, headerRight);
+            PaintLine(mem, l, y, lh, cx, m, headerRight);
         y += lh;
     }
     const int headerBottom = y;   // one past the last pinned line
@@ -975,17 +1005,14 @@ void DetailsDialog::OnPaint() {
                       ? ScrollBarWidth() + S(4)
                       : 0);
 
-    int fieldInSection = 0;
     y = headerBottom - scrollPos_;
     for (const Line& l : lines_) {
         if (l.pinned) continue;   // header already drawn above
         const int lh = S(l.height);
-        if (l.kind == Line::FieldRow) ++fieldInSection;
         // Clipped to the BODY, not the client rect. `y < contentBottom` also
         // stops a row being drawn when only its very bottom edge is inside.
         if (y + lh > headerBottom && y < contentBottom)
-            PaintLine(mem, l, y, lh, cx, m, ruleX, bodyRight,
-                      fieldInSection);
+            PaintLine(mem, l, y, lh, cx, m, bodyRight);
         y += lh;
     }
 
