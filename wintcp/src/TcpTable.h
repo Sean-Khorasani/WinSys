@@ -39,9 +39,16 @@ std::wstring PrintIpv4(DWORD addrNetworkOrder);
 // Never throws.
 bool EnumerateEndpoints(std::vector<Connection>& out, std::wstring& errorMessage);
 
+bool ConnectionMatchesOwnerPidTcpRow(const Connection& connection,
+                                     DWORD state, DWORD localAddress,
+                                     DWORD localPort, DWORD remoteAddress,
+                                     DWORD remotePort, DWORD owningPid);
+
 // Close an IPv4 TCP connection via SetTcpEntry(MIB_TCP_STATE_DELETE_TCB)
 // ("Close connection" feature). IPv4-only: Windows exposes no IPv6
-// equivalent - returns false with an explanatory error for IPv6 rows.
+// equivalent - returns false with an explanatory error for IPv6 rows. The
+// live owner-PID table is re-read immediately before the tuple-only API call.
+// Windows does not let SetTcpEntry atomically constrain that call by PID.
 // Returns true on success; on failure 'errorMessage' describes the problem.
 bool CloseTcpConnection(const Connection& c, std::wstring& errorMessage);
 
