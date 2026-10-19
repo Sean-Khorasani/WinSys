@@ -166,13 +166,17 @@ export function renderTreemap(container, rows, opts = {}) {
   const host = document.createElement("div");
   host.className = "treemap";
   host.style.height = `${height}px`;
+  let omittedTiles = 0;
 
   for (let index = 0; index < placed.length; index++) {
     const cell = placed[index];
     // A tile too small to hold its label is dropped from the drawing but not
     // from the data: the caller still reports the total. Drawing a 3x2 tile with
     // clipped text is noise.
-    if (cell.width < 24 || cell.height < 14) continue;
+    if (cell.width < 24 || cell.height < 14) {
+      omittedTiles++;
+      continue;
+    }
 
     const drawable = Math.max(0, cell.width - TREEMAP_MARGIN * 2);
     const drawableHeight = Math.max(0, cell.height - TREEMAP_MARGIN * 2);
@@ -194,8 +198,11 @@ export function renderTreemap(container, rows, opts = {}) {
     // rather than a token per tile: the palette has five entries and this can
     // draw fifty rectangles.
     const hue = (index * 47) % 360;
-    tile.style.background =
-      `linear-gradient(to top, hsl(${hue} 62% 26%), hsl(${hue} 70% 44%))`;
+    const baseColor = `hsl(${hue} 62% 26%)`;
+    tile.style.backgroundColor = baseColor;
+    tile.style.backgroundImage =
+      `linear-gradient(to top, rgb(0 0 0 / 45%), rgb(0 0 0 / 30%)), ` +
+      `linear-gradient(to top, ${baseColor}, hsl(${hue} 70% 44%))`;
 
     // Only label a tile that can hold the label. Truncating "WhatsApp.exe" to
     // "WhatsApp R..." in a 40px tile is worse than drawing the rectangle
@@ -216,15 +223,18 @@ export function renderTreemap(container, rows, opts = {}) {
 
     // The accessible name carries the exact text even when the label is not drawn,
     // so an unlabelled tile is not an unlabelled tile to a screen reader.
+    const tileLabel = cell.item.accessibleLabel || cell.item.label;
+    const displayValue = cell.item.displayValue ?? format(cell.item.value);
     tile.setAttribute("aria-label",
-      `${cell.item.label}: ${format(cell.item.value)}` +
+      `${tileLabel}: ${displayValue}` +
       (cell.item.reason ? `, ${cell.item.reason}` : ""));
-    tile.title = `${cell.item.label}: ${format(cell.item.value)}` +
+    tile.title = `${tileLabel}: ${displayValue}` +
       (cell.item.reason ? ` (${cell.item.reason})` : "");
     if (opts.onSelect) tile.addEventListener("click", () => opts.onSelect(cell.item));
     host.append(tile);
   }
 
+  opts.onOmittedTiles?.(omittedTiles);
   container.append(host);
   return host;
 }
