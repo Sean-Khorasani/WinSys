@@ -35,7 +35,7 @@ Background pages: [filter language](filters.md), [CLI reference](cli.md), [traff
 | [14](#14-full-dossier-for-one-connection) | Everything about one connection | no |
 | **Watching for change** | | |
 | [15](#15-churn-journal-and-the---event-filter) | A readable feed of connection changes | no |
-| [16](#16-tcp-only-churn) | The same, without UDP noise | no |
+| [16](#16-tcp-churn-without-ipv4-loopback-noise) | TCP churn without UDP or IPv4 loopback noise | no |
 | [17](#17-silent-watchdog-gates-for-task-scheduler) | Exit-code-only checks for schedulers | no |
 | [18](#18-what-opened-while-i-was-away) | What opened while I was away? | no |
 | [19](#19-a-machine-readable-change-feed) | The change feed as JSON | no |
@@ -463,7 +463,7 @@ wintcp.exe list --db GeoLite2-Country.mmdb --filter "country:US" --quiet && echo
 | `list --quiet` | Zero bytes; exit `0` if and only if a row matched. `&& echo us-traffic` turns a question into a scriptable predicate. |
 | `--columns remote,country,process` | When the gate *fails* you need to see why, and a bare exit code tells you nothing. |
 
-Two deliberate limits: addresses that are not globally routable (loopback, RFC 1918, CGNAT, link-local, multicast) never get a country, and a country nothing is connected to returns an empty table, not an error.
+Two deliberate limits: addresses that are not globally routable (loopback, RFC 1918, CGNAT, link-local, multicast) never get a country, and a country nothing is connected to returns an empty table, not an error. If the database file is missing or the `--limit` rows have no public remote address, WinTCP reports that condition rather than inventing a country.
 
 ### 13. The enriched triage row
 
@@ -510,6 +510,8 @@ wintcp.exe list --asn-db GeoLite2-ASN.mmdb --filter "asn:15169-20000" --limit 10
 | `--asn-db FILE` | The GeoLite2-ASN database. Separate from `--db` because the two are different products with different record shapes; supply either, both or neither. |
 | `--filter "asn:..."` | A bare number is a threshold on the AS number and accepts ranges; anything else is a substring of `AS<n> <org>`, so both "which AS is this" and "who runs this" are one field. |
 | `--columns ... country ...` | The ASN shares the `country` cell. `details` gives it its own `AS number` and `AS organisation` rows when you want them apart. |
+
+Use a local ASN database path you have obtained and licensed for your use. If the example file is absent, WinTCP reports a database-open error and the command exits nonzero; it does not download one.
 
 Two honest limits, the same as the country recipe: an address that is not globally routable never gets an ASN, and an address no database covers leaves the cell as the country alone rather than inventing one.
 
@@ -600,7 +602,7 @@ The `Connections (1)` block is the part no other tool gives you: the other endpo
 An unfiltered event feed on a normal desktop is dominated by socket closes, so the switch that selects *kinds* is the difference between a usable feed and noise.
 
 ```bat
-wintcp.exe list --watch 1 --changes --event appear,state --count 4
+wintcp.exe list --watch 1 --changes --event appear,state --filter "exclude:127." --count 4
 ```
 
 ```text
@@ -616,27 +618,28 @@ baseline: 286 rows (further changes below)
 | `list --watch 1` | The delta is computed between two snapshots, so the interval **is** the sensitivity: at 1 s you catch short-lived sockets, at 10 s you miss them entirely. |
 | `list --event appear,state` | Which kinds to print, from `appear,disappear,state`. `--event appear` alone answers "what opened while I was away" and drops the close stream that would otherwise bury it. Comma-separated, any order, case-insensitive; an unrecognised name exits `2`. |
 | `list --count 4` | Bounds the loop. It counts **snapshots, not events**: on a busy machine four snapshots can emit hundreds of lines, so pipe through `head` if you need exactly N. |
-| `list --filter` | Applied to the event's row, not the table, so every clause works (recipe 16 uses it to remove UDP). |
+| `list --filter "exclude:127."` | Drops the high-volume IPv4 loopback churn common to local clients and services. Remove or adjust it when loopback activity is what you need to inspect. |
+| `list --filter` | Applied to each event row, not the baseline snapshot, so it limits emitted events rather than changing the baseline. |
 
 The `baseline:` line goes to **stderr**, so `> file` captures only events. That is a contract, not a detail: an event pipe with a human sentence in it is not a pipe.
 
-### 16. TCP-only churn
+### 16. TCP churn without IPv4 loopback noise
 
 Skip the UDP socket noise that otherwise dominates.
 
 ```bat
-wintcp.exe list --watch 2 --changes --filter "proto:tcp" --count 5
+wintcp.exe list --watch 2 --changes --filter "proto:tcp exclude:127." --count 5
 ```
 
 ```text
 baseline: 286 rows (further changes below)
 [2025-01-15 13:45:37] DISAPPEAR TCPv4 192.0.2.92:17796 -> 198.51.100.106:443 (ESTABLISHED) pid=28276 Browser.exe
-[2025-01-15 13:45:37] STATE  TCPv4 127.0.0.1:49374 -> 127.0.0.1:29543 (ESTABLISHED) pid=22180 TunnelClient.exe
+[2025-01-15 13:45:37] STATE  TCPv4 192.0.2.92:49374 -> 198.51.100.106:443 (ESTABLISHED) pid=22180 TunnelClient.exe
 ```
 
 | Switch | Why it is in this command |
 |---|---|
-| `list --filter "proto:tcp"` | The filter runs against each event's row, so it removes whole events rather than hiding lines after the fact. |
+| `list --filter "proto:tcp exclude:127."` | The filter runs against each event's row, so it removes whole events rather than hiding lines after the fact. Excluding IPv4 loopback avoids a noisy source of local client churn; adjust the prefix for your environment. |
 | `list --watch 2` | A slower interval than recipe 15 on purpose: fewer events, and a different view of what "churn" means at 2 s granularity. |
 
 `--event` is available but not needed here: the filter already does the narrowing, and adding `--event` would be a second tool for one job.
@@ -668,7 +671,7 @@ someone-is-on-https
 The longest-running form, and the one that answers "did that installer just start something".
 
 ```bat
-wintcp.exe list --watch 1 --changes --event appear --count 30 --filter "proto:tcp state:estab"
+wintcp.exe list --watch 1 --changes --event appear --count 30 --filter "proto:tcp state:estab exclude:127."
 ```
 
 | Switch | Why it is in this command |
@@ -715,6 +718,8 @@ wintcp.exe list --watch 2 --changes --event appear,state --format json --count 5
 wintcp.exe list --filter "state:estab exclude:127." --columns pid,process,local,remote,rport,state --limit 3
 wintcp.exe capture --select "pid:5172 remote:203.0.113.73 remote:port:443" --secs 8 --text --dir first --yes
 ```
+
+Replace the example PID and remote tuple with a row from the first command. The addresses above are illustrative; a stale or unmatched selector is refused. Preview the current selection with the same arguments and `--dry-run` before starting capture.
 
 `--dry-run` stops after printing the plan, so you can see which conversation the selector picked before spending the window on it. Run once by hand, and this is the line:
 
@@ -793,6 +798,8 @@ One atomic run, where `pktmon` needs a manual start, a stop and an `etl2pcap`.
 ```bat
 wintcp.exe capture --select "pid:22180" --secs 5 --yes
 ```
+
+Replace `22180` with the PID from a live TCP row. A PID with no live TCP row or multiple live TCP rows is refused; use `--dry-run` to verify the selection before confirming capture.
 
 | Switch | Why it is in this command |
 |---|---|
@@ -1022,7 +1029,7 @@ Keep two distinctions in mind, because each affects which rows a filter returns:
 
 ### 30. Pin a peer with a tag and a note, and find it again
 
-A bookmark's identity is **remote address + remote port**, because that pair survives a reconnect. The port is part of the match, not decoration: a mark on `192.0.2.4:9999` does not light up a live `192.0.2.4:443` row.
+A bookmark's identity is **remote address + remote port**, because that pair survives a reconnect. The port is part of the match, not decoration: a mark on `192.0.2.4:9999` does not light up a live `192.0.2.4:443` row. The example uses a documentation-only address; replace it with a real peer to see the `note:` filter match a currently live connection. A bookmark by itself does not create a connection row.
 
 ```bat
 wintcp.exe bookmark add   --address 203.0.113.150 --port 53 --tag 3 --note "corporate dns resolver"
@@ -1265,4 +1272,4 @@ wintcp.exe list --format jsonl --columns proto,local,lport,remote,rport,state,pi
 | `--columns a,b,c` | Fixes which keys appear and in which order. Because both formats render the same column set, switching `json` to `jsonl` does not move the consumer's field list. |
 | `--limit 2` | Bounds the sample. In a real script `--watch` supplies the stream instead and `--limit` stays off. |
 
-`jsonl` is `json` with a different renderer, not a fourth format: same keys, same types, and the same em dash `—` for a stat nobody could measure rather than `0` or `null`. One consequence is worth knowing - **with `--changes` both formats are already NDJSON**, because a change feed is a stream by nature and there is no array to close; the difference only shows up on the snapshot forms above. See [the change feed as JSON]#19-a-machine-readable-change-feed) for that feed in either format.
+`jsonl` is `json` with a different renderer, not a fourth format: same keys, same types, and the same em dash `—` for a stat nobody could measure rather than `0` or `null`. One consequence is worth knowing - **with `--changes` both formats are already NDJSON**, because a change feed is a stream by nature and there is no array to close; the difference only shows up on the snapshot forms above. See [the change feed as JSON](#19-a-machine-readable-change-feed) for that feed in either format.
