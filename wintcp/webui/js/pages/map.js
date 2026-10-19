@@ -1,4 +1,5 @@
 import { h, clear } from "../h.js";
+import { hostnameLabel } from "../connections.js";
 import { button } from "../ui/button.js";
 import { card, cardHeader, cardTitle, cardContent, emptyState } from "../ui/card.js";
 import { fmtInt } from "../format.js";
@@ -89,6 +90,7 @@ export async function renderMap(page, store) {
   let popup = null;
   let pulseTimer = 0;
   let destroyed = false;
+  const requests = new AbortController();
   let countriesGeoJson = null;
   let connectionSource = null;
   let lastDataSignature = "";
@@ -98,6 +100,7 @@ export async function renderMap(page, store) {
 
   page._mapDestroy = () => {
     destroyed = true;
+    requests.abort();
     if (pulseTimer) window.clearInterval(pulseTimer);
     if (popup) popup.remove();
     if (map) map.remove();
@@ -132,9 +135,10 @@ export async function renderMap(page, store) {
   });
 
   try {
-    const topoResponse = await fetch(TOPOJSON_URL);
+    const topoResponse = await fetch(TOPOJSON_URL, { signal: requests.signal });
     if (!topoResponse.ok) throw new Error(`Country data returned HTTP ${topoResponse.status}`);
     countriesGeoJson = topoToGeoJson(await topoResponse.json());
+    if (destroyed) return;
     if (!countriesGeoJson.features.length) throw new Error("Country data contains no map features");
     const maplibre = await loadMapLibre();
     if (destroyed || !container.isConnected) return;
@@ -224,12 +228,14 @@ export async function renderMap(page, store) {
       projectionButton.disabled = false;
     });
     map.on("error", (event) => {
+      if (destroyed) return;
       const message = event?.error?.message;
       if (message) status.textContent = `Map error: ${message}`;
     });
     projectionButton.disabled = true;
     update();
   } catch (error) {
+    if (destroyed) return;
     status.textContent = `Map unavailable: ${error.message}`;
     renderCountryList(page.querySelector("#map-countries"), [], store.get());
   }
@@ -287,7 +293,7 @@ function topoToGeoJson(topo) {
   return { type: "FeatureCollection", features };
 }
 
-function mapData(geoJson, state) {
+export function mapData(geoJson, state) {
   const connections = Array.isArray(state.connections) ? state.connections : [];
   const counts = new Map();
   const rowsByCountry = new Map();
@@ -323,7 +329,7 @@ function mapData(geoJson, state) {
           port: row.rport || "",
           protocol: row.proto || "",
           state: row.state || "",
-          hostname: row.hostname && row.hostname !== "pending" && row.hostname !== "—" ? row.hostname : "Not resolved",
+          hostname: hostnameLabel(row.hostname),
           country: feature.properties.name,
           locationNote: "Country-level GeoIP estimate",
         },
