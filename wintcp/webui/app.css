@@ -2,5 +2,5 @@
 @import url("css/tokens.css");
 @import url("css/base.css");
 @import url("css/components.css");
-@import url("css/pages.css");
 @import url("vendor/maplibre/maplibre-gl.css");
+@import url("css/pages.css");
