@@ -1845,7 +1845,7 @@ void CheckAlertRuleSerialisation(TestResult& r) {
 
 
 
-constexpr int kDialogControls = 7;
+constexpr int kDialogControls = 9;
 
 // The portable wintcp.ini grammar. Pure over a string, so the whole
 // reader is pinned with no disk and no registry.
@@ -3818,8 +3818,9 @@ TestResult RunSelfTest() {
         Check(r, "blockedpeers.dialog.fills-a-right-sized-buffer",
               filled && right.size() <= cap + 64, "size=" + std::to_string(right.size()));
 
-        // The editor added three buttons and a shorter list, so cdit
-        // moved from 4 to 7 and the capacity moved with it. A capacity that
+        // The manager includes its search and scope panes alongside the
+        // existing action controls, so cdit and capacity stay synchronized.
+        // A capacity that
         // did NOT track cdit would be a buffer the dialog manager reads past
         // the end of, which is the intermittent access violation
         // PromptDialog.cpp is about - so the two are pinned together rather
@@ -9469,8 +9470,8 @@ static const unsigned char kClientHello[] = {
                     widest = (std::max)(widest, f.label.size());
                 }
             }
-            // The window's kLabelGutter is 172 logical px, which at the 96 dpi
-            // UI font holds about 26 characters. Asserted at 24 - just under the
+            // The window's kLabelGutter is 184 logical px, which at the 96 dpi
+            // UI font holds about 28 characters. Asserted at 24 - just under the
             // real vocabulary's longest ("Memory (working set)", 20) - because
             // a label that overruns the column loses its leader dots, and that
             // is the whole reason the gutter was widened from 148.
@@ -9526,6 +9527,8 @@ static const unsigned char kClientHello[] = {
             rc.enrichment.tls.secure = true;
             rc.enrichment.tls.haveSni = true;
             rc.enrichment.tls.sni = L"example.com";
+            rc.enrichment.asnOrg = L"Example Network";
+            rc.enrichment.asnNumber = 64500;
             // One row, loaded through the snapshot path the app itself uses -
             // FinalizeRow is not public, and a store with no rows would make
             // BuildDetailModel emit an empty model, which would make this check
@@ -9538,13 +9541,30 @@ static const unsigned char kClientHello[] = {
             size_t widest = 0;
             size_t labelled = 0;
             size_t total = 0;
+            size_t commandLineFields = 0;
+            size_t asOrganisationFields = 0;
+            size_t asNumberFields = 0;
             for (const DetailSection& s2 : real.sections) {
                 for (const DetailField& f2 : s2.fields) {
                     ++total;
                     if (!f2.label.empty()) ++labelled;
                     widest = (std::max)(widest, f2.label.size());
+                    if (f2.label == L"Command line") {
+                        ++commandLineFields;
+                        Check(r, "details.command-line-uses-monospace",
+                              f2.monospace);
+                    }
+                    if (f2.label == L"AS organisation") ++asOrganisationFields;
+                    if (f2.label == L"AS number") ++asNumberFields;
                 }
             }
+            Check(r, "details.asn-fields-appear-once",
+                  asOrganisationFields == 1 && asNumberFields == 1,
+                  "organisation=" + std::to_string(asOrganisationFields) +
+                      " number=" + std::to_string(asNumberFields));
+            Check(r, "details.command-line-field-present",
+                  commandLineFields == 1,
+                  "fields=" + std::to_string(commandLineFields));
             Check(r, "details.reallabels-all-present",
                   total > 0 && labelled == total);
             // 20 chars is "Memory (working set)", the real longest. Reported in
@@ -9565,9 +9585,17 @@ static const unsigned char kClientHello[] = {
                 Check(r, "details.tab-labels",
                       TabLabel(kTabProcess) == std::wstring(L"Process") &&
                       TabLabel(kTabConnection) == std::wstring(L"Connection") &&
-                      TabLabel(kTabSockets) == std::wstring(L"Sockets-of-PID") &&
+                      TabLabel(kTabSockets) == std::wstring(L"Sockets") &&
                       TabLabel(kTabSecurity) == std::wstring(L"Security") &&
                       TabLabel(kTabNotes) == std::wstring(L"Notes"));
+
+                const std::vector<DetailTab> orderedTabs =
+                    AvailableDetailTabs(built);
+                const std::vector<DetailTab> expectedTabs = {
+                    kTabProcess, kTabConnection, kTabSockets,
+                    kTabSecurity, kTabNotes};
+                Check(r, "details.tabs-follow-workflow-order",
+                      orderedTabs == expectedTabs);
 
                 std::set<DetailTab> roster;
                 std::set<std::wstring> titles;
