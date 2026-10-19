@@ -5212,6 +5212,51 @@ TestResult RunSelfTest() {
         Check(r, "sort.deterministic", first == second);
     }
 
+    // Header sorting is by the displayed process name in either direction;
+    // rows without a resolved name remain at the end instead of sorting as
+    // empty strings ahead of real process names.
+    {
+        ConnectionStore store;
+        std::vector<Connection> rows;
+        const wchar_t* const names[] = {
+            L"svchost.exe", L"chrome.exe", L"brave.exe", L"", L"—",
+        };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+            Connection row = MakeReferenceTcpRow();
+            row.identity.localPort = static_cast<UINT>(41000 + i);
+            row.identity.remotePort = static_cast<UINT>(42000 + i);
+            row.display.processName = names[i];
+            rows.push_back(row);
+        }
+        store.ReplaceSnapshot(std::move(rows));
+        ViewQuery query;
+        store.SetSort(COL_PROCESS, true);
+        store.SetView(query);
+        std::wstring ascending;
+        for (size_t i = 0; i < store.View().size(); ++i) {
+            if (i > 0) ascending += L",";
+            ascending += store.ViewRow(i)->display.processName;
+        }
+        store.SetSort(COL_PROCESS, false);
+        store.SetView(query);
+        std::wstring descending;
+        for (size_t i = 0; i < store.View().size(); ++i) {
+            if (i > 0) descending += L",";
+            descending += store.ViewRow(i)->display.processName;
+        }
+        const auto hasUnknownTail = [](const std::wstring& names,
+                                       const std::wstring& knownPrefix) {
+            if (names.compare(0, knownPrefix.size(), knownPrefix) != 0)
+                return false;
+            const std::wstring tail = names.substr(knownPrefix.size());
+            return tail == L",,—" || tail == L",—,";
+        };
+        Check(r, "sort.process-name-ascending",
+              hasUnknownTail(ascending, L"brave.exe,chrome.exe,svchost.exe"));
+        Check(r, "sort.process-name-descending",
+              hasUnknownTail(descending, L"svchost.exe,chrome.exe,brave.exe"));
+    }
+
     // 8. Traffic counters + connection counting.
     {
         ConnectionStore store;
