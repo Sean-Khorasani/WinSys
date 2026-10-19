@@ -157,6 +157,15 @@ try {
   const backHome = await page.evaluate(() => document.querySelector(".virtual-table").scrollTop);
   check("Home returns to the first row", backHome === 0, `scrollTop=${backHome}`);
 
+  const columnsSummary = page.locator(".column-layout > summary").first();
+  await columnsSummary.focus();
+  await page.keyboard.press("Enter");
+  const columnsOpen = await page.locator(".column-layout").first().evaluate((element) => element.open);
+  check("Column layout controls open from the keyboard", columnsOpen);
+  await page.keyboard.press("Tab");
+  const layoutFocus = await page.evaluate(() => document.activeElement?.getAttribute("data-layout-control"));
+  check("Column layout options enter the keyboard tab order", layoutFocus === "preset-default", `focused=${layoutFocus}`);
+
   // 5. Sidebar navigation must work from the keyboard.
   await page.goto(`${url}#/`, { waitUntil: "networkidle" });
   await page.waitForSelector(".sidebar");
@@ -187,7 +196,7 @@ try {
   await browser.close();
 }
 
-const out = resolve(repo, "docs", "img");
+const out = resolve(repo, "temp", "webui-reports");
 await mkdir(out, { recursive: true });
 await writeFile(
   resolve(out, "keyboard-report.json"),
@@ -198,5 +207,5 @@ await writeFile(
 const failed = checks.filter((c) => !c.pass).length;
 console.log("");
 console.log(`${checks.length} keyboard checks, ${failed} failed.`);
-console.log("Report: docs/img/keyboard-report.json");
+console.log("Report: temp/webui-reports/keyboard-report.json");
 process.exit(failed === 0 ? 0 : 1);
