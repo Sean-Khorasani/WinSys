@@ -293,7 +293,7 @@ The default end-mode is the hybrid: `WM_CLOSE`, then terminate if the process is
 
 ### `close`
 
-`--select SEL` tears down a single TCP connection and leaves the process running. Needs administrator rights and supports IPv4 only: `SetTcpEntry` has no IPv6 form, so an IPv6 row is refused with a message rather than silently skipped.
+`--select SEL` tears down one established IPv4 TCP connection and leaves the process running. Needs administrator rights and a known owner-process lifetime. Immediately before closing, WinTCP rechecks that process and the live TCP tuple, state, and owner PID. Windows' `SetTcpEntry` accepts only the tuple, not a PID, so a narrow race remains if Windows reuses the exact tuple between the final check and the call. IPv6, UDP, listeners, and stale or unverifiable rows are refused.
 
 ### `block`, `unblock`, `blocks`
 
