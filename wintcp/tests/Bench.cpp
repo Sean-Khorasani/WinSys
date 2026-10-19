@@ -36,6 +36,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 
 #include "ColumnsWin.h"   // profile masks
 #include "FontCache.h"
+#include "WebProcesses.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -10232,6 +10233,30 @@ void CheckWebMetrics(TestResult& r) {
           GpuEngineTypeLabel(L"luid_0x00000001_0x0000023b_phys_0")
               == std::wstring(L"luid_0x00000001_0x0000023b_phys_0"));
     Check(r, "gpu.engine-type-empty", GpuEngineTypeLabel(L"").empty());
+
+    WebProcessRow processLow;
+    processLow.pid = 100;
+    processLow.name = L"worker.exe";
+    processLow.stats.cpuKnown = true;
+    processLow.stats.cpuPct = 1.0;
+    WebProcessRow processHigh = processLow;
+    processHigh.pid = 200;
+    WebProcessRow processUnknown = processLow;
+    processUnknown.pid = 300;
+    processUnknown.stats.cpuKnown = false;
+    Check(r, "process.sort.cpu-tie-breaks-by-pid",
+          CompareProcesses(processLow, processHigh, ProcessSort::Cpu, true) &&
+          !CompareProcesses(processHigh, processLow, ProcessSort::Cpu, true));
+    Check(r, "process.sort.unknown-last-ascending",
+          CompareProcesses(processLow, processUnknown, ProcessSort::Cpu, true));
+    Check(r, "process.sort.unknown-last-descending",
+          CompareProcesses(processLow, processUnknown, ProcessSort::Cpu, false));
+    WebProcessSnapshot processSnapshot;
+    processSnapshot.known = true;
+    ProcessSnapshot publisher;
+    publisher.Publish(processSnapshot);
+    Check(r, "process.snapshot-has-revision",
+          publisher.Read().sampledAtMs > 0);
 }
 
 // ---- bench -----------------------------------------------------------------
