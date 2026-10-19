@@ -74,15 +74,17 @@ const demoGeo = {
   local: 3,
   unknown: 0,
   countries: { US: 3, CA: 2, DE: 2, GB: 1, NL: 1, JP: 1, AU: 1 },
+  asns: {},
+  snapshotKnown: true,
 };
 const fixture = {
   "/api/config": { schema: 3, preferences: { theme: "light", accent: "neutral", density: "comfortable", units: "iec" } },
   "/api/connections": { connections },
   "/api/metrics/now": metrics,
   "/api/metrics/history": { t: times, series: historySeries },
-  "/api/capabilities": { perCore: true, geoIp: { configured: true } },
+  "/api/capabilities": { elevated: false, pdh: true, perCore: true, geoIp: { configured: true } },
   "/api/processes": { processes, total: processes.length, known: true, ageMs: 250 },
-  "/api/network/summary": { total: connections.length, listeners: { wildcard: 1, lan: 1, loopback: 2 }, states: { ESTABLISHED: 11, LISTENING: 4 } },
+  "/api/network/summary": { total: connections.length, byState: { ESTABLISHED: 11 }, byProto: { TCP: 11 }, byFamily: { IPv4: 11 }, byProcess: {}, listeners: { wildcard: 1, lan: 1, loopback: 2 }, snapshotKnown: true },
   "/api/geo/summary": demoGeo,
   "/api/system/info": {
     hostname: "Example workstation",
@@ -114,7 +116,7 @@ async function installFixtures(page) {
 
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "light", deviceScaleFactor: 1 });
-const output = resolve(repo, "docs", "img");
+const output = resolve(process.env.WINTCP_SCREENSHOT_DIR || resolve(repo, "docs", "img"));
 await mkdir(output, { recursive: true });
 
 async function capture(route, file, prepare) {
@@ -144,7 +146,7 @@ try {
   ]) await capture(route, file);
 
   await capture("#/network", "webui-network-flows.png", async (page) => {
-    await page.getByText("Flows", { exact: true }).click();
+    await page.getByRole("tab", { name: "Flows", exact: true }).click();
     await page.waitForSelector(".bar-list .bar-row");
     await page.waitForTimeout(200);
   });
