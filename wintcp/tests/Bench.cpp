@@ -1220,9 +1220,7 @@ const unsigned char kGoogleV6[16] = {0x20,0x01,0x48,0x60,0x48,0x60,0,0,0,0,0,0,0
 const unsigned char kCloudflareV6[16] = {0x26,0x06,0x47,0x00,0x47,0x00,0,0,0,0,0,0,0,0,0x11,0x11};
 
 bool FindFixturesDir(std::wstring* out) {
-    // The binary runs from build/tests or build-fast/tests, so the repo root is
-    // two or three levels up. Walking up from the current directory is the only
-    // way that works for both, and for a bare run from the repo root too.
+    // The binary runs from build/dev, so the repo root is two levels up.
     wchar_t cwd[MAX_PATH] = {0};
     if (::GetCurrentDirectoryW(MAX_PATH, cwd) == 0) return false;
     for (int i = 0; i < 5; ++i) {
