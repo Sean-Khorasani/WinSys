@@ -1,6 +1,6 @@
 {
-  "when": "2026-10-18T03:45:20.954Z",
-  "url": "http://127.0.0.1:58250",
+  "when": "2026-10-19T01:45:11.905Z",
+  "url": "http://127.0.0.1/",
   "results": [
     {
       "name": "Wrong Host header is rejected",
@@ -80,7 +80,7 @@
     {
       "name": "Traversal refused: /legacy/../app.js",
       "pass": true,
-      "detail": "403"
+      "detail": "404"
     },
     {
       "name": "Traversal refused: /js/subdir/../../../../Windows/win.ini",
