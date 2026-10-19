@@ -199,6 +199,28 @@ try {
     const { matchesConnectionQuery, parseConnectionQuery } = await import("/js/filterquery.js");
     const { normalizeFirewallInventory, explainFirewallRuleMatch } = await import("/js/firewallinventory.js");
     const { renderTreemap } = await import("/js/charts/treemap.js");
+    const { connectionPopup, mapData } = await import("/js/pages/map.js");
+    const mapFixture = mapData({ features: [{
+      id: "US", properties: { iso2: "US", name: "United States" },
+      geometry: { type: "Polygon", coordinates: [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]] },
+    }] }, { geoSummary: { geoIpConfigured: true }, connections: [
+      { id: "live-1", pid: 7, process: "client.exe", proto: "TCPv4", remote: "203.0.113.7", rport: 443, country: "US" },
+      { id: "closed-1", pid: 8, process: "closed.exe", remote: "203.0.113.8", country: "US", removed: true },
+      { id: "unknown-1", pid: 9, process: "unknown.exe", remote: "—", country: "US" },
+    ] });
+    check("Map colors only live GeoIP-matched countries and preserves exact connection identity",
+      mapFixture.countries.features[0].properties.count === 1 &&
+      mapFixture.connections.features.length === 1 &&
+      mapFixture.connections.features[0].properties.connectionKey === "connection:connection:live-1" &&
+      mapFixture.connections.features[0].properties.remote === "203.0.113.7" &&
+      mapFixture.topCountries[0].count === 1);
+    let inspectedMapConnection = "";
+    const mapInspectListener = (event) => { inspectedMapConnection = event.detail?.key || ""; };
+    document.addEventListener("wintcp:inspect-connection", mapInspectListener);
+    connectionPopup(mapFixture.connections.features[0].properties)
+      .querySelector(".map-inspect-action")?.click();
+    document.removeEventListener("wintcp:inspect-connection", mapInspectListener);
+    check("Map marker details action requests the exact connection inspector", inspectedMapConnection === "connection:connection:live-1");
     check("Process drilldowns prefer creation identity over a reused PID", matchesConnectionFilters({ pid: 20, processInstanceId: "20:1:2" }, [processConnectionFilter({ pid: 20, instanceId: "20:1:2" })]) && !matchesConnectionFilters({ pid: 20, processInstanceId: "20:9:9" }, [processConnectionFilter({ pid: 20, instanceId: "20:1:2" })]));
     check("Scoped port filters compare numeric values exactly", matchesConnectionFilters({ rport: 443 }, [{ field: "rport", value: 443 }]) && !matchesConnectionFilters({ rport: 1443 }, [{ field: "rport", value: 443 }]));
     let invalidFilterRefused = false;
@@ -323,7 +345,6 @@ try {
       remoteIpValue(scopedUnspecifiedEndpoint) === null && remoteEndpointValue(scopedUnspecifiedEndpoint) === null &&
       remoteHostnameValue({ ...listeningEndpoint, hostname: "bogus.example" }) === null &&
       remoteIpValue(liveEndpoint) === "fe80::1%12" && remoteEndpointValue(liveEndpoint) === "[fe80::1%12]:443");
-    const { mapData } = await import("/js/pages/map.js");
     const mapCountry = { type: "Feature", id: "US", properties: { name: "United States of America" }, geometry: { type: "Polygon", coordinates: [[[-130, 20], [-60, 20], [-60, 55], [-130, 55], [-130, 20]]] } };
     const mapSnapshot = mapData({ type: "FeatureCollection", features: [mapCountry] }, {
       geoSummary: { geoIpConfigured: true },
@@ -1171,8 +1192,42 @@ try {
     await settle();
     host.querySelector('#panel-connections .virtual-table-row')?.click();
     await settle();
-    const networkDetails = document.querySelector('[data-details-row="net"]');
+    let networkDetails = document.querySelector('[data-details-row="net"]');
     check("Network connection details open from the captured row", Boolean(networkDetails));
+    document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    check("Escape closes the topmost connection inspector", !networkDetails?.isConnected);
+    host.querySelector('#panel-connections [data-row-key="connection:1"]')?.click();
+    networkDetails = document.querySelector('[data-details-row="net"]');
+    check("Connection inspector groups identity and endpoint facts with per-field copy controls",
+      networkDetails?.textContent.includes("Identity") && networkDetails?.textContent.includes("Endpoints") &&
+      networkDetails?.textContent.includes("Activity") && networkDetails?.textContent.includes("Rules") &&
+      Boolean(networkDetails?.querySelector('[aria-label="Copy Remote endpoint"]')));
+    host._netUpdate({ lastUpdate: Date.now(), connections: sample.connections.map((row) =>
+      row.id === 1 ? { ...row, state: "CLOSE_WAIT" } : { ...row }), geoSummary: {} });
+    check("Connection inspector follows an exact matching identity across a live update",
+      networkDetails?.textContent.includes("CLOSE_WAIT"));
+    networkDetails?.querySelector('button[aria-pressed="false"]')?.click();
+    host._netUpdate({ lastUpdate: Date.now(), connections: sample.connections.map((row) =>
+      row.id === 1 ? { ...row, state: "FIN_WAIT_1" } : { ...row }), geoSummary: {} });
+    check("Held connection inspection keeps captured values and announces held state",
+      networkDetails?.textContent.includes("CLOSE_WAIT") && networkDetails?.textContent.includes("Held at the values"));
+    networkDetails?.querySelector('button[aria-pressed="true"]')?.click();
+    host._netUpdate({ lastUpdate: Date.now(), connections: sample.connections.map((row) =>
+      row.id === 1 ? { ...row, state: "FIN_WAIT_1" } : { ...row }), geoSummary: {} });
+    check("Resuming connection inspection returns to the same identity's latest values",
+      networkDetails?.textContent.includes("FIN_WAIT_1"));
+    networkDetails?.querySelector('button[aria-pressed="false"]')?.click();
+    host._netUpdate({ lastUpdate: Date.now(), connections: sample.connections.filter((row) => row.id !== 1), geoSummary: {} });
+    check("Held inspection reports an endpoint disappearing without replacing captured values",
+      networkDetails?.textContent.includes("no longer in the latest endpoint snapshot") &&
+      networkDetails?.textContent.includes("FIN_WAIT_1"), JSON.stringify({
+        text: networkDetails?.textContent, inspectorKey: networkDetails?.dataset.inspectorKey,
+        active: document.querySelector(".inspector-dialog")?.dataset.inspectorKey,
+      }));
+    networkDetails?.querySelector('button[aria-pressed="true"]')?.click();
+    check("Resuming a held item that disappeared reports stale captured evidence",
+      networkDetails?.textContent.includes("Showing the last captured details") &&
+      networkDetails?.textContent.includes("FIN_WAIT_1"));
     host._netDestroy();
     check("Leaving Network closes its connection inspector", !networkDetails?.isConnected);
     host.replaceChildren();
@@ -1423,7 +1478,7 @@ try {
       { pid: 100, instanceId: "100:1:100", name: "parent.exe", ppid: 1, cpuPct: 1, memWs: 16, connections: 0 },
       { pid: 101, instanceId: "101:1:101", name: "child.exe", ppid: 100, cpuPct: 2, memWs: 8, connections: 1 },
       { pid: 102, instanceId: "102:1:102", name: "sibling.exe", ppid: 100, cpuPct: 0, memWs: 4, connections: 0 },
-      { pid: 105, instanceId: "105:1:105", name: "child.exe", ppid: 100, cpuPct: 1, memWs: 3, connections: 0 },
+      { pid: 105, instanceId: "105:1:105", name: "child.exe", path: "C:\\Apps\\child.exe", ppid: 100, cpuPct: 1, memWs: 3, connections: 0 },
       { pid: 106, instanceId: "106:1:106", name: "orphan.exe", ppid: 999, cpuPct: 0, memWs: 1, connections: 0 },
       { pid: 103, instanceId: "103:1:103", name: "cycle-a.exe", ppid: 104, cpuPct: 0, memWs: 2, connections: 0 },
       { pid: 104, instanceId: "104:1:104", name: "cycle-b.exe", ppid: 103, cpuPct: 0, memWs: 2, connections: 0 },
@@ -1473,6 +1528,20 @@ try {
     await settle();
     const treeProcessDetails = document.querySelector('[data-details-row="proc"]');
     check("Tree Enter opens details for the exact process instance", treeProcessDetails?.querySelector(".dialog-title")?.textContent === "child.exe" && treeProcessDetails.textContent.includes("105"));
+    check("Process inspector exposes lifetime identity, unknown reasons, and copyable path",
+      treeProcessDetails?.textContent.includes("Process instance") &&
+      treeProcessDetails?.textContent.includes("Activity") &&
+      Boolean(treeProcessDetails?.querySelector('[aria-label="Copy Executable path"]')) &&
+      [...treeProcessDetails.querySelectorAll(".inspector-footer button")].some((button) => button.textContent.includes("Show this process's connections")) &&
+      [...treeProcessDetails.querySelectorAll(".inspector-footer button")].some((button) => button.textContent.includes("Review app firewall block")));
+    const reusedChildRows = treeRows.map((row) => row.pid === 105
+      ? { ...row, instanceId: "105:1:999", name: "reused-child.exe" } : row);
+    treeStore.set({ processes: reusedChildRows, processFilter: "", lastUpdate: new Date() });
+    updateProcesses(host, treeStore);
+    await new Promise((done) => setTimeout(done, 30));
+    check("Process inspector refuses to follow a reused PID and preserves captured evidence",
+      treeProcessDetails?.textContent.includes("This process instance exited") &&
+      treeProcessDetails?.querySelector(".dialog-title")?.textContent === "child.exe");
     treeProcessDetails?.querySelector('[aria-label="Close"]')?.click();
     const replacedTreeRows = treeRows.map((row) => row.pid === 100 ? { ...row, instanceId: "100:1:99" } : row);
     treeStore.set({ processes: replacedTreeRows, processFilter: "child.exe", lastUpdate: new Date() });
@@ -1517,7 +1586,7 @@ try {
 
     const sortProcesses = [
       { pid: 10, instanceId: "10:1:10", name: "svchost10.exe", ppid: 4, cpuPct: 0, memWs: 736100352, memPrivate: 736100352, ioRead: "9007199254740993", ioWrite: 0 },
-      { pid: 2, instanceId: "2:1:2", name: "Chrome.exe", ppid: 4, cpuPct: 0, memWs: 0, ioRead: 0 },
+      { pid: 2, instanceId: "2:1:2", name: "Chrome.exe", path: "C:\\Program Files\\Fixture\\chrome.exe", service: "FixtureSvc", ppid: 4, cpuPct: 0, memWs: 0, ioRead: 0 },
       { pid: 3, instanceId: "3:1:3", name: "svchost2.exe", ppid: 4, cpuPct: 0, memWs: null, ioRead: null },
       { pid: 4, instanceId: "4:1:4", name: "—", ppid: 0, cpuPct: 0, memWs: 1, ioRead: "9007199254740992" },
     ];
@@ -1526,6 +1595,24 @@ try {
     });
     setFormatUnits("iec");
     await renderProcesses(host, processStore);
+    const processFilter = host.querySelector("#proc-filter");
+    processFilter.value = "FixtureSvc";
+    processFilter.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((done) => setTimeout(done, 150));
+    check("Process text filter searches service attribution and offers a clear action",
+      host.querySelectorAll("#panel-table .virtual-table-row").length === 1 &&
+      host.querySelector('#panel-table [data-row-key="2:1:2"]') &&
+      !host.querySelector('#panel-table [data-row-key="10:1:10"]') &&
+      !host.querySelector("#proc-filter-clear").hidden);
+    processFilter.value = "Program Files\\Fixture";
+    processFilter.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((done) => setTimeout(done, 150));
+    check("Process text filter searches executable paths without changing instance identity",
+      host.querySelectorAll("#panel-table .virtual-table-row").length === 1 &&
+      host.querySelector('#panel-table [data-row-key="2:1:2"]'));
+    host.querySelector("#proc-filter-clear").click();
+    await new Promise((done) => setTimeout(done, 150));
+    check("Clearing the process filter restores all rows", host.querySelectorAll("#panel-table .virtual-table-row").length === 4);
     const memoryCell = () => host.querySelector('#panel-table [data-row-key="10:1:10"] [data-column-key="memWs"]');
     const ioReadCell = () => host.querySelector('#panel-table [data-row-key="10:1:10"] [data-column-key="ioRead"]');
     const zeroMemoryCell = host.querySelector('#panel-table [data-row-key="2:1:2"] [data-column-key="memWs"]');
@@ -1716,9 +1803,13 @@ try {
     await settle();
     const groupedInstanceDetails = document.querySelector('[data-details-row="proc"]');
     check("Grouped treemap drilldown opens details for the selected exact process instance",
-      groupedInstanceDetails?.querySelector(".dialog-title")?.textContent === "browser.exe" &&
+      groupedInstanceDetails?.querySelector(".inspector-title")?.textContent === "browser.exe" &&
       [...groupedInstanceDetails.querySelectorAll("dt")].some((label) =>
-        label.textContent === "PID" && label.nextElementSibling?.textContent === "2002"));
+        label.textContent === "PID" && label.nextElementSibling?.querySelector("span")?.textContent === "2002"), JSON.stringify({
+          title: groupedInstanceDetails?.querySelector(".inspector-title")?.textContent,
+          fields: [...(groupedInstanceDetails?.querySelectorAll("dt") || [])].map((label) => [label.textContent, label.nextElementSibling?.textContent]),
+          group: groupDialog?.textContent,
+        }));
     groupedInstanceDetails?.querySelector('[aria-label="Close"]')?.click();
     host._procDestroy();
     host.style.removeProperty("width");
@@ -2222,6 +2313,26 @@ try {
     settingsTabTwo.getByLabel("Theme", { exact: true }).inputValue(),
   ]);
   results.push({ name: "Same-field cross-tab conflict converges both Settings tabs to the acknowledged server value", pass: visibleThemes.every((theme) => theme === acknowledgedTheme), detail: `server=${acknowledgedTheme}; tabs=${visibleThemes.join(",")}` });
+  await Promise.all([settingsTabOne.goto(`http://127.0.0.1:${server.address().port}/index.html#/network`), settingsTabTwo.goto(`http://127.0.0.1:${server.address().port}/index.html#/network`)]);
+  await Promise.all([
+    settingsTabOne.getByRole("tab", { name: "Connections", exact: true }).click(),
+    settingsTabTwo.getByRole("tab", { name: "Connections", exact: true }).click(),
+  ]);
+  await Promise.all([
+    settingsTabOne.locator("#panel-connections .column-layout").evaluate((details) => { details.open = true; }),
+    settingsTabTwo.locator("#panel-connections .column-layout").evaluate((details) => { details.open = true; }),
+  ]);
+  await Promise.all([
+    settingsTabOne.locator('#panel-connections [aria-label="Show Country column"]').waitFor({ state: "attached" }),
+    settingsTabTwo.locator('#panel-connections [aria-label="Show Country column"]').waitFor({ state: "attached" }),
+  ]);
+  const countryVisibility = await settingsTabOne.locator('#panel-connections [aria-label="Show Country column"]').isChecked();
+  await settingsTabOne.locator('#panel-connections [aria-label="Show Country column"]').evaluate((input) => input.click());
+  await settingsTabOne.getByText("Layout saved", { exact: true }).waitFor();
+  await settingsTabTwo.waitForFunction((expected) =>
+    document.querySelector('#panel-connections [aria-label="Show Country column"]')?.checked === expected,
+  !countryVisibility, { timeout: 5000 });
+  results.push({ name: "A saved table layout synchronizes to the other open Network tab", pass: await settingsTabTwo.locator('#panel-connections [aria-label="Show Country column"]').isChecked() !== countryVisibility });
   await settingsContext.close();
   const failureChecks = await page.evaluate(async () => {
     const { api } = await import("/js/api.js");
@@ -2842,6 +2953,7 @@ try {
   results.push({ name: "Successful firewall refresh updates inventory without resetting its filter or table", pass: await firewallFilter.inputValue() === "WinTCP candidate fixture" && await navigationPage.getByText("WinTCP candidate fixture", { exact: true }).count() === 1 && refreshedTablePreserved, detail: JSON.stringify({ refreshedTablePreserved }) });
   await firewallFilter.fill("");
   await navigationPage.getByRole("tab", { name: "Listening", exact: true }).click();
+  results.push({ name: "Listening endpoint table has its own configurable column layout", pass: await navigationPage.locator("#panel-listening .column-layout > summary").count() === 1 });
   await navigationPage.locator('[data-row-key="connection:2"]').click({ button: "right" });
   await navigationPage.getByRole("menuitem", { name: "Find inbound firewall rules for this listening port", exact: true }).click();
   await navigationPage.getByRole("tab", { name: "Firewall rules", exact: true }).waitFor();
@@ -2849,6 +2961,73 @@ try {
   const inboundCandidateRows = await navigationPage.locator(".firewall-inventory .virtual-table-row").allInnerTexts();
   results.push({ name: "Listening action opens only inbound rules matching the captured local port", pass: inboundCandidateRows.length === 1 && inboundCandidateRows[0].includes("Inbound") && inboundCandidateRows[0].includes("Local port: exact") && !inboundCandidateRows[0].includes("Outbound"), detail: JSON.stringify(inboundCandidateRows) });
   await navigationPage.getByRole("button", { name: "Show all rules", exact: true }).click();
+  await navigationPage.goto(`http://127.0.0.1:${server.address().port}/index.html#/network`, { waitUntil: "domcontentloaded" });
+  await navigationPage.getByRole("heading", { name: "Network", exact: true }).waitFor();
+  await navigationPage.getByRole("tab", { name: "Connections", exact: true }).click();
+  await navigationPage.locator('#panel-connections [data-row-key="connection:1"]').waitFor();
+  const responsiveResults = [];
+  for (const width of [390, 768, 1366, 1920, 1152, 960, 720]) {
+    await navigationPage.setViewportSize({ width, height: 760 });
+    await navigationPage.waitForTimeout(40);
+    const dimensions = await navigationPage.evaluate(() => ({
+      viewport: window.innerWidth,
+      document: document.documentElement.scrollWidth,
+      body: document.body.scrollWidth,
+      overflowing: [...document.body.querySelectorAll("*")]
+        .map((element) => ({
+          selector: `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ""}.${String(element.className?.baseVal || element.className || "").trim().replace(/\s+/g, ".")}`,
+          right: Math.round(element.getBoundingClientRect().right),
+          width: Math.round(element.getBoundingClientRect().width),
+        }))
+        .filter((item) => item.width && item.right > window.innerWidth + 1)
+        .slice(0, 8),
+    }));
+    responsiveResults.push({ width, fits: dimensions.document <= dimensions.viewport && dimensions.body <= dimensions.viewport, dimensions });
+  }
+  results.push({ name: "Network page fits mobile, tablet, laptop, wide and zoom-equivalent viewports without page-level horizontal overflow", pass: responsiveResults.every((item) => item.fits), detail: JSON.stringify(responsiveResults) });
+  await navigationPage.setViewportSize({ width: 1366, height: 540 });
+  const shortHeight = await navigationPage.evaluate(() => ({
+    viewportHeight: window.innerHeight,
+    tableHeight: document.querySelector("#panel-connections .virtual-table")?.getBoundingClientRect().height || 0,
+    headerBottom: document.querySelector(".network-page-heading")?.getBoundingClientRect().bottom || 0,
+  }));
+  results.push({ name: "Network table remains usable at short laptop height", pass: shortHeight.tableHeight > 180 && shortHeight.headerBottom < shortHeight.viewportHeight, detail: JSON.stringify(shortHeight) });
+  await navigationPage.setViewportSize({ width: 1366, height: 760 });
+  await navigationPage.emulateMedia({ reducedMotion: "reduce" });
+  const reducedMotion = await navigationPage.evaluate(() => {
+    const duration = getComputedStyle(document.querySelector(".sidebar-item")).transitionDuration.split(",")
+      .map((value) => parseFloat(value) * (value.trim().endsWith("ms") ? 1 : 1000));
+    return { preference: matchMedia("(prefers-reduced-motion: reduce)").matches,
+      durations: duration, respectsPreference: duration.every((value) => value <= 0.01) };
+  });
+  results.push({ name: "Web UI honors reduced-motion preference across shared components", pass: reducedMotion.preference && reducedMotion.respectsPreference, detail: JSON.stringify(reducedMotion) });
+  await navigationPage.emulateMedia({ reducedMotion: "no-preference" });
+  await navigationPage.emulateMedia({ forcedColors: "active" });
+  await navigationPage.locator("#net-filter").focus();
+  const forcedColors = await navigationPage.evaluate(() => ({
+    active: matchMedia("(forced-colors: active)").matches,
+    surfaceBackground: getComputedStyle(document.querySelector("#panel-connections .virtual-table") || document.body).backgroundColor,
+  }));
+  results.push({ name: "Forced-colors mode applies a system-color table surface", pass: forcedColors.active && forcedColors.surfaceBackground !== "rgba(0, 0, 0, 0)", detail: JSON.stringify(forcedColors) });
+  await navigationPage.emulateMedia({ forcedColors: "none" });
+  await navigationPage.setViewportSize({ width: 390, height: 760 });
+  await navigationPage.locator('#panel-connections [data-row-key="connection:1"]').click();
+  const mobileInspector = navigationPage.locator(".inspector-dialog");
+  await mobileInspector.waitFor();
+  const mobileBounds = await mobileInspector.boundingBox();
+  results.push({ name: "Narrow connection inspection uses an in-bounds modal presentation", pass: await mobileInspector.evaluate((node) => node.classList.contains("is-modal")) && Boolean(mobileBounds && mobileBounds.x >= 0 && mobileBounds.x + mobileBounds.width <= 390 && mobileBounds.y >= 0), detail: JSON.stringify(mobileBounds) });
+  await mobileInspector.locator(".inspector-width").evaluate((input) => {
+    input.value = "352";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await navigationPage.setViewportSize({ width: 1366, height: 760 });
+  await navigationPage.waitForFunction(() => document.querySelector(".inspector-dialog")?.classList.contains("is-docked"));
+  results.push({ name: "Wide connection inspection switches to a docked side panel", pass: await mobileInspector.evaluate((node) => node.classList.contains("is-docked")) });
+  await mobileInspector.getByRole("button", { name: "Close inspector" }).click();
+  await navigationPage.locator('#panel-connections [data-row-key="connection:1"]').click();
+  const reopenedInspectorWidth = await navigationPage.locator(".inspector-width").inputValue();
+  results.push({ name: "Inspector width preference persists for its view", pass: reopenedInspectorWidth === "352", detail: reopenedInspectorWidth });
+  await navigationPage.locator(".inspector-dialog").getByRole("button", { name: "Close inspector" }).click();
   await navigationPage.close();
   await page.evaluate(async () => {
     const { createVirtualTable } = await import("/js/ui/virtualtable.js");
