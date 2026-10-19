@@ -6,7 +6,7 @@
 
 #define WINTCP_VERSION_MAJOR 1
 #define WINTCP_VERSION_MINOR 0
-#define WINTCP_VERSION_PATCH 2
+#define WINTCP_VERSION_PATCH 4
 
 // The resource compiler uses this plain string for file and product metadata.
-#define WINTCP_VERSION_STRING "1.0.2"
+#define WINTCP_VERSION_STRING "1.0.4"
