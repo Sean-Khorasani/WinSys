@@ -6,6 +6,8 @@
 
 #include "DetailModel.h"
 
+#include <algorithm>
+
 namespace wintcp {
 namespace {
 
@@ -96,11 +98,27 @@ const wchar_t* TabLabel(DetailTab t) {
     switch (t) {
         case kTabProcess:    return L"Process";
         case kTabConnection: return L"Connection";
-        case kTabSockets:    return L"Sockets-of-PID";
+        case kTabSockets:    return L"Sockets";
         case kTabSecurity:   return L"Security";
         case kTabNotes:      return L"Notes";
         default:             return L"—";
     }
+}
+
+std::vector<DetailTab> AvailableDetailTabs(const DetailModel& model) {
+    std::vector<DetailTab> tabs;
+    for (unsigned ordinal = 0; ordinal < kTabCount; ++ordinal) {
+        const DetailTab tab = static_cast<DetailTab>(ordinal);
+        const bool available =
+            tab == kTabSockets
+                ? !model.connectionLines.empty()
+                : std::any_of(model.sections.begin(), model.sections.end(),
+                              [tab](const DetailSection& section) {
+                                  return section.tab == tab;
+                              });
+        if (available) tabs.push_back(tab);
+    }
+    return tabs;
 }
 
 }  // namespace wintcp
