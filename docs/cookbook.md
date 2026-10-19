@@ -4,9 +4,9 @@
 
 Worked recipes for questions that a Windows user cannot answer with a single built-in command (`netstat`, `tasklist`, `taskkill`, `Get-NetTCPConnection`, `Get-Process`, `netsh`, `pktmon`), and not with the obvious two- or three-step pipeline either. Where Linux has a tool for the job it is named; where Windows has half a tool, the recipe says which half.
 
-**How to read a recipe.** Each one gives the command, real output, and a short table explaining the switches that carry the answer and *why each is in that command*. Most tools of this kind fail silently when a switch is wrong, so knowing which switch is load-bearing for which question is the useful part, even if you never run the command.
+**How to read a recipe.** Each one gives a command, illustrative output, and a short table explaining the switches that carry the answer and why they are included.
 
-**About the output.** Output was captured by running each command on one Windows 11 host. PIDs, process names, ports and byte totals are machine-specific and will differ on yours; the *shapes* are the point. Every recipe that can run as a standard user was run as one, and recipes that need administrator rights say so up front. Recipe numbers are stable identifiers and are not renumbered when recipes are regrouped.
+**About the examples.** Commands and output are illustrative. Process names, PIDs, addresses, ports, and measurements are examples, not defaults; results vary by machine. Documentation-only IP ranges are used, so country and ASN labels illustrate output rather than describe those reserved addresses. Recipes that require administrator rights say so up front.
 
 Background pages: [filter language](filters.md), [CLI reference](cli.md), [traffic counters](traffic.md).
 
@@ -60,8 +60,6 @@ Background pages: [filter language](filters.md), [CLI reference](cli.md), [traff
 | [35](#35-what-can-this-build-do-on-this-machine-and-what-is-missing) | What can this build do on this machine, and what is missing? | no |
 | [36](#36-why-does-my-json-parser-wait-for-the-array-to-close) | Why does my JSON parser wait for the array to close? | no |
 
-The benchmark and self-test (formerly recipes 31 and 32) are developer tools, not user features.
-
 ---
 
 ## Act on live connections
@@ -73,16 +71,16 @@ The benchmark and self-test (formerly recipes 31 and 32) are developer tools, no
 **Needs administrator rights.** `close` tears down a single socket instead of killing its owner. This is the case where "the process survives" *is* the requirement: the app is a remote-support agent, and the user wants that one session gone, not the whole agent.
 
 ```bat
-wintcp.exe list --filter "process:AnyDesk.exe state:estab" --columns pid,process,local,remote,rport,state
-wintcp.exe close --select "pid:5168 remote:107.155.105.90" --dry-run
-wintcp.exe close --select "pid:5168 remote:107.155.105.90" --yes
+wintcp.exe list --filter "process:RemoteSupport.exe state:estab" --columns pid,process,local,remote,rport,state
+wintcp.exe close --select "pid:5168 remote:203.0.113.90" --dry-run
+wintcp.exe close --select "pid:5168 remote:203.0.113.90" --yes
 ```
 
 ```text
   PID  Process                      Local address                 Remote address   Remote port  State
- 5168  AnyDesk.exe                  10.0.0.92                     107.155.105.90            443  ESTABLISHED
+ 5168  RemoteSupport.exe                  192.0.2.92                     203.0.113.90            443  ESTABLISHED
 
-close 10.0.0.92:48433 -> 107.155.105.90:443 pid 5168
+close 192.0.2.92:48433 -> 203.0.113.90:443 pid 5168
 ```
 
 | Switch | Why it is in this command |
@@ -127,16 +125,16 @@ Before killing, the PID is re-validated against the process's **creation time**,
 **Needs administrator rights.** `netsh advfirewall` can add a rule but cannot tear down the live connection, and nothing pairs add with remove. `block` does both layers, `blocks` audits, `unblock` undoes.
 
 ```bat
-wintcp.exe block  --select "remote:20.47.110.73 state:estab" --dry-run
-wintcp.exe block  --select "remote:20.47.110.73 state:estab" --yes
+wintcp.exe block  --select "remote:203.0.113.73 state:estab" --dry-run
+wintcp.exe block  --select "remote:203.0.113.73 state:estab" --yes
 wintcp.exe blocks
-wintcp.exe unblock --address 20.47.110.73 --port 443 --yes
+wintcp.exe unblock --address 203.0.113.73 --port 443 --yes
 ```
 
 ```text
-block 10.0.0.92:41723 -> 20.47.110.73:443
+block 192.0.2.92:41723 -> 203.0.113.73:443
 wintcp-firewall-rules: 1
-unblock 20.47.110.73:443
+unblock 203.0.113.73:443
 ```
 
 | Switch | Why it is in this command |
@@ -203,7 +201,7 @@ wintcp.exe list --group --traffic --sort nettotal --desc --limit 4 --columns pid
 ```text
   PID  Process                       Net total    Received        Sent
  5580  svchost.exe                     19.4 KB     12.5 KB      7.0 KB
- 5168  AnyDesk.exe                      4.1 KB      1.8 KB      2.3 KB
+ 5168  RemoteSupport.exe                      4.1 KB      1.8 KB      2.3 KB
  9128  svchost.exe                         —           —           —
  3372  svchost.exe                         —           —           —
 ```
@@ -215,7 +213,7 @@ wintcp.exe list --group --traffic --sort nettotal --desc --limit 4 --columns pid
 | `list --sort nettotal` | Sorts by rx plus tx. For "who is using the network" the two directions together are the answer. Recipe 6 splits them. |
 | `--desc` | Without it you get the *quietest* processes first: a plausible-looking wrong answer rather than an error. |
 | `list --limit 4` | Combined with `--sort … --desc` this is "the top 4". |
-| `--columns pid,…` | **The PID is not decoration.** `svchost.exe` appears twice above and those are two *different* processes, as is every `chrome.exe`, `brave.exe` or `firefox.exe` row on a normal desktop. A per-process table without a PID cannot be acted on: you cannot tell which instance to close, and the totals cannot be attributed. |
+| `--columns pid,…` | **The PID is not decoration.** `svchost.exe` appears twice above and those are two *different* processes, as is every `Browser.exe`, `Browser.exe` or `firefox.exe` row on a normal desktop. A per-process table without a PID cannot be acted on: you cannot tell which instance to close, and the totals cannot be attributed. |
 
 ### 6. Upload versus download
 
@@ -228,7 +226,7 @@ wintcp.exe list --group --traffic --sort tx --desc --limit 4 --columns pid,proce
 ```text
   PID  Process                           Sent    Received
  5580  svchost.exe                     7.0 KB     12.5 KB
- 5168  AnyDesk.exe                     2.3 KB      1.8 KB
+ 5168  RemoteSupport.exe                     2.3 KB      1.8 KB
  9128  svchost.exe                          —           —
  3372  svchost.exe                          —           —
 ```
@@ -252,7 +250,7 @@ wintcp.exe list --group --traffic --filter "tx:1KB" --sort tx --desc --columns p
   PID  Process                            Sent
  6500  tailscaled.exe                 162.8 KB
  5580  svchost.exe                      7.0 KB
- 5168  AnyDesk.exe                      2.3 KB
+ 5168  RemoteSupport.exe                      2.3 KB
 ```
 
 The unit suffix is what makes this usable: `tx:1KB` selects 162.8 KB, while `tx:1` would have meant 1 **MB** and matched nothing. That asymmetry (bare means MB, so a small threshold needs an explicit unit) is the one thing to remember.
@@ -296,7 +294,7 @@ wintcp.exe list --traffic --watch 2 --count 4 --sort bandwidth --desc --limit 3 
 
 ```text
   PID  Process             Remote address   Remote port  Speed
- 5580  svchost.exe         172.172.255.216          443  13.2 KB/s / 6.4 KB/s
+ 5580  svchost.exe         203.0.113.216          443  13.2 KB/s / 6.4 KB/s
 ```
 
 | Switch | Why it is in this command |
@@ -320,25 +318,25 @@ wintcp.exe list --traffic --group --sort procspeed --desc --limit 6 --columns pi
 
 ```text
  Process                      Rate                            Process rate
- AnyDesk.exe                  idle                            idle
+ RemoteSupport.exe                  idle                            idle
  svchost.exe                  idle                            idle
- cline.exe                  idle                            idle
+ Editor.exe                  idle                            idle
 ```
 
 ```text
 Process                      Rate                            Process rate
-AnyDesk.exe                  idle                            idle
-Avira.Spotlight.Service.exe  —                               —
+RemoteSupport.exe                  idle                            idle
+SecurityAgent.exe            —                               —
 svchost.exe                  idle                            idle
 wslrelay.exe                 —                               —
 tailscaled.exe               —                               —
-cline.exe                    idle                            idle
+Editor.exe                    idle                            idle
 ```
 
 ```text
   PID  Process                      Process rate
  6500  tailscaled.exe               ↓ 0 B/s  ↑ 365 B/s
- 20868  brave.exe                    idle
+ 20868  Browser.exe                    idle
   6436  wslrelay.exe                 idle
   5404  jhi_service.exe             idle
 ```
@@ -372,7 +370,7 @@ wintcp.exe list --traffic --filter "duration:1h" --sort duration --desc --limit 
 
 ```text
   PID  Process                      Remote address   Remote port      Duration
- 5580  svchost.exe                  172.172.255.216          443        4h 12m
+ 5580  svchost.exe                  203.0.113.216          443        4h 12m
 ```
 
 Both commands print the same single row on this machine. The reason is explained below.
@@ -398,9 +396,9 @@ wintcp.exe list --traffic --sort rtt --desc --limit 4 --columns process,remote,r
 
 ```text
 Process                      Remote address   Remote port        RTT    Min RTT          Cwnd       Retrans
-chrome.exe                   74.6.160.107             443         30         20       21.2 KB           0 B
-brave.exe                    185.199.110.133          443         17         15       16.6 KB           0 B
-cline.exe                    127.0.0.1              19536         <1          -       63.8 KB           0 B
+Browser.exe                   198.51.100.107             443         30         20       21.2 KB           0 B
+Browser.exe                    198.51.100.133          443         17         15       16.6 KB           0 B
+Editor.exe                    127.0.0.1              19536         <1          -       63.8 KB           0 B
 ```
 
 Most data lost to retransmission first:
@@ -411,10 +409,10 @@ wintcp.exe list --traffic --sort retrans --desc --limit 4 --columns process,remo
 
 ```text
 Process                      Remote address   Remote port        RTT    Min RTT          Cwnd       Retrans
-chrome.exe                   157.90.91.72             443        219        165       21.3 KB        4.5 KB
-Telegram.exe                 149.154.167.92           443        235        171       21.8 KB        2.8 KB
-brave.exe                    140.248.153.91           443         25          6       23.8 KB         768 B
-chrome.exe                   100.26.11.145            443         83         63       33.3 KB         232 B
+Browser.exe                   198.51.100.72             443        219        165       21.3 KB        4.5 KB
+Messenger.exe                 203.0.113.92           443        235        171       21.8 KB        2.8 KB
+Browser.exe                    203.0.113.91           443         25          6       23.8 KB         768 B
+Browser.exe                   198.51.100.145            443         83         63       33.3 KB         232 B
 ```
 
 Yours will usually be thinner than this. `--traffic` reports what the kernel hands back per socket, and most rows are listening, closing or not TCP at all, so they carry an em-dash rather than a number; only a handful of connections per run answer at all. That em-dash means *not measured*, never *zero*, which is why `cwnd:` and `rtt:` as bare selectors mean "has a reading" and deliberately select nothing else.
@@ -477,9 +475,9 @@ wintcp.exe list --dns --db GeoLite2-Country.mmdb --traffic --filter "state:estab
 
 ```text
 Remote address    Hostname                                                   Country   Process                      Net total
-107.155.105.90    relay-5d111ddb.net.anydesk.com                            —        AnyDesk.exe                  4.1 KB
-52.38.112.215     ec2-52-38-112-215.us-west-2.compute.amazonaws.com         US        brave.exe                   —
-100.26.11.145     ec2-100-26-11-145.compute-1.amazonaws.com                 —        chrome.exe                  —
+203.0.113.90    relay.example                            —        RemoteSupport.exe                  4.1 KB
+203.0.113.215     edge.example         US        Browser.exe                   —
+198.51.100.145     api.example                 —        Browser.exe                  —
 ```
 
 | Switch | Why it is in this command |
@@ -524,15 +522,15 @@ wintcp.exe details --select "pid:19080 lport:52425 proto:tcpv4" --traffic
 ```
 
 ```text
-putty.exe
+Terminal.exe
 PID 19080   ·   127.0.0.1:52425  →  127.0.0.1:22
 
 Process
-Name                    putty.exe
+Name                    Terminal.exe
 PID                     19080
-Path                    C:\Program Files\PuTTY\putty.exe
-Command line            putty &000000000000061C:6214
-Started                 2026-10-03 15:49:02
+Path                    C:\Program Files\WinTCP\Terminal.exe
+Command line            Terminal.exe
+Started                 2025-01-15 15:49:02
 Service                 —
 First seen              2d 3h
 
@@ -607,9 +605,9 @@ wintcp.exe list --watch 1 --changes --event appear,state --count 4
 
 ```text
 baseline: 286 rows (further changes below)
-[2026-09-30 14:44:50] APPEAR TCPv4 10.0.0.92:6383 -> 64.59.144.91:53 (SYN_SENT) pid=28276 chrome.exe
-[2026-09-30 14:44:51] APPEAR TCPv4 10.0.0.92:6383 -> 64.59.144.91:53 (TIME_WAIT) pid=0 —
-[2026-09-30 14:44:52] STATE  TCPv4 10.0.0.92:41723 -> 20.47.110.73:443 (CLOSE_WAIT) pid=5172 Avira.Spotlight.Service.exe
+[2025-01-15 14:44:50] APPEAR TCPv4 192.0.2.92:6383 -> 203.0.113.144:53 (SYN_SENT) pid=28276 Browser.exe
+[2025-01-15 14:44:51] APPEAR TCPv4 192.0.2.92:6383 -> 203.0.113.144:53 (TIME_WAIT) pid=0 —
+[2025-01-15 14:44:52] STATE  TCPv4 192.0.2.92:41723 -> 203.0.113.73:443 (CLOSE_WAIT) pid=5172 SecurityAgent.exe
 ```
 
 | Switch | Why it is in this command |
@@ -632,13 +630,13 @@ wintcp.exe list --watch 2 --changes --filter "proto:tcp" --count 5
 
 ```text
 baseline: 286 rows (further changes below)
-[2026-09-30 13:45:37] DISAPPEAR TCPv4 10.0.0.92:17796 -> 74.6.160.106:443 (ESTABLISHED) pid=28276 chrome.exe
-[2026-09-30 13:45:37] STATE  TCPv4 127.0.0.1:49374 -> 127.0.0.1:29543 (ESTABLISHED) pid=22180 cloudflared.exe
+[2025-01-15 13:45:37] DISAPPEAR TCPv4 192.0.2.92:17796 -> 198.51.100.106:443 (ESTABLISHED) pid=28276 Browser.exe
+[2025-01-15 13:45:37] STATE  TCPv4 127.0.0.1:49374 -> 127.0.0.1:29543 (ESTABLISHED) pid=22180 TunnelClient.exe
 ```
 
 | Switch | Why it is in this command |
 |---|---|
-| `list --filter "proto:tcp"` | The filter runs against each event's row, so it removes whole events rather than hiding lines after the fact. On the capture machine mDNS alone is about 86 rows that change constantly. |
+| `list --filter "proto:tcp"` | The filter runs against each event's row, so it removes whole events rather than hiding lines after the fact. |
 | `list --watch 2` | A slower interval than recipe 15 on purpose: fewer events, and a different view of what "churn" means at 2 s granularity. |
 
 `--event` is available but not needed here: the filter already does the narrowing, and adding `--event` would be a second tool for one job.
@@ -689,9 +687,9 @@ wintcp.exe list --watch 2 --changes --event appear,state --format json --count 5
 ```
 
 ```json
-{"t":"2026-09-30 14:44:50","event":"appear","proto":"TCPv4","local":"10.0.0.92","lport":6383,"remote":"64.59.144.91","rport":53,"state":"SYN_SENT","pid":28276,"process":"chrome.exe"}
-{"t":"2026-09-30 14:44:51","event":"appear","proto":"TCPv4","local":"10.0.0.92","lport":6383,"remote":"64.59.144.91","rport":53,"state":"TIME_WAIT","pid":0,"process":"—"}
-{"t":"2026-09-30 14:44:52","event":"state","proto":"TCPv4","local":"10.0.0.92","lport":41723,"remote":"20.47.110.73","rport":443,"state":"CLOSE_WAIT","old_state":"ESTABLISHED","pid":5172,"process":"Avira.Spotlight.Service.exe"}
+{"t":"2025-01-15 14:44:50","event":"appear","proto":"TCPv4","local":"192.0.2.92","lport":6383,"remote":"203.0.113.144","rport":53,"state":"SYN_SENT","pid":28276,"process":"Browser.exe"}
+{"t":"2025-01-15 14:44:51","event":"appear","proto":"TCPv4","local":"192.0.2.92","lport":6383,"remote":"203.0.113.144","rport":53,"state":"TIME_WAIT","pid":0,"process":"—"}
+{"t":"2025-01-15 14:44:52","event":"state","proto":"TCPv4","local":"192.0.2.92","lport":41723,"remote":"203.0.113.73","rport":443,"state":"CLOSE_WAIT","old_state":"ESTABLISHED","pid":5172,"process":"SecurityAgent.exe"}
 ```
 
 | Switch | Why it is in this command |
@@ -715,13 +713,13 @@ wintcp.exe list --watch 2 --changes --event appear,state --format json --count 5
 
 ```bat
 wintcp.exe list --filter "state:estab exclude:127." --columns pid,process,local,remote,rport,state --limit 3
-wintcp.exe capture --select "pid:5172 remote:20.47.110.73 remote:port:443" --secs 8 --text --dir first --yes
+wintcp.exe capture --select "pid:5172 remote:203.0.113.73 remote:port:443" --secs 8 --text --dir first --yes
 ```
 
 `--dry-run` stops after printing the plan, so you can see which conversation the selector picked before spending the window on it. Run once by hand, and this is the line:
 
 ```text
-capture 10.0.0.92:16921 -> 20.47.110.73:443 for 8s
+capture 192.0.2.92:16921 -> 203.0.113.73:443 for 8s
 mode: print the reassembled stream to stdout
 ```
 
@@ -733,13 +731,13 @@ packets=<n> toServer=<n> toClient=<n> blocks=<n>
 
 `toServer` and `toClient` are the reassembly result in each direction; `blocks` is the number of TCP segments parsed.
 
-Every run also prints `tls:` lines, and that is the one place WinTCP can report a TLS session at all: Windows has no socket-level TLS ioctl, so the only source is the handshake, and the handshake is readable precisely because TLS sends it in the clear. Here is a real capture of an established HTTPS connection on one Windows 11 host:
+Every run also prints `tls:` lines. Windows does not expose TLS details through a socket-level query, so capture can report handshake metadata only when those packets fall within the capture window. This illustrative output shows an established HTTPS connection whose handshake predates the capture:
 
 ```text
 packets=1918 toServer=0 toClient=346685 blocks=4345
 tls: the capture is TLS but no handshake message is among the captured bytes, so no SNI, version or cipher can be reported - the window opened after the session was established.
-tls: to first endpoint ([2604:3d08:5d8a:f000:cffe:9c3c:8201:712b]:36677) captured no payload
-tls: from first endpoint ([2606:4700::6810:7c60]:443) begins with TLS records but no handshake message was captured (the window opened after the handshake) | 346230 bytes of application_data after the handshake
+tls: to first endpoint ([2001:db8::1]:36677) captured no payload
+tls: from first endpoint ([2001:db8::2]:443) begins with TLS records but no handshake message was captured (the window opened after the handshake) | 346230 bytes of application_data after the handshake
 ```
 
 Read that as a limitation of *where the window fell*, not as a verdict on the connection. `pktmon` records only what happens after the filter is armed, so on a connection that was already up the handshake was never captured and no SNI exists to report. **To get an SNI you must capture a connection that is being established** - which is why this recipe starts with a `list`, so you can catch a row while it is still young. The four possible reports, and what each one is allowed to claim, are tabulated in the [CLI reference](cli.md#reading-the-tls-handshake).
@@ -771,7 +769,7 @@ The packet-size limit is disabled in the underlying `pktmon` run, because the de
 Add `--text` and the summary is followed by one hex block per direction, each headed by the **endpoint that sent it**:
 
 ```text
---- to first endpoint: 10.0.0.92:16921 ---
+--- to first endpoint: 192.0.2.92:16921 ---
 00000000  47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a  |GET / HTTP/1.1..|
 00000010  48 6f 73 74 3a 20 65 78  61 6d 70 6c 65 2e 63 6f  |Host: example.co|
 00000020  6d 0d 0a 43 6f 6e 6e 65  63 74 69 6f 6e 3a 20 6b  |m..Connection: k|
@@ -862,10 +860,10 @@ wintcp.exe list --filter "state:listen exclude:127." --sort lport --columns pid,
  6436  wslrelay.exe                         80  ::1
  1940  svchost.exe                         135  0.0.0.0
  1940  svchost.exe                         135  ::
-    4  System                              139  10.0.0.92
-    4  System                              139  169.254.123.200
-    4  System                              139  169.254.123.251
-    4  System                              139  169.254.123.36
+    4  System                              139  192.0.2.92
+    4  System                              139  169.254.0.200
+    4  System                              139  169.254.0.251
+    4  System                              139  169.254.0.36
 ```
 
 | Switch | Why it is in this command |
@@ -887,18 +885,18 @@ wintcp.exe list --filter "proto:udp" --columns process,pid,local,lport,proto --l
 
 ```text
 Process                        PID  Local address                 Local port  Proto
-System                           4  10.0.0.92                            137  UDPv4
-System                           4  10.0.0.92                            138  UDPv4
-System                           4  169.254.123.200                       137  UDPv4
-System                           4  169.254.123.200                       138  UDPv4
-System                           4  169.254.123.251                       137  UDPv4
+System                           4  192.0.2.92                            137  UDPv4
+System                           4  192.0.2.92                            138  UDPv4
+System                           4  169.254.0.200                       137  UDPv4
+System                           4  169.254.0.200                       138  UDPv4
+System                           4  169.254.0.251                       137  UDPv4
 ```
 
 | Switch | Why it is in this command |
 |---|---|
 | `list --filter "proto:udp"` | UDP rows only. UDP has no state: the table prints `—`, and the remote as `*:*`, as `netstat` does. That is why `state` is not in `--columns`: a column of dashes is worse than no column. |
 | `--columns process,pid,local,lport,proto` | `proto` prints `UDPv4` / `UDPv6` rather than a generic `UDP`, which is what makes a UDP inventory readable: otherwise a dual-stack listener looks like two services. |
-| `list --limit 5` | UDP tables are long (mDNS alone is about 86 rows on the capture machine). |
+| `list --limit 5` | Useful when UDP tables contain many rows. |
 
 `netstat -ab` is the built-in that comes closest, and it is the reason this recipe exists: it is too slow to use in a loop, it needs elevation for the `-b` part, and it prints the service name rather than the owning process and PID, which is what you need to act.
 
@@ -924,7 +922,7 @@ TCPv6  lsass.exe   ::               49664        LISTENING
 | `list --filter "proto:ipv6"` | An address-family prefix, usable on its own. `tcp:`, `udp:`, `ipv4:` and `ipv6:` compose with everything else, so `ipv6: state:listen` means "IPv6 listeners". |
 | `--columns proto,process,local,lport,state` | `proto` carries the family (`TCPv6`), so one table answers both "which protocol" and "which family" without a second query. |
 
-Link-local IPv6 addresses print with their **scope ID** (`fe80::1%12`), because the scope is part of the address for routing purposes and dropping it makes the row unroutable on paper. IPv4-mapped IPv6 (`::ffff:1.2.3.4`) is normalised to `1.2.3.4` so the same host does not appear twice.
+Link-local IPv6 addresses print with their **scope ID** (`fe80::1%12`), because the scope is part of the address for routing purposes and dropping it makes the row unroutable on paper. IPv4-mapped IPv6 (`::ffff:192.0.2.4`) is normalised to `192.0.2.4` so the same host does not appear twice.
 
 ### 27. Process table with CPU % and connection counts
 
@@ -937,8 +935,8 @@ wintcp.exe ps --filter "proto:udp" --sort conns --limit 3
 
 ```text
   PID  Process                      Conns   CPU%   Memory      Disk
-5172  Avira.Spotlight.Service.exe      2   0.3   24.3 MB   30.6 MB
-22180  cloudflared.exe                 10   0.3   45.1 MB   52.8 MB
+5172  SecurityAgent.exe               2   0.3   24.3 MB   30.6 MB
+22180  TunnelClient.exe                10   0.3   45.1 MB   52.8 MB
 1940  svchost.exe                      2   0.0   21.0 MB  168.0 KB
 ```
 
@@ -999,7 +997,7 @@ wintcp.exe list --filter "note:""corporate dns""" --columns remote,rport,pinned 
 
 ```text
 Remote address   Remote port  bookmarks
-64.59.150.137             53  blue
+203.0.113.150             53  blue
 ```
 
 The complete grammar is in the [filter language reference](filters.md). The commands above exercise four of its forms:
@@ -1011,7 +1009,7 @@ The complete grammar is in the [filter language reference](filters.md). The comm
 | `local:port:49665` | The port, restricted to the **local** side, so it cannot match a connection *to* a remote 49665. |
 | `note:"corporate dns"` | A quoted value: one term, not two AND-ed ones. On the command line the embedded quotes are doubled (`"note:""corporate dns"""`). |
 
-Two details are worth internalising, because both are places a filter silently returns the wrong answer:
+Keep two distinctions in mind, because each affects which rows a filter returns:
 
 - **A threshold is a threshold, not a substring.** `mem:100` is "100 MB or more", and an unknown reading matches **no** threshold at all, so `mem:0` never selects a process that simply could not be measured. That is the opposite of how a text match behaves.
 - **Direction and field are separate concepts.** `local:` / `remote:` select which *endpoint*; `lport:` / `rport:` / `local:port:` select which *column*. Collapsing them would turn `local:port:80` into a text match for the literal `port:80`, which can never match anything.
@@ -1024,32 +1022,32 @@ Two details are worth internalising, because both are places a filter silently r
 
 ### 30. Pin a peer with a tag and a note, and find it again
 
-A bookmark's identity is **remote address + remote port**, because that pair survives a reconnect. The port is part of the match, not decoration: a mark on `1.2.3.4:9999` does not light up a live `1.2.3.4:443` row.
+A bookmark's identity is **remote address + remote port**, because that pair survives a reconnect. The port is part of the match, not decoration: a mark on `192.0.2.4:9999` does not light up a live `192.0.2.4:443` row.
 
 ```bat
-wintcp.exe bookmark add   --address 64.59.150.137 --port 53 --tag 3 --note "corporate dns resolver"
-wintcp.exe bookmark note   --address 64.59.150.137 --port 53 --note "confirmed with netops"
-wintcp.exe bookmark colour --address 64.59.150.137 --port 53 --tag 1
+wintcp.exe bookmark add   --address 203.0.113.150 --port 53 --tag 3 --note "corporate dns resolver"
+wintcp.exe bookmark note   --address 203.0.113.150 --port 53 --note "confirmed with netops"
+wintcp.exe bookmark colour --address 203.0.113.150 --port 53 --tag 1
 wintcp.exe bookmark list --format json
 wintcp.exe list --filter "note:netops" --columns remote,rport,pinned --limit 3
-wintcp.exe bookmark remove --address 64.59.150.137 --port 53
+wintcp.exe bookmark remove --address 203.0.113.150 --port 53
 ```
 
 ```text
-bookmark added: 64.59.150.137:53
+bookmark added: 203.0.113.150:53
 bookmark note updated.
 bookmark colour updated.
 [
-  {"address":"64.59.150.137","port":53,"tag":"Red","note":"confirmed with netops"}
+  {"address":"203.0.113.150","port":53,"tag":"Red","note":"confirmed with netops"}
 ]
 Remote address   Remote port  bookmarks
-64.59.150.137             53  red
+203.0.113.150             53  red
 bookmark removed.
 ```
 
 | Command | Why it is in this recipe |
 |---|---|
-| `bookmark add --address --port` | The pair is what "this conversation" means. Addresses normalise (`::ffff:1.2.3.4` becomes `1.2.3.4`) and placeholders like `0.0.0.0` are refused, because you cannot bookmark "somewhere". |
+| `bookmark add --address --port` | The pair is what "this conversation" means. Addresses normalise (`::ffff:192.0.2.4` becomes `192.0.2.4`) and placeholders like `0.0.0.0` are refused, because you cannot bookmark "somewhere". |
 | `bookmark add --tag 0..4` | `0` none, `1` red, `2` amber, `3` blue, `4` green. Per endpoint, so every row to that peer shows the same color. The `pinned` column prints the color name, which also sorts first in both directions. |
 | `bookmark add --note` | Free text on the endpoint, stored per user in `HKCU`, so it survives restarts. |
 | `bookmark note`, `bookmark colour` | Separate verbs so neither can be lost by using the other. `add` on an existing endpoint does **not** clobber a note you wrote: losing a note to a re-add is not a recoverable mistake. |
@@ -1075,9 +1073,9 @@ Preset
 web
 {"filter":"port:443","sortColumn":6,"sortAsc":true,"grouped":false,"colVisible":4493311,"sources":0}
   PID  Process                      Remote address   Remote port
-    0  —                            172.253.117.19            443
- 5168  AnyDesk.exe                  107.155.105.90            443
- 5172  Avira.Spotlight.Service.exe  20.47.110.73               443
+    0  —                            203.0.113.117            443
+ 5168  RemoteSupport.exe                  203.0.113.90            443
+ 5172  SecurityAgent.exe            203.0.113.73               443
 preset 'web' exists: refused: pass --force to proceed (or --dry-run to preview).
 ```
 
@@ -1137,9 +1135,9 @@ command cannot ask before doing that. Add --force to replace it, or write
 somewhere else.
 ```
 
-That is deliberate. `--out` truncates, so an export aimed at a file you already had would destroy it with no warning and an exit code that says nothing went wrong — measured here: a 6-byte file became an 844-byte export, exit `0`. The GUI asks first, through the save dialog's own overwrite prompt; a script has no way to ask, so `--force` is how it says yes. `capture --out` follows the same rule and checks it before the capture window opens, so `--dry-run` is enough to find out.
+That is deliberate. `--out` truncates an existing file, so an export can replace its contents. The GUI asks first through the save dialog's overwrite prompt; a script has no way to ask, so `--force` is how it confirms the replacement. `capture --out` follows the same rule and checks it before the capture window opens, so `--dry-run` is enough to find out.
 
-Two further details: **CSV and TSV carry a UTF-8 BOM and JSON never does** (verified byte-wise by `the CLI test suite`), and **`--limit` is refused, not ignored**, because a file that quietly holds 5 of 300 rows while the tool reports success is a lie about the machine. Narrow with `--filter`, or pipe `list --limit` output instead.
+Two further details: **CSV and TSV carry a UTF-8 BOM and JSON never does**, and **`--limit` is refused, not ignored**, because a file that quietly holds only part of the view while reporting success would be misleading. Narrow with `--filter`, or pipe `list --limit` output instead.
 
 ### 33. A stable JSON schema for dashboards
 
@@ -1152,13 +1150,13 @@ wintcp.exe list --format json --columns full --limit 1 2>nul
 
 ```text
 [
-  {"proto":"TCPv4","local":"10.0.0.92","lport":"9337","remote":"64.59.150.137","rport":"53","state":"TIME_WAIT","pid":"0","process":"—"}
+  {"proto":"TCPv4","local":"192.0.2.92","lport":"9337","remote":"203.0.113.150","rport":"53","state":"TIME_WAIT","pid":"0","process":"—"}
 ]
 ```
 
 ```text
 [
-  {"proto":"TCPv4","local":"10.0.0.92","lport":"12924","remote":"104.18.24.129","rport":"443","state":"TIME_WAIT","pid":"0","process":"—","service":"","path":"","host":"","tls":"—","country":"","traffic":"—","bandwidth":"—","duration":"0s"}
+  {"proto":"TCPv4","local":"192.0.2.92","lport":"12924","remote":"198.51.100.129","rport":"443","state":"TIME_WAIT","pid":"0","process":"—","service":"","path":"","host":"","tls":"—","country":"","traffic":"—","bandwidth":"—","duration":"0s"}
 ]
 ```
 
@@ -1250,14 +1248,14 @@ wintcp.exe list --format jsonl --columns proto,local,lport,remote,rport,state,pi
 
 ```text
 [
-  {"proto":"TCPv4","local":"10.0.0.92","lport":"6495","remote":"18.64.67.41","rport":"443","state":"TIME_WAIT","pid":"0","process":"—"},
-  {"proto":"TCPv4","local":"10.0.0.92","lport":"24753","remote":"64.59.144.91","rport":"53","state":"TIME_WAIT","pid":"0","process":"—"}
+  {"proto":"TCPv4","local":"192.0.2.92","lport":"6495","remote":"198.51.100.41","rport":"443","state":"TIME_WAIT","pid":"0","process":"—"},
+  {"proto":"TCPv4","local":"192.0.2.92","lport":"24753","remote":"203.0.113.144","rport":"53","state":"TIME_WAIT","pid":"0","process":"—"}
 ]
 ```
 
 ```text
-{"proto":"TCPv4","local":"10.0.0.92","lport":"1515","remote":"64.59.144.91","rport":"53","state":"TIME_WAIT","pid":"0","process":"—"}
-{"proto":"TCPv4","local":"10.0.0.92","lport":"6495","remote":"18.64.67.41","rport":"443","state":"TIME_WAIT","pid":"0","process":"—"}
+{"proto":"TCPv4","local":"192.0.2.92","lport":"1515","remote":"203.0.113.144","rport":"53","state":"TIME_WAIT","pid":"0","process":"—"}
+{"proto":"TCPv4","local":"192.0.2.92","lport":"6495","remote":"198.51.100.41","rport":"443","state":"TIME_WAIT","pid":"0","process":"—"}
 ```
 
 | Switch | Why it is in this recipe |
