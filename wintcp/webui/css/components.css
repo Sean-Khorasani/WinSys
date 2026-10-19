@@ -203,6 +203,10 @@
 }
 .virtual-table [data-column-key="actions"] { position: sticky; right: 0; z-index: 2; min-width: 6rem; background: var(--card); }
 .virtual-table-row.is-closed { color: var(--muted-foreground); background: var(--muted); }
+.virtual-table-row:hover:not(.is-selected) { color: var(--accent-foreground); background: var(--accent); }
+.virtual-table-row:hover:not(.is-selected) [data-column-key="name"],
+.virtual-table-row:hover:not(.is-selected) [data-column-key="process"],
+.virtual-table-row:hover:not(.is-selected) [data-column-key="actions"] { background: var(--accent); }
 .virtual-table-row.is-selected { background: var(--accent); color: var(--accent-foreground); }
 .virtual-table-row.is-selected [data-column-key="name"], .virtual-table-row.is-selected [data-column-key="process"] { background: var(--accent); }
 .virtual-table-row.is-selected [data-column-key="actions"] { background: var(--accent); }
@@ -338,6 +342,81 @@ dialog::backdrop {
   .details-dialog .dialog-header, .details-dialog .dialog-content { padding: 0.875rem; }
   .details-dialog .dialog-content { max-height: calc(92dvh - 6rem); }
   .detail-list { grid-template-columns: minmax(6rem, 0.65fr) minmax(0, 1.35fr); gap: 0.6rem 0.75rem; }
+}
+
+/* ---- Process and connection inspector ---- */
+.main-content.inspector-reserved { margin-right: var(--inspector-reserve, 28rem); }
+.inspector-dialog {
+  display: none;
+  flex-direction: column;
+  width: min(var(--inspector-width, 28rem), calc(100vw - 1rem));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--card);
+  color: var(--foreground);
+}
+.inspector-dialog[open] { display: flex; }
+.inspector-dialog.is-docked[open] {
+  position: fixed;
+  inset: 3.5rem 0 0 auto;
+  margin: 0;
+  transform: none;
+  box-shadow: none;
+}
+.inspector-dialog.is-modal[open] {
+  position: fixed;
+  inset: 50% auto auto 50%;
+  width: min(42rem, calc(100vw - 1rem));
+  max-height: min(92dvh, 58rem);
+  margin: 0;
+  transform: translate(-50%, -50%);
+  border-radius: var(--radius);
+}
+.inspector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.inspector-heading { min-width: 0; }
+.inspector-title { overflow-wrap: anywhere; }
+.inspector-identity { margin-top: 0.25rem; color: var(--muted-foreground); font: 0.75rem/1.4 "Cascadia Mono", Consolas, ui-monospace, monospace; overflow-wrap: anywhere; }
+.inspector-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 0.375rem; }
+.inspector-width-control { display: flex; align-items: center; width: 4.5rem; }
+.inspector-width { width: 100%; accent-color: var(--primary); }
+.inspector-status { padding: 0.5rem 1rem; border-bottom: 1px solid var(--border); color: var(--muted-foreground); font-size: 0.75rem; }
+.inspector-content { flex: 1; min-height: 0; overflow: auto; padding: 0.75rem 1rem 1rem; }
+.inspector-section + .inspector-section { margin-top: 1rem; padding-top: 0.875rem; border-top: 1px solid var(--border); }
+.inspector-section h3 { margin-bottom: 0.5rem; color: var(--muted-foreground); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.inspector-fields { display: grid; grid-template-columns: minmax(7rem, 0.8fr) minmax(0, 1.6fr); gap: 0.5rem 0.75rem; align-items: start; }
+.inspector-fields dt { color: var(--muted-foreground); font-size: 0.75rem; }
+.inspector-value { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 0.375rem; overflow-wrap: anywhere; font-size: 0.8125rem; }
+.inspector-value > span { min-width: 0; overflow-wrap: anywhere; }
+.inspector-copy { flex: 0 0 auto; min-height: 1.5rem; }
+.inspector-copy:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.inspector-reason { grid-column: 2; margin-top: -0.375rem; color: var(--muted-foreground); font-size: 0.6875rem; line-height: 1.4; overflow-wrap: anywhere; }
+.inspector-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; padding: 0.75rem 1rem; border-top: 1px solid var(--border); }
+.inspector-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+@media (max-width: 1099px) {
+  .main-content.inspector-reserved { margin-right: 0; }
+  .inspector-dialog.is-modal[open] .inspector-content { max-height: calc(92dvh - 11rem); }
+}
+@media (max-width: 420px) {
+  .inspector-header { padding: 0.75rem; }
+  .inspector-width-control { width: 2.75rem; }
+  .inspector-content { padding: 0.75rem; }
+  .inspector-fields { grid-template-columns: minmax(5.5rem, 0.7fr) minmax(0, 1.3fr); gap: 0.5rem; }
+  .inspector-footer { padding: 0.75rem; }
+}
+@media (forced-colors: active) {
+  .inspector-dialog, .inspector-status, .inspector-section + .inspector-section { border-color: CanvasText; }
+  .inspector-copy, .inspector-dialog button { forced-color-adjust: auto; }
 }
 
 /* Dialog buttons need a visible background, not the transparent btn-ghost,
@@ -696,6 +775,8 @@ dialog::backdrop {
 .empty-state-icon { width: 2rem; height: 2rem; opacity: 0.5; }
 .empty-state-title { font-size: 0.875rem; font-weight: 500; color: var(--foreground); }
 .empty-state-description { font-size: 0.8125rem; }
+.empty-state-detail { max-width: 42rem; line-height: 1.5; }
+.empty-state .btn { margin-top: 0.25rem; }
 
 /* ---- Tooltip ---- */
 .tooltip {
@@ -990,10 +1071,12 @@ dialog::backdrop {
 /* ---- Tabs (ui/tabs.js) ----
    The strip and the panels. An inactive panel is `hidden`, not transparent, so
    it leaves the accessibility tree and the tab order together. */
-.tab-host { display: flex; flex-direction: column; gap: 1rem; }
+.tab-host { display: flex; flex-direction: column; gap: 1rem; min-width: 0; max-width: 100%; }
+.tab-host > .tabs { max-width: 100%; flex-wrap: wrap; }
+.tab-panels, .tab-panel { min-width: 0; max-width: 100%; }
 .tab-panels { min-height: 0; }
 .tab-panel:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.tab-panel-body { display: flex; flex-direction: column; gap: 1rem; }
+.tab-panel-body { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
 .section-gap { height: 0.25rem; }
 
 /* ---- Process tree ---- */
