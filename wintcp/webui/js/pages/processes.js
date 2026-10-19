@@ -37,26 +37,26 @@ function sortByName(a, b, dir) {
   const an = (a.name || "").toLowerCase();
   const bn = (b.name || "").toLowerCase();
   const c = an < bn ? -1 : an > bn ? 1 : 0;
-  return dir === SORT_ASC ? c : -c;
+  return (dir === SORT_ASC ? c : -c) || (a.pid || 0) - (b.pid || 0);
 }
 function sortByNum(a, b, dir, keyFn) {
   const av = keyFn(a), bv = keyFn(b);
-  if (av === null && bv === null) return 0;
+  if (av === null && bv === null) return (a.pid || 0) - (b.pid || 0);
   if (av === null) return 1;
   if (bv === null) return -1;
   const c = av - bv;
-  return dir === SORT_ASC ? c : -c;
+  return (dir === SORT_ASC ? c : -c) || (a.pid || 0) - (b.pid || 0);
 }
 function defaultSort(rows) {
   // Default: CPU descending, then name ascending (matches the server's
   // ordering for the initial load).
   return rows.slice().sort((a, b) => {
     const av = num(a.cpuPct), bv = num(b.cpuPct);
-    if (av === null && bv === null) return (a.name || "") < (b.name || "") ? -1 : 1;
+    if (av === null && bv === null) return (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }) || (a.pid || 0) - (b.pid || 0);
     if (av === null) return 1;
     if (bv === null) return -1;
     if (bv - av !== 0) return bv - av;
-    return (a.name || "") < (b.name || "") ? -1 : 1;
+    return (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }) || (a.pid || 0) - (b.pid || 0);
   });
 }
 
@@ -97,22 +97,54 @@ export async function renderProcesses(page, store) {
 
   const filterInput = page.querySelector("#proc-filter");
   const state = store.get();
+  filterInput.value = state.processFilter || "";
+  let debounce = null;
+  let applyFilterNow = null;
+  const onFilterInput = () => {
+    store.set({ processFilter: filterInput.value });
+    if (!applyFilterNow) return;
+    if (debounce !== null) clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      debounce = null;
+      applyFilterNow();
+    }, 120);
+  };
+  filterInput.addEventListener("input", onFilterInput);
+
+  const waitForSample = (nextState) => {
+    if (!nextState.lastUpdate || nextState.processesKnown === false) return;
+    if (!Array.isArray(nextState.processes) || nextState.processes.length === 0) return;
+    if (typeof page._procDestroy === "function") page._procDestroy();
+    page._procDestroy = null;
+    return renderProcesses(page, store);
+  };
+  const setWaitingLifecycle = () => {
+    page._procUpdate = waitForSample;
+    page._procDestroy = () => {
+      if (debounce !== null) clearTimeout(debounce);
+      filterInput.removeEventListener("input", onFilterInput);
+      page._procUpdate = null;
+    };
+  };
 
   if (!state.lastUpdate) {
     layout.append(emptyState({}, "Waiting for the first sample",
       "The browser polls the server every couple of seconds. This fills in on its own."));
+    setWaitingLifecycle();
     return;
   }
   if (state.processesKnown === false) {
     layout.append(emptyState({}, "Process table not sampled",
       "The server has not finished its first pass. It retries every second while this page is open."));
+    setWaitingLifecycle();
     return;
   }
 
-  const all = Array.isArray(state.processes) ? state.processes.slice() : [];
+  let all = Array.isArray(state.processes) ? state.processes.slice() : [];
   if (all.length === 0) {
     layout.append(emptyState({}, "No processes reported",
       "The server enumerated the process table and it came back empty, which should not happen."));
+    setWaitingLifecycle();
     return;
   }
 
@@ -141,9 +173,17 @@ export async function renderProcesses(page, store) {
                           String(r.pid) === q)
       : all;
     rows = applySort(filteredRows);
-    tabs.select(tabs.active(), true);
+    if (tabs.active() === "table" && tableController) {
+      tableController.updateSort(sortKey, sortDir);
+      tableController.updateRows(rows, filterInput.value.trim() && rows.length === 0
+        ? "No process matched the filter."
+        : "");
+    } else {
+      tabs.select(tabs.active(), true);
+    }
     updateSummary();
   };
+  applyFilterNow = applyFilter;
 
   const handleSort = (key, dir) => {
     sortKey = key;
@@ -164,13 +204,28 @@ export async function renderProcesses(page, store) {
   // selection in a closure meant the strip reset to "Table" every two seconds,
   // so clicking Tree appeared to do nothing at all.
   const storedView = store.get().processView;
+  let tableController = null;
+  let activeView = storedView;
+  const renderTable = () => {
+    if (tableController) tableController.destroy();
+    const view = renderTableView(rows, sortKey, sortDir, handleSort, filteredRows, filterInput, store);
+    tableController = view._virtualTable || null;
+    return view;
+  };
 
   const tabs = createTabs({
     ariaLabel: "Process views",
     initial: storedView,
-    onChange: (id) => store.set({ processView: id }),
+    onChange: (id) => {
+      if (activeView === "table" && id !== "table" && tableController) {
+        tableController.destroy();
+        tableController = null;
+      }
+      activeView = id;
+      store.set({ processView: id });
+    },
     tabs: [
-      { id: "table", label: "Table", render: () => renderTableView(rows, sortKey, sortDir, handleSort, filteredRows, filterInput, store) },
+      { id: "table", label: "Table", render: renderTable },
       { id: "tree", label: "Tree", render: () => renderTreeView(rows) },
       { id: "treemap", label: "Treemap", render: () => renderTreemapView(rows, store) },
     ],
@@ -183,21 +238,32 @@ export async function renderProcesses(page, store) {
   // tabs.select pair below.
   applyFilter();
 
-  let debounce = null;
-  filterInput.addEventListener("input", () => {
-    // 120 ms: enough to coalesce a paste or a fast typist into one re-render,
-    // short enough that the list feels live.
-    if (debounce !== null) clearTimeout(debounce);
-    debounce = setTimeout(() => { debounce = null; applyFilter(); }, 120);
-  });
+  page._procUpdate = (nextState) => {
+    if (!nextState.lastUpdate || nextState.processesKnown === false) return;
+    const nextRows = Array.isArray(nextState.processes) ? nextState.processes : [];
+    if (nextRows.length === 0) return;
+    all = nextRows.slice();
+    applyFilter();
+  };
 
   // The router clears this element wholesale on the next render, so tear the
   // virtual table down explicitly: it holds a ResizeObserver and a window
   // listener.
   page._procDestroy = () => {
     if (debounce !== null) clearTimeout(debounce);
+    filterInput.removeEventListener("input", onFilterInput);
+    if (tableController) tableController.destroy();
+    page._procUpdate = null;
     tabs.destroy();
   };
+}
+
+export function updateProcesses(page, store) {
+  if (typeof page._procUpdate === "function") {
+    page._procUpdate(store.get());
+    return;
+  }
+  return renderProcesses(page, store);
 }
 
 // ---- Table ------------------------------------------------------------------
@@ -205,12 +271,11 @@ export async function renderProcesses(page, store) {
 function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInput, store) {
   const host = h("div", { class: "tab-panel-body" });
   const container = h("div", { id: "proc-table-container" });
+  const procState = store ? store.get() : {};
   host.append(container);
 
-  const procState = store ? store.get() : {};
-  const conns = procState.connections || [];
-
   const pidHasConn = (pid) => {
+    const conns = store ? store.get().connections || [] : [];
     if (!Array.isArray(conns)) return false;
     return conns.some((c) => c.pid === pid);
   };
@@ -236,11 +301,19 @@ function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInp
         label: "Actions",
         width: 1,
         sortable: false,
-        renderCell: (row) => renderProcActions(row, pidHasConn(row.pid), conns),
+        renderCell: (row) => renderProcActions(
+          row,
+          pidHasConn(row.pid),
+          store ? store.get().connections || [] : [],
+        ),
       },
     ],
     rowHeight: 34,
     height: 520,
+    minWidth: "78rem",
+    scrollTop: procState.processTableScrollTop || 0,
+    onScroll: (scrollTop) => store.set({ processTableScrollTop: scrollTop }),
+    rowKey: (row) => row.pid,
     label: "Processes on this machine",
     emptyMessage: emptyMsg,
     sortKey,
@@ -260,6 +333,7 @@ function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInp
       listeners: (r) => (typeof r.listeners === "number" ? fmtInt(r.listeners) : UNAVAILABLE),
     },
   });
+  host._virtualTable = vt;
   vt.updateRows(rows);
 
   host.append(h("p", { class: "muted text-sm proc-note" },
