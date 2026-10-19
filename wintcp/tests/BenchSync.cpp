@@ -30,6 +30,7 @@
 #include <iphlpapi.h>   // MIB_TCP_STATE_LISTEN, IPPROTO_TCP
 
 #include "BookmarkFile.h"
+#include "Commands.h"
 #include "DnsCache.h"
 #include "EmptyStateActions.h"
 #include "IniFile.h"
@@ -37,6 +38,8 @@
 #include "PresetFile.h"
 #include "Presets.h"
 #include "ProcessTree.h"
+#include "ProcessTreeView.h"
+#include "ProcessInfo.h"
 #include "Sha256.h"
 #include "ExposureScore.h"
 #include "Utils.h"
@@ -532,6 +535,243 @@ void CheckEmptyState(TestResult& r) {
 }
 
 void CheckProcessTree(TestResult& r) {
+    {
+        ProcessTreeNode captured;
+        captured.pid = 4242;
+        captured.processCreate = FILETIME{123, 456};
+        captured.processCreateKnown = true;
+        const std::vector<ProcessTreeNode> exactTreeInstance{captured};
+        Check(r, "tree.refresh-finds-exact-process-instance",
+              FindProcessTreeInstance(exactTreeInstance, captured) ==
+                  &exactTreeInstance[0]);
+        ProcessTreeNode reusedTreePid = captured;
+        ++reusedTreePid.processCreate.dwLowDateTime;
+        Check(r, "tree.refresh-refuses-reused-process-instance",
+              FindProcessTreeInstance({reusedTreePid}, captured) == nullptr);
+        Check(r, "tree.refresh-refuses-exited-process-instance",
+              FindProcessTreeInstance({}, captured) == nullptr);
+        ProcessTreeNode unknownTreeLifetime = captured;
+        unknownTreeLifetime.processCreateKnown = false;
+        Check(r, "tree.refresh-refuses-unknown-process-lifetime",
+              FindProcessTreeInstance(exactTreeInstance,
+                                      unknownTreeLifetime) == nullptr);
+        Connection process;
+        process.identity.pid = captured.pid;
+        process.procMeta.processCreate = captured.processCreate;
+        process.procMeta.processCreateKnown = true;
+        Check(r, "tree.identity-matches-captured-lifetime",
+              ProcessTreeMatchesProcess(captured, process));
+        Connection pathlessResolved = process;
+        pathlessResolved.display.processPath.clear();
+        Connection pathlessActionCopy;
+        Check(r, "tree.pathless-process-action-keeps-exact-lifetime",
+              MakeProcessTreeActionCopy(captured, {}, &pathlessResolved,
+                                       pathlessActionCopy) &&
+                  pathlessActionCopy.identity.pid == captured.pid &&
+                  pathlessActionCopy.procMeta.processCreateKnown &&
+                  ::CompareFileTime(&pathlessActionCopy.procMeta.processCreate,
+                                    &captured.processCreate) == 0 &&
+                  pathlessActionCopy.display.processPath.empty());
+        Connection reusedResolved = pathlessResolved;
+        ++reusedResolved.procMeta.processCreate.dwLowDateTime;
+        Check(r, "tree.pathless-process-action-refuses-reused-pid",
+              !MakeProcessTreeActionCopy(captured, {}, &reusedResolved,
+                                        pathlessActionCopy));
+        ++process.procMeta.processCreate.dwLowDateTime;
+        Check(r, "tree.identity-refuses-reused-pid",
+              !ProcessTreeMatchesProcess(captured, process));
+        Check(r, "details.identity-refuses-reused-pid",
+              !ProcessInstanceMatches(captured.pid, captured.processCreate,
+                                      captured.processCreateKnown, process));
+        process.procMeta.processCreate = captured.processCreate;
+        Check(r, "details.identity-matches-captured-instance",
+              ProcessInstanceMatches(captured.pid, captured.processCreate,
+                                     captured.processCreateKnown, process));
+        std::vector<Connection> detailsRows(1);
+        detailsRows[0] = process;
+        detailsRows[0].procMeta.processCreate = FILETIME{124, 456};
+        Check(r, "details.refresh-skips-reused-pid",
+              FindProcessInstance(detailsRows, captured.pid,
+                                  captured.processCreate,
+                                  captured.processCreateKnown) == nullptr);
+        detailsRows.push_back(process);
+        Check(r, "details.refresh-finds-captured-instance-after-pid-reuse",
+              FindProcessInstance(detailsRows, captured.pid,
+                                  captured.processCreate,
+                                  captured.processCreateKnown) ==
+                  &detailsRows[1]);
+        detailsRows[1].flags |= kRowRemoved;
+        Check(r, "details.refresh-skips-retained-closed-instance",
+              FindProcessInstance(detailsRows, captured.pid,
+                                  captured.processCreate,
+                                  captured.processCreateKnown) == nullptr);
+        ProcessTreeNode treeTarget = captured;
+        std::vector<Connection> viewRows(2);
+        viewRows[0] = process;
+        viewRows[0].procMeta.processCreate.dwLowDateTime++;
+        viewRows[1] = process;
+        const std::vector<size_t> viewOrder{0, 1};
+        const std::optional<size_t> selectedViewRow =
+            FindProcessTreeViewRow(viewRows, viewOrder, treeTarget);
+        Check(r, "tree.selection-skips-reused-pid-and-finds-lifetime",
+              selectedViewRow.has_value() && *selectedViewRow == 1);
+        Check(r, "tree.selection-refuses-reused-pid-only-view",
+              !FindProcessTreeViewRow(viewRows, {0}, treeTarget).has_value());
+        Check(r, "tree.selection-refuses-row-outside-visible-view",
+              !FindProcessTreeViewRow(viewRows, {1}, ProcessTreeNode{
+                  treeTarget.pid, 0, true, L"process", 0,
+                  FILETIME{999, 456}, true}).has_value());
+        ++process.identity.pid;
+        Check(r, "tree.identity-refuses-other-pid",
+              !ProcessTreeMatchesProcess(captured, process));
+        process.identity.pid = captured.pid;
+        process.procMeta.processCreateKnown = false;
+        Check(r, "tree.identity-refuses-unknown-current-lifetime",
+              !ProcessTreeMatchesProcess(captured, process));
+        process.procMeta.processCreateKnown = true;
+        captured.processCreateKnown = false;
+        Check(r, "tree.identity-refuses-unknown-captured-lifetime",
+              !ProcessTreeMatchesProcess(captured, process));
+        std::vector<ProcessTreeNode> snapshot(2);
+        snapshot[0].pid = captured.pid;
+        snapshot[0].processCreate = FILETIME{123, 456};
+        snapshot[0].processCreateKnown = true;
+        snapshot[1].pid = captured.pid;
+        snapshot[1].processCreate = FILETIME{124, 456};
+        snapshot[1].processCreateKnown = true;
+        Check(r, "tree.item-data-resolves-snapshot-index",
+              ProcessTreeNodeForItemData(snapshot, 1) == &snapshot[1]);
+        Check(r, "tree.item-data-refuses-negative-index",
+              ProcessTreeNodeForItemData(snapshot, static_cast<LPARAM>(-1)) ==
+                  nullptr);
+        Check(r, "tree.item-data-refuses-out-of-range-index",
+              ProcessTreeNodeForItemData(snapshot, 2) == nullptr);
+        process.identity.pid = captured.pid;
+        process.procMeta.processCreate = snapshot[1].processCreate;
+        process.procMeta.processCreateKnown = true;
+        Check(r, "tree.item-data-keeps-reused-pid-lifetime-distinct",
+              ProcessTreeNodeForItemData(snapshot, 0) != nullptr &&
+                  !ProcessTreeMatchesProcess(snapshot[0], process) &&
+                  ProcessTreeMatchesProcess(snapshot[1], process));
+        bool ownLifetimeKnown = false;
+        FILETIME ownLifetime = {};
+        for (const ProcessRecord& record : EnumerateProcesses(true)) {
+            if (record.pid == ::GetCurrentProcessId()) {
+                ownLifetimeKnown = record.processCreateKnown;
+                ownLifetime = record.processCreate;
+            }
+        }
+        Check(r, "tree.enumeration-captures-own-lifetime", ownLifetimeKnown);
+        std::wstring verificationError;
+        const bool matchingLifetimeAccepted = ownLifetimeKnown &&
+            ProcessResolver::VerifyProcess(::GetCurrentProcessId(), ownLifetime,
+                                           true, verificationError);
+        Check(r, "process.verify-accepts-captured-live-lifetime",
+              matchingLifetimeAccepted, WideToUtf8(verificationError));
+        verificationError.clear();
+        const bool unknownLifetimeRefused =
+            !ProcessResolver::VerifyProcess(::GetCurrentProcessId(), FILETIME{},
+                                            false, verificationError);
+        Check(r, "process.verify-refuses-unknown-lifetime",
+              unknownLifetimeRefused && !verificationError.empty(),
+              WideToUtf8(verificationError));
+        FILETIME replacementLifetime = ownLifetime;
+        if (++replacementLifetime.dwLowDateTime == 0)
+            ++replacementLifetime.dwHighDateTime;
+        verificationError.clear();
+        const bool replacementLifetimeRefused = ownLifetimeKnown &&
+            !ProcessResolver::VerifyProcess(::GetCurrentProcessId(),
+                                            replacementLifetime, true,
+                                            verificationError);
+        Check(r, "process.verify-refuses-different-lifetime-for-live-pid",
+              replacementLifetimeRefused &&
+                  verificationError.find(L"PID reuse detected") != std::wstring::npos,
+              WideToUtf8(verificationError));
+
+        std::vector<wchar_t> executablePath(32768, L'\0');
+        const DWORD executableLength = ::GetModuleFileNameW(
+            nullptr, executablePath.data(),
+            static_cast<DWORD>(executablePath.size()));
+        STARTUPINFOW startup = {};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION child = {};
+        const bool childStarted = executableLength > 0 &&
+            executableLength < executablePath.size() &&
+            ::CreateProcessW(executablePath.data(), nullptr, nullptr, nullptr,
+                             FALSE, CREATE_SUSPENDED, nullptr, nullptr,
+                             &startup, &child) != FALSE;
+        Check(r, "process.exit-fixture-starts-suspended", childStarted,
+              childStarted ? "" : WideToUtf8(FormatSystemError(::GetLastError())));
+        if (childStarted) {
+            FILETIME childCreate = {};
+            FILETIME childExit = {};
+            FILETIME childKernel = {};
+            FILETIME childUser = {};
+            const bool capturedChildLifetime = ::GetProcessTimes(
+                child.hProcess, &childCreate, &childExit, &childKernel,
+                &childUser) != FALSE;
+            Check(r, "process.exit-fixture-captures-lifetime",
+                  capturedChildLifetime);
+            verificationError.clear();
+            const bool childHandleAccepted = capturedChildLifetime &&
+                ProcessResolver::VerifyProcessHandle(child.hProcess, childCreate,
+                                                     verificationError);
+            Check(r, "process.verify-handle-accepts-exact-live-child",
+                  childHandleAccepted, WideToUtf8(verificationError));
+            verificationError.clear();
+            const bool liveChildAccepted = capturedChildLifetime &&
+                ProcessResolver::VerifyProcess(child.dwProcessId, childCreate,
+                                               true, verificationError);
+            Check(r, "process.verify-accepts-owned-live-child-lifetime",
+                  liveChildAccepted, WideToUtf8(verificationError));
+            verificationError.clear();
+            const bool actionTargetAcceptedBeforeConfirmation = capturedChildLifetime &&
+                ProcessResolver::VerifyProcess(child.dwProcessId, childCreate,
+                                               true, verificationError);
+            Check(r, "process.action-target-valid-before-confirmation",
+                  actionTargetAcceptedBeforeConfirmation,
+                  WideToUtf8(verificationError));
+            const bool childStopped = ::TerminateProcess(child.hProcess, 0) != FALSE &&
+                ::WaitForSingleObject(child.hProcess, 5000) == WAIT_OBJECT_0;
+            Check(r, "process.exit-fixture-terminates-owned-child", childStopped,
+                  childStopped ? "" : WideToUtf8(FormatSystemError(::GetLastError())));
+            if (childStopped && actionTargetAcceptedBeforeConfirmation) {
+                MutateOptions actionOptions = {};
+                actionOptions.yes = true;
+                actionOptions.forceNow = true;
+                const CommandResult staleTargetAction = KillPid(
+                    child.dwProcessId, childCreate, true, L"test child",
+                    actionOptions);
+                Check(r, "process.kill-refuses-target-exited-after-confirmation",
+                      staleTargetAction.exitCode != 0 &&
+                          staleTargetAction.err.find("kill:") != std::string::npos,
+                      staleTargetAction.err);
+            } else {
+                Check(r, "process.kill-refuses-target-exited-after-confirmation",
+                      false, "the owned child did not reach the expected live state");
+            }
+            verificationError.clear();
+            const bool exitedChildRefused = capturedChildLifetime && childStopped &&
+                !ProcessResolver::VerifyProcess(child.dwProcessId, childCreate,
+                                                true, verificationError);
+            Check(r, "process.verify-refuses-exited-captured-instance",
+                  exitedChildRefused && !verificationError.empty(),
+                  WideToUtf8(verificationError));
+            verificationError.clear();
+            const bool exitedHandleRefused = capturedChildLifetime && childStopped &&
+                !ProcessResolver::VerifyProcessHandle(child.hProcess, childCreate,
+                                                      verificationError);
+            Check(r, "process.verify-handle-refuses-exited-child",
+                  exitedHandleRefused && !verificationError.empty(),
+                  WideToUtf8(verificationError));
+            if (!childStopped) {
+                ::TerminateProcess(child.hProcess, 1);
+                ::WaitForSingleObject(child.hProcess, 5000);
+            }
+            ::CloseHandle(child.hThread);
+            ::CloseHandle(child.hProcess);
+        }
+    }
     auto node = [](DWORD pid, DWORD ppid, bool known = true) {
         TreeNodeInfo n;
         n.pid = pid;
