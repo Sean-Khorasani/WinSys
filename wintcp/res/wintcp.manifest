@@ -2,7 +2,7 @@
 <!-- wintcp.manifest: ComCtl32 v6 (visual styles), UTF-8 active code page,
      longPathAware, and DPI awareness. Referenced from wintcp.rc as RT_MANIFEST id 1. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="WinTCP" type="win32"/>
+  <assemblyIdentity version="1.0.2.0" processorArchitecture="*" name="WinTCP" type="win32"/>
   <description>WinTCP - list all TCP connections with their processes</description>
   <dependency>
     <dependentAssembly>
