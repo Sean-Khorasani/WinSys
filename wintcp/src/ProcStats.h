@@ -30,6 +30,8 @@ namespace wintcp {
 
 // One refresh worth of readings for a single PID.
 struct ProcStats {
+    FILETIME processCreateTime = {};
+    bool processCreateKnown = false;
     bool cpuKnown = false;
     double cpuPct = -1.0;            // 0..100 (percent of total CPU), else < 0
     bool memKnown = false;
@@ -65,6 +67,7 @@ private:
         ULONGLONG procTime100ns = 0; // kernel + user at last sample
         ULONGLONG tickMs = 0;        // GetTickCount64() at last sample
         double lastPct = -1.0;       // last computed % (>= 0 when known)
+        FILETIME processCreateTime = {};
     };
 
     DWORD cpuCount_ = 0;             // logical processors (lazy init)
