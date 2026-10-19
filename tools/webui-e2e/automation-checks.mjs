@@ -891,8 +891,23 @@ async function cleanupTestScripts(page) {
 
 // ---- Processes page sorting tests ----
 async function testProcessesSorting(page) {
+  let delayFirstProcessSample = true;
+  await page.route("**/api/processes*", async (route) => {
+    if (delayFirstProcessSample) {
+      delayFirstProcessSample = false;
+      await page.waitForTimeout(1000);
+    }
+    await route.continue();
+  });
   await page.goto(`${url}#/processes`, { waitUntil: "commit" });
-  await page.waitForSelector(".virtual-table-row", { timeout: 15000 });
+  const loadingFilter = page.locator("#proc-filter");
+  await loadingFilter.waitFor({ timeout: 15000 });
+  await loadingFilter.fill("chrome");
+  await page.locator(".proc-summary").waitFor({ timeout: 15000 });
+  check("Processes: filter typed before first sample is retained",
+    await loadingFilter.inputValue() === "chrome",
+    `value=${await loadingFilter.inputValue()}`);
+  await page.unroute("**/api/processes*");
   await page.waitForTimeout(1500);
 
   const getFirstNames = async () => {
@@ -942,6 +957,56 @@ async function testProcessesSorting(page) {
   );
   check("Processes: sort persists across poll cycle", stillSorted,
     `first 3 after poll: ${afterPoll.slice(0, 3).join(", ")}`);
+
+  const processFilter = page.locator("#proc-filter");
+  await processFilter.evaluate((element) => { element.dataset.liveRefreshProbe = "stable"; });
+  await processFilter.fill("chrome");
+  await page.waitForTimeout(2500);
+  const processFilterState = await processFilter.evaluate((element) => ({
+    value: element.value,
+    marker: element.dataset.liveRefreshProbe,
+    focused: document.activeElement === element,
+  }));
+  check("Processes: live samples keep the filter input mounted",
+    processFilterState.value === "chrome" && processFilterState.marker === "stable" && processFilterState.focused,
+    JSON.stringify(processFilterState));
+  await processFilter.fill("");
+  await page.waitForTimeout(150);
+  await page.locator(".virtual-table").evaluate((element) => { element.scrollTop = 500; });
+  await page.waitForTimeout(2500);
+  const processScroll = await page.locator(".virtual-table").evaluate((element) => Math.round(element.scrollTop));
+  check("Processes: table scroll survives live samples", processScroll >= 450, `scrollTop=${processScroll}`);
+
+  await page.goto(`${url}#/network`, { waitUntil: "commit" });
+  await page.locator("#net-filter").waitFor({ timeout: 15000 });
+  await page.goto(`${url}#/processes`, { waitUntil: "commit" });
+  await page.locator(".virtual-table").waitFor({ timeout: 15000 });
+  await page.locator(".virtual-table").evaluate((element) => { element.scrollTop = 200; });
+  await page.waitForTimeout(2500);
+  const changedScroll = await page.locator(".virtual-table").evaluate((element) => Math.round(element.scrollTop));
+  check("Processes: live samples preserve a changed restored scroll position",
+    Math.abs(changedScroll - 200) <= 10, `scrollTop=${changedScroll}`);
+
+  await page.goto(`${url}#/network`, { waitUntil: "commit" });
+  const networkFilter = page.locator("#net-filter");
+  await networkFilter.waitFor({ timeout: 15000 });
+  await networkFilter.evaluate((element) => { element.dataset.liveRefreshProbe = "stable"; });
+  await networkFilter.fill("127.0.0.1");
+  await page.waitForTimeout(2500);
+  const networkFilterState = await networkFilter.evaluate((element) => ({
+    value: element.value,
+    marker: element.dataset.liveRefreshProbe,
+    focused: document.activeElement === element,
+  }));
+  check("Network: live samples keep the filter input mounted",
+    networkFilterState.value === "127.0.0.1" && networkFilterState.marker === "stable" && networkFilterState.focused,
+    JSON.stringify(networkFilterState));
+  const pidHeader = page.locator('[role="columnheader"]').filter({ hasText: "PID" }).first();
+  await pidHeader.click();
+  const pidSortState = await pidHeader.getAttribute("aria-sort");
+  check("Network: live sort updates its accessible header state",
+    pidSortState === "ascending" || pidSortState === "descending",
+    `aria-sort=${pidSortState}`);
 }
 
 // ---- Main ----
