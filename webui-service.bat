@@ -2,6 +2,7 @@
 setlocal EnableExtensions DisableDelayedExpansion
 set "ACTION=%~1"
 set "LEVEL=%~2"
+set "PORT=%~3"
 
 if /i "%ACTION%"=="help" goto help
 if /i "%ACTION%"=="--help" goto help
@@ -21,9 +22,11 @@ goto usage
 :validate_other
 if not "%~2"=="" goto usage
 set "LEVEL=DEBUG"
+set "PORT=45455"
 
 :run
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0webui-service.ps1" -Action "%ACTION%" -LogLevel "%LEVEL%"
+if not defined PORT set "PORT=45455"
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0webui-service.ps1" -Action "%ACTION%" -LogLevel "%LEVEL%" -Port "%PORT%"
 exit /b %ERRORLEVEL%
 
 :usage
@@ -35,10 +38,11 @@ set "USAGE_EXIT=0"
 
 :usage_text
 echo Usage:
-echo   webui-service.bat start [DEBUG^|INFO^|WARN^|ERROR]
+echo   webui-service.bat start [DEBUG^|INFO^|WARN^|ERROR] [PORT]
 echo   webui-service.bat status
 echo   webui-service.bat stop
 echo.
-echo Uses build-fast\wintcp.exe (the fast-build output).
+echo PORT: optional, defaults to 45455. Pass 0 for an ephemeral port.
+echo Uses build\wintcp.exe (the build output).
 echo Logs: %%LOCALAPPDATA%%\WinTCP\WebUi\webui.log
 exit /b %USAGE_EXIT%
