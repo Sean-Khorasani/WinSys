@@ -172,9 +172,14 @@
   border-radius: var(--radius);
   box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1);
   max-width: 32rem;
-  width: 100%;
+  width: 90vw;
   max-height: 85vh;
   overflow: auto;
+  margin: auto;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
 }
 .dialog-header {
   display: flex;
@@ -191,6 +196,41 @@
   gap: 0.5rem;
   padding: 0 1.25rem 1.25rem;
 }
+
+/* Native <dialog> elements: style the backdrop and ensure centering works. */
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.5);
+}
+
+/* Dialog buttons need a visible background, not the transparent btn-ghost,
+   so they read in both light and dark themes. */
+.dialog .dialog-header .btn-close,
+.dialog .dialog-footer .btn-close {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+.dialog .dialog-header .btn-close:hover:not(:disabled),
+.dialog .dialog-footer .btn-close:hover:not(:disabled) {
+  background: var(--secondary);
+  opacity: 0.8;
+}
+.dialog .btn-destructive {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+.dialog .btn-destructive:hover:not(:disabled) {
+  background: var(--destructive);
+  opacity: 0.9;
+}
+
+/* btn-close is an alias used in dialog footers/headers: a visible secondary
+   action rather than the transparent btn-ghost, so it reads in both themes. */
+.btn-close { background: var(--secondary); color: var(--secondary-foreground); }
+.btn-close:hover:not(:disabled) {
+  background: var(--secondary);
+  opacity: 0.8;
+}
+.geoip-file-input { display: none; }
 
 /* ---- Sheet ---- */
 .sheet-overlay {
