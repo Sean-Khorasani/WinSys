@@ -56,6 +56,8 @@ enum DetailTab : unsigned {
 // Display label for a tab, used by the renderer and pinned by selftests so the
 // vocabulary cannot drift silently.
 const wchar_t* TabLabel(DetailTab t);
+struct DetailModel;
+std::vector<DetailTab> AvailableDetailTabs(const DetailModel& model);
 
 // A titled group of fields. Sections are collapsible; the collapsed state is
 // the user's, not the data's, and is never persisted.
