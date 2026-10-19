@@ -70,6 +70,7 @@ export function createTabs({ tabs, ariaLabel = "Sections", initial = null, onCha
   const first = initial && tabs.some((t) => t.id === initial) ? initial : tabs[0].id;
   let activeId = first;
   let generation = 0;
+  let destroyed = false;
 
   const list = h("div", { class: "tabs", role: "tablist", "aria-label": ariaLabel });
   const panels = h("div", { class: "tab-panels" });
@@ -157,6 +158,7 @@ export function createTabs({ tabs, ariaLabel = "Sections", initial = null, onCha
   }
 
   async function select(id, force = false) {
+    if (destroyed) return;
     if (!buttons.has(id)) return;
     const changed = id !== activeId;
     activeId = id;
@@ -198,6 +200,6 @@ export function createTabs({ tabs, ariaLabel = "Sections", initial = null, onCha
     // select(id, force) - force re-renders an already-selected tab.
     select,
     active: () => activeId,
-    destroy() { generation++; },
+    destroy() { destroyed = true; generation++; },
   };
 }
