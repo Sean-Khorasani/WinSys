@@ -29,8 +29,25 @@ export function cardFooter(props = {}, ...children) {
 // Empty-state block. Used instead of an empty container so "nothing here" is
 // never mistaken for a failed load.
 export function emptyState(props = {}, title = "Nothing to show", detail = "") {
-  return h("div", { class: "empty-state", ...props },
+  const { action = null, ...attributes } = props;
+  const actionElement = action?.label
+    ? action.href
+      ? h("a", { class: "btn btn-outline btn-sm", href: action.href }, action.label)
+      : h("button", {
+        class: "btn btn-outline btn-sm", type: "button", disabled: Boolean(action.disabled),
+        onclick: action.onClick, title: action.title || "",
+      }, action.label)
+    : null;
+  return h("div", { class: "empty-state", role: "status", "aria-live": "polite", ...attributes },
     h("p", { class: "empty-state-title" }, title),
     detail ? h("p", { class: "empty-state-detail muted" }, detail) : null,
+    actionElement,
   );
+}
+
+export function refreshAction(label = "Refresh now") {
+  return {
+    label,
+    onClick: () => document.dispatchEvent(new Event("wintcp:refresh-now")),
+  };
 }
