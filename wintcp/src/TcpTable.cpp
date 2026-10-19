@@ -14,6 +14,7 @@
 #include <udpmib.h>
 
 #include <cstring>
+#include <new>
 
 namespace wintcp {
 namespace {
@@ -126,6 +127,21 @@ void FinishRow(Connection& info) {
 }
 
 }  // namespace
+
+bool ConnectionMatchesOwnerPidTcpRow(const Connection& connection,
+                                     DWORD state, DWORD localAddress,
+                                     DWORD localPort, DWORD remoteAddress,
+                                     DWORD remotePort, DWORD owningPid) {
+    return connection.identity.protocol == IPPROTO_TCP &&
+           connection.identity.family == AF_INET &&
+           connection.identity.state == MIB_TCP_STATE_ESTAB &&
+           connection.identity.pid != 0 &&
+           state == MIB_TCP_STATE_ESTAB && owningPid == connection.identity.pid &&
+           localAddress == connection.identity.local4.S_un.S_addr &&
+           localPort == PortHostToNetwork(connection.identity.localPort) &&
+           remoteAddress == connection.identity.remote4.S_un.S_addr &&
+           remotePort == PortHostToNetwork(connection.identity.remotePort);
+}
 
 // Printable rendering of an IPv4 address stored in network byte order.
 // Declared in TcpTable.h so unit tests can call it directly.
@@ -289,6 +305,45 @@ bool CloseTcpConnection(const Connection& c, std::wstring& errorMessage) {
     if (c.identity.family != AF_INET) {
         errorMessage = L"Windows' SetTcpEntry API only supports IPv4 connections; "
                        L"this row is IPv6.";
+        return false;
+    }
+    std::vector<BYTE> buffer;
+    DWORD queryResult = ERROR_GEN_FAILURE;
+    try {
+        queryResult = QueryTcp(AF_INET, buffer);
+    } catch (const std::bad_alloc&) {
+        errorMessage = L"Could not revalidate the live TCP owner table: out of memory.";
+        return false;
+    }
+    if (queryResult != NO_ERROR ||
+        buffer.size() < sizeof(MIB_TCPTABLE_OWNER_PID)) {
+        errorMessage = L"Could not revalidate the live TCP owner table: " +
+                       FormatSystemError(queryResult == NO_ERROR
+                                             ? ERROR_INVALID_DATA : queryResult);
+        return false;
+    }
+    const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(
+        buffer.data());
+    const size_t availableRows =
+        (buffer.size() - sizeof(DWORD)) / sizeof(MIB_TCPROW_OWNER_PID);
+    if (table->dwNumEntries > availableRows) {
+        errorMessage = L"Could not revalidate the live TCP owner table: "
+                       L"the returned table is incomplete.";
+        return false;
+    }
+    bool targetStillMatches = false;
+    for (DWORD index = 0; index < table->dwNumEntries; ++index) {
+        const MIB_TCPROW_OWNER_PID& live = table->table[index];
+        if (ConnectionMatchesOwnerPidTcpRow(
+                c, live.dwState, live.dwLocalAddr, live.dwLocalPort,
+                live.dwRemoteAddr, live.dwRemotePort, live.dwOwningPid)) {
+            targetStillMatches = true;
+            break;
+        }
+    }
+    if (!targetStillMatches) {
+        errorMessage = L"The connection no longer matches the live TCP tuple, "
+                       L"state, and owner PID; refresh and review it again.";
         return false;
     }
     MIB_TCPROW row = {};
