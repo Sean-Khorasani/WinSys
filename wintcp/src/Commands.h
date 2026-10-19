@@ -378,6 +378,8 @@ CommandResult KillPid(DWORD pid, const FILETIME& create, bool createKnown,
 // port/name, kill exactly that" flow taskkill cannot do.
 CommandResult CmdKillSelect(SnapshotSource& source, const std::wstring& select,
                             const MutateOptions& mo);
+std::string ConnectionCloseCapabilityReason(const Connection& c,
+                                            bool elevated);
 CommandResult CloseRow(const Connection& c, const MutateOptions& mo);
 CommandResult BlockNow(const BlockRequest& req, const MutateOptions& mo);
 
@@ -441,9 +443,12 @@ struct RuleRequest {
     bool allow = false;
     std::wstring proto = L"tcp";   // "tcp" | "udp" | "any"
     std::wstring address;          // required: "*" or an address / list / CIDR
+    std::wstring localAddress;     // empty = "*"
     std::wstring localPorts;       // empty = "*"
     std::wstring remotePorts;      // empty = "*"
     std::wstring process;          // empty = any program
+    std::wstring service;          // empty = any service
+    LONG profiles = 0x7fffffffL;
     std::wstring label;
 };
 
