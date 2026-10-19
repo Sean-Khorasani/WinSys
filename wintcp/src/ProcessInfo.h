@@ -34,6 +34,8 @@ struct ProcessRecord {
     DWORD pid = 0;
     DWORD ppid = 0;
     std::wstring name;
+    FILETIME processCreate = {};
+    bool processCreateKnown = false;
 };
 
 // Every process on the machine, from ONE CreateToolhelp32Snapshot
@@ -45,7 +47,7 @@ struct ProcessRecord {
 // ProcessResolver reads it from here rather than per-PID. The Idle process
 // (PID 0) is skipped: it is not a process in any sense a tree can show, and
 // the engine's own node rule already excludes it.
-std::vector<ProcessRecord> EnumerateProcesses();
+std::vector<ProcessRecord> EnumerateProcesses(bool captureLifetime = false);
 
 // A process's integrity level, from TokenIntegrityLevel's mandatory
 // label. The RID is what the label encodes (S-1-16-<rid>), and naming the
@@ -137,6 +139,9 @@ public:
     // Returns false and sets 'errorMessage' when it is unsafe to proceed.
     static bool VerifyProcess(DWORD pid, const FILETIME& expectedCreate,
                               bool expectKnown, std::wstring& errorMessage);
+    static bool VerifyProcessHandle(HANDLE process,
+                                    const FILETIME& expectedCreate,
+                                    std::wstring& errorMessage);
 
 private:
     struct Entry {
