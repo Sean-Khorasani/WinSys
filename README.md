@@ -43,7 +43,7 @@ The map can switch between a globe and a 2D projection. It groups remote connect
 - **Traffic and health:** Per-process byte totals, connection age, per-socket rate, and TCP metrics such as RTT and retransmits where Windows exposes them. ETW can add UDP totals when run elevated.
 - **Process context:** CPU, memory, I/O, parent process, integrity, and signature information, with table, tree, and treemap views in the Web UI.
 - **Enrichment:** Optional reverse DNS uses the Windows resolver; country and autonomous system results come from a local GeoIP database.
-- **Monitoring and response:** Connection-change feeds, saved views, alerts, automation playbooks, firewall-rule review, and explicit confirmation for sensitive actions.
+- **Monitoring and response:** CLI connection monitors and change feeds, saved views, on-demand Web UI CLI playbooks, firewall-rule review, and explicit confirmation for sensitive actions. Web UI playbooks are not active monitors.
 - **Portable runtime:** No installer, third-party runtime, or network service is required. The Web UI binds to loopback and uses local assets.
 
 ## Quick examples
