@@ -4,7 +4,9 @@
 
 #include "ConnectionsList.h"
 
+#include <cwctype>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "DnsResolver.h"    // kPendingHost
 #include "Freeze.h"         // FrozenAgeMs
@@ -19,6 +21,38 @@ namespace wintcp {
 using namespace mw;
 
 namespace {
+
+HGLOBAL ClipboardGlobalAlloc(void*, UINT flags, SIZE_T bytes) {
+    return ::GlobalAlloc(flags, bytes);
+}
+
+void* ClipboardGlobalLock(void*, HGLOBAL memory) {
+    return ::GlobalLock(memory);
+}
+
+BOOL ClipboardGlobalUnlock(void*, HGLOBAL memory) {
+    return ::GlobalUnlock(memory);
+}
+
+HGLOBAL ClipboardGlobalFree(void*, HGLOBAL memory) {
+    return ::GlobalFree(memory);
+}
+
+BOOL ClipboardOpen(void*, HWND owner) {
+    return ::OpenClipboard(owner);
+}
+
+BOOL ClipboardEmpty(void*) {
+    return ::EmptyClipboard();
+}
+
+HANDLE ClipboardSetData(void*, UINT format, HANDLE memory) {
+    return ::SetClipboardData(format, memory);
+}
+
+BOOL ClipboardClose(void*) {
+    return ::CloseClipboard();
+}
 
 // Row-colour flashes. The colours are chosen per theme: on a dark theme the
 // pastel fills would glare, so a darker background and a light foreground are
@@ -48,12 +82,108 @@ RowColours FlashColours(std::uint32_t flags, bool dark) {
                 : RowColours{RGB(0xEA, 0xEA, 0xEA), RGB(0x5A, 0x5A, 0x5A), true};
 }
 
+std::wstring TsvCellText(const std::wstring& value) {
+    if (value.find_first_of(L"\t\r\n\"") == std::wstring::npos)
+        return value;
+    std::wstring escaped;
+    escaped.reserve(value.size() + 2);
+    escaped += L'\"';
+    for (const wchar_t ch : value) {
+        if (ch == L'\"') escaped += L'\"';
+        escaped += ch;
+    }
+    escaped += L'\"';
+    return escaped;
+}
+
+bool HasRemotePeer(const Connection& row) {
+    if ((row.flags & kRowRemoved) != 0 || row.identity.remotePort == 0 ||
+        row.identity.state == MIB_TCP_STATE_LISTEN)
+        return false;
+    const std::wstring& address = row.display.remoteAddress;
+    if (address.empty() || address == L"*" || address == L"—" || address == L"-")
+        return false;
+    const size_t scope = address.find(L'%');
+    const std::wstring bareAddress = scope == std::wstring::npos
+        ? address : address.substr(0, scope);
+    IN_ADDR ipv4 = {};
+    if (::InetPtonW(AF_INET, bareAddress.c_str(), &ipv4) == 1 &&
+        ipv4.S_un.S_addr == INADDR_ANY)
+        return false;
+    IN6_ADDR ipv6 = {};
+    if (::InetPtonW(AF_INET6, bareAddress.c_str(), &ipv6) == 1 &&
+        IN6_IS_ADDR_UNSPECIFIED(&ipv6))
+        return false;
+    return true;
+}
+
+bool IsCopyPlaceholder(const std::wstring& value) {
+    const size_t start = value.find_first_not_of(L" \t\r\n");
+    if (start == std::wstring::npos) return true;
+    const size_t end = value.find_last_not_of(L" \t\r\n");
+    std::wstring normalized = value.substr(start, end - start + 1);
+    for (wchar_t& ch : normalized)
+        ch = static_cast<wchar_t>(std::towlower(ch));
+    return normalized == L"pending" || normalized == L"...pending..." ||
+           normalized == L"…" || normalized == L"—" || normalized == L"-" ||
+           normalized == L"(resolving...)" || normalized == L"(not resolved)";
+}
+
 // The faint banding shade for an unmarked odd row.
 COLORREF BandColour(bool dark) {
     return dark ? RGB(0x26, 0x26, 0x26) : RGB(0xF5, 0xF5, 0xF5);
 }
 
 }  // namespace
+
+ClipboardApi NativeClipboardApi() {
+    return ClipboardApi{nullptr, ClipboardGlobalAlloc, ClipboardGlobalLock,
+                        ClipboardGlobalUnlock, ClipboardGlobalFree,
+                        ClipboardOpen, ClipboardEmpty, ClipboardSetData,
+                        ClipboardClose};
+}
+
+ClipboardWriteStatus WriteClipboardText(HWND owner, const std::wstring& text,
+                                        const ClipboardApi& api) {
+    if (text.empty()) return ClipboardWriteStatus::EmptyText;
+    if (api.globalAlloc == nullptr || api.globalLock == nullptr ||
+        api.globalUnlock == nullptr || api.globalFree == nullptr ||
+        api.openClipboard == nullptr || api.emptyClipboard == nullptr ||
+        api.setClipboardData == nullptr || api.closeClipboard == nullptr)
+        return ClipboardWriteStatus::InvalidApi;
+
+    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = api.globalAlloc(api.context, GMEM_MOVEABLE, bytes);
+    if (memory == nullptr) return ClipboardWriteStatus::AllocationFailed;
+    void* destination = api.globalLock(api.context, memory);
+    if (destination == nullptr) {
+        api.globalFree(api.context, memory);
+        return ClipboardWriteStatus::LockFailed;
+    }
+    ::memcpy(destination, text.c_str(), static_cast<size_t>(bytes));
+    api.globalUnlock(api.context, memory);
+    if (!api.openClipboard(api.context, owner)) {
+        api.globalFree(api.context, memory);
+        return ClipboardWriteStatus::OpenFailed;
+    }
+    if (!api.emptyClipboard(api.context)) {
+        api.closeClipboard(api.context);
+        api.globalFree(api.context, memory);
+        return ClipboardWriteStatus::EmptyFailed;
+    }
+    if (api.setClipboardData(api.context, CF_UNICODETEXT, memory) == nullptr) {
+        api.closeClipboard(api.context);
+        api.globalFree(api.context, memory);
+        return ClipboardWriteStatus::SetDataFailed;
+    }
+    api.closeClipboard(api.context);
+    return ClipboardWriteStatus::Copied;
+}
+
+bool ClipboardNeedsManualFallback(ClipboardWriteStatus status) {
+    return status != ClipboardWriteStatus::Copied &&
+           status != ClipboardWriteStatus::EmptyText;
+}
 
 bool ConnectionsList::Create(HWND parent, HINSTANCE instance) {
     // Virtual list view: rows are supplied by LVN_GETDISPINFO from the
@@ -165,6 +295,7 @@ const int col = cols_.VisibleToCol(di->item.iSubItem);
 }
 
 void ConnectionsList::OnGetInfoTip(NMLVGETINFOTIPW* info) {
+    if (info->pszText == nullptr || info->cchTextMax <= 0) return;
     // full-value tooltips.
     //
     // The compact columns are abbreviated to fit their width, so a
@@ -172,7 +303,19 @@ void ConnectionsList::OnGetInfoTip(NMLVGETINFOTIPW* info) {
     // the reader cannot expand. The tooltip shows the value in full,
     // one item per line, for the columns where truncation actually
     // loses information.
-    const int col = cols_.ColToVisible(info->iSubItem);
+    int subItem = info->iSubItem;
+    if (subItem == 0) {
+        POINT point = {};
+        if (::GetCursorPos(&point) && ::ScreenToClient(hwnd_, &point)) {
+            LVHITTESTINFO hit = {};
+            hit.pt = point;
+            ::SendMessageW(hwnd_, LVM_SUBITEMHITTEST, 0,
+                           reinterpret_cast<LPARAM>(&hit));
+            if (hit.iItem == info->iItem && hit.iSubItem >= 0)
+                subItem = hit.iSubItem;
+        }
+    }
+    const int col = cols_.VisibleToCol(subItem);
     const Connection* c = store_.ViewRow(static_cast<size_t>(info->iItem));
     if (col < 0 || c == nullptr) return;
 
@@ -228,15 +371,13 @@ void ConnectionsList::OnGetInfoTip(NMLVGETINFOTIPW* info) {
             return;   // nothing truncated to explain
     }
     if (tip.empty()) return;
-    // LVN_GETINFOTIP must return a pointer the control frees with
-    // LocalFree. A std::wstring's buffer would be freed wrongly and
-    // corrupt the heap - this is the single most important detail in
-    // implementing this notification.
-    const size_t bytes = (tip.size() + 1) * sizeof(wchar_t);
-    wchar_t* out = static_cast<wchar_t*>(::LocalAlloc(LMEM_FIXED, bytes));
-    if (out == nullptr) return;
-    ::memcpy(out, tip.c_str(), bytes);
-    info->pszText = out;
+    const size_t capacity = static_cast<size_t>(info->cchTextMax);
+    if (info->dwFlags == 0 && info->pszText[0] != L'\0') {
+        const size_t existing = ::wcsnlen_s(info->pszText, capacity);
+        if (existing < capacity)
+            tip = std::wstring(info->pszText, existing) + L"\r\n" + tip;
+    }
+    ::wcsncpy_s(info->pszText, capacity, tip.c_str(), _TRUNCATE);
 }
 
 LRESULT ConnectionsList::OnCustomDraw(NMLVCUSTOMDRAW* cd) {
@@ -436,6 +577,18 @@ std::optional<Connection> ConnectionsList::SelectedCopy() const {
     return *row;
 }
 
+std::vector<Connection> ConnectionsList::SelectedRowsCopy() const {
+    std::vector<int> indices;
+    std::vector<Connection> rows;
+    if (!SelectedRowIndices(indices)) return rows;
+    rows.reserve(indices.size());
+    for (const int index : indices) {
+        const Connection* row = store_.ViewRow(static_cast<size_t>(index));
+        if (row != nullptr) rows.push_back(*row);
+    }
+    return rows;
+}
+
 size_t ConnectionsList::SelectedCount() const {
     if (hwnd_ == nullptr) return 0;
     return static_cast<size_t>(::SendMessageW(hwnd_, LVM_GETSELECTEDCOUNT,
@@ -454,22 +607,99 @@ void ConnectionsList::SelectAll() {
 
 std::wstring ConnectionsList::RowsToText(const std::vector<Connection>& rows,
                                          const ListViewColumns& cols) {
+    return RowsToText(rows, cols.VisibleOrder());
+}
+
+std::wstring ConnectionsList::RowsToText(
+    const std::vector<Connection>& rows,
+    const std::vector<int>& visibleColumns) {
+    std::vector<int> validColumns;
+    validColumns.reserve(visibleColumns.size());
+    for (const int column : visibleColumns) {
+        if (column >= 0 && column < COL_COUNT) validColumns.push_back(column);
+    }
     std::wstring out;
     // Header = visible columns, tab separated.
-    const std::vector<int>& vis = cols.VisibleOrder();
-    for (size_t i = 0; i < vis.size(); ++i) {
+    for (size_t i = 0; i < validColumns.size(); ++i) {
         if (i != 0) out += L"\t";
-        out += kColumns[static_cast<size_t>(vis[i])].title;
+        out += TsvCellText(kColumns[static_cast<size_t>(validColumns[i])].title);
     }
     out += L"\r\n";
 
     wchar_t buf[kMaxColumnText] = {0};
     for (const Connection& c : rows) {
-        for (size_t i = 0; i < vis.size(); ++i) {
-            ConnectionStore::GetColumnText(c, vis[i], buf, kMaxColumnText);
+        for (size_t i = 0; i < validColumns.size(); ++i) {
+            std::wstring value;
+            if (validColumns[i] == COL_PATH) {
+                if (c.display.processPath != L"System" &&
+                    !IsCopyPlaceholder(c.display.processPath))
+                    value = c.display.processPath;
+            } else if (validColumns[i] == COL_HOST) {
+                if (HasRemotePeer(c) &&
+                    !IsCopyPlaceholder(c.display.hostname))
+                    value = c.display.hostname;
+            } else if (validColumns[i] == COL_PID) {
+                if (c.identity.pid != 0)
+                    value = std::to_wstring(c.identity.pid);
+            } else if (validColumns[i] == COL_STATE &&
+                       (c.flags & kRowRemoved) != 0) {
+                value = L"Closed (retained history)";
+            } else {
+                ConnectionStore::GetColumnText(c, validColumns[i], buf, kMaxColumnText);
+                value = buf;
+                if (IsCopyPlaceholder(value)) value.clear();
+            }
             if (i != 0) out += L"\t";
-            out += buf;
+            out += TsvCellText(value);
         }
+        out += L"\r\n";
+    }
+    return out;
+}
+
+std::wstring ConnectionsList::CopyFieldText(const std::vector<Connection>& rows,
+                                            CopyField field) {
+    std::wstring out;
+    std::unordered_set<std::wstring> seen;
+    seen.reserve(rows.size());
+    for (const Connection& row : rows) {
+        std::wstring value;
+        switch (field) {
+            case CopyField::RemoteIp:
+                if (HasRemotePeer(row)) value = row.display.remoteAddress;
+                break;
+            case CopyField::Hostname:
+                if (HasRemotePeer(row)) value = row.display.hostname;
+                break;
+            case CopyField::LocalEndpoint:
+                value = row.display.localEndpoint;
+                break;
+            case CopyField::RemoteEndpoint:
+                if (HasRemotePeer(row)) value = row.display.remoteEndpoint;
+                break;
+            case CopyField::LocalPort:
+                if (row.identity.localPort != 0)
+                    value = std::to_wstring(row.identity.localPort);
+                break;
+            case CopyField::RemotePort:
+                if (row.identity.remotePort != 0 &&
+                    row.identity.state != MIB_TCP_STATE_LISTEN)
+                    value = std::to_wstring(row.identity.remotePort);
+                break;
+            case CopyField::ProcessPath:
+                value = row.display.processPath;
+                if (value == L"System") value.clear();
+                break;
+            case CopyField::ProcessId:
+                if (row.identity.pid != 0)
+                    value = std::to_wstring(row.identity.pid);
+                break;
+        }
+        if (IsCopyPlaceholder(value)) continue;
+        std::wstring key = value;
+        for (wchar_t& ch : key) ch = static_cast<wchar_t>(std::towlower(ch));
+        if (!seen.insert(key).second) continue;
+        out += value;
         out += L"\r\n";
     }
     return out;
