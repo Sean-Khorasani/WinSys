@@ -1,6 +1,5 @@
 # Build outputs
 build/
-build-fast/
 build-cmake/
 node_modules/
 
@@ -30,3 +29,4 @@ yarn-error.log*
 /AGENTS.md
 /docs/webui-upgrade-plan.md
 /docs/webui-upgrade-report.md
+/temp
