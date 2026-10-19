@@ -594,6 +594,34 @@ async function testGeoIpSettings(page) {
   await geoIpInput.fill("");
   await page.keyboard.press("Tab");
   await page.waitForTimeout(500);
+
+  // Browse button exists
+  const browseBtn = page.locator('[aria-label="Browse for GeoIP database"]');
+  check("Browse button exists", await browseBtn.count() > 0);
+
+  // An empty upload must be rejected before a file is written.
+  await page.goto(`${url}#/settings`, { waitUntil: "commit" });
+  await page.waitForTimeout(500);
+  const uploadResult = await page.evaluate(async () => {
+    const tokenMeta = document.querySelector('meta[name="wintcp-api-token"]');
+    const tok = tokenMeta ? tokenMeta.content : "";
+    try {
+      const res = await fetch("/api/geoip/upload?test=1", {
+        method: "POST",
+        headers: {
+          "X-WinTCP-Token": tok,
+          "X-Filename": "GeoLite2-Country.mmdb",
+          "Content-Type": "application/octet-stream",
+        },
+        body: new Blob([], { type: "application/octet-stream" }),
+      });
+      return { status: res.status, json: await res.json() };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  check("GeoIP upload rejects an empty body", uploadResult?.status === 400,
+        `status=${uploadResult?.status}, error=${uploadResult?.json?.error}`);
 }
 
 // ---- Desktop Notifications tests (UI-based) ----
@@ -861,6 +889,61 @@ async function cleanupTestScripts(page) {
   }
 }
 
+// ---- Processes page sorting tests ----
+async function testProcessesSorting(page) {
+  await page.goto(`${url}#/processes`, { waitUntil: "commit" });
+  await page.waitForSelector(".virtual-table-row", { timeout: 15000 });
+  await page.waitForTimeout(1500);
+
+  const getFirstNames = async () => {
+    return await page.evaluate(() => {
+      const rows = document.querySelectorAll(".virtual-table-row");
+      return Array.from(rows).slice(0, 10).map((r) => {
+        const cells = r.querySelectorAll('[role="gridcell"]');
+        return cells.length > 0 ? cells[0].textContent.trim() : "";
+      });
+    });
+  };
+
+  const headers = await page.locator('div[role="columnheader"]').all();
+
+  // Find the "Name" header and click it
+  let nameClicked = false;
+  for (const h of headers) {
+    const text = await h.textContent();
+    if (text && text.includes("Name")) {
+      await h.click();
+      nameClicked = true;
+      await page.waitForTimeout(500);
+      break;
+    }
+  }
+  check("Processes: Name header is clickable", nameClicked, "Name header not found");
+
+  const afterSort = await getFirstNames();
+  const sortedAsc = afterSort.every((v, i, a) =>
+    i === 0 || v.toLowerCase() >= a[i - 1].toLowerCase()
+  );
+  check("Processes: rows sorted by Name ascending after click", sortedAsc,
+    `first 3: ${afterSort.slice(0, 3).join(", ")}`);
+
+  // Verify sort indicator
+  const nameHeader = await page.locator('div[role="columnheader"]').filter({ hasText: "Name" });
+  const headerText = await nameHeader.textContent();
+  check("Processes: sort indicator shows on Name header",
+    headerText.includes("\u25B2") || headerText.includes("\u25BC"),
+    `header="${headerText}"`);
+
+  // Wait for a poll cycle and verify sort persists
+  await page.waitForTimeout(4000);
+  const afterPoll = await getFirstNames();
+  const stillSorted = afterPoll.every((v, i, a) =>
+    i === 0 || v.toLowerCase() >= a[i - 1].toLowerCase()
+  );
+  check("Processes: sort persists across poll cycle", stillSorted,
+    `first 3 after poll: ${afterPoll.slice(0, 3).join(", ")}`);
+}
+
 // ---- Main ----
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({
@@ -880,6 +963,17 @@ try {
   console.log("=== Script Engine Unit Tests (edge cases) ===");
   await runScriptEngineTests(testPage);
 
+  // Save current config before mutating it, so we can restore it at the end.
+  // The test suite writes a GeoIP path, toggles notifications, etc. - all of
+  // which must be undone so the user does not lose their real settings.
+  let savedConfig = null;
+  try {
+    savedConfig = await testPage.evaluate(async () => {
+      const r = await fetch("/api/config");
+      return await r.json();
+    });
+  } catch { /* will be null → restore skipped */ }
+
   console.log("\n=== API Contract Tests ===");
   await runApiTests(testPage);
 
@@ -889,11 +983,34 @@ try {
   console.log("\n=== Desktop Notifications Tests ===");
   await testNotifications(testPage);
 
+  console.log("\n=== Processes Sorting Tests ===");
+  await testProcessesSorting(testPage);
+
   console.log("\n=== Automations Page Tests ===");
   await testAutomationsPage(testPage);
 
   console.log("\n=== Cleanup ===");
   await cleanupTestScripts(testPage);
+
+   // Restore the original config if we captured one.
+  if (savedConfig) {
+    try {
+      await testPage.evaluate(async (cfg) => {
+        const meta = document.querySelector('meta[name="wintcp-api-token"]');
+        const tok = meta ? meta.content : "";
+        const r = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-WinTCP-Token": tok, "Origin": window.location.origin },
+          body: JSON.stringify(cfg),
+        });
+        return r.ok;
+      }, savedConfig);
+      console.log("Original config restored.");
+      check("Config restored after tests", true);
+    } catch (err) {
+      check("Config restore after tests", false, err.message);
+    }
+  }
 
   // Filter out expected HTTP errors from API contract tests (403/400 from
   // intentionally unauthorized CLI calls are test assertions, not bugs).
