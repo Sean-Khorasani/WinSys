@@ -40,6 +40,7 @@
 #include <utility>
 #include <vector>
 
+#include "BlockConn.h"
 #include "Commands.h"
 #include "ConnectionStore.h"
 #include "Settings.h"
@@ -56,7 +57,8 @@ namespace {
 constexpr size_t kMaxHeaderBytes = 16384;
 constexpr size_t kMaxBodyBytes = 65536;
 constexpr size_t kMaxAssetBytes = 1024 * 1024;
-constexpr int kExpectedConfigVersion = 2;
+constexpr size_t kMaxUploadBytes = 16 * 1024 * 1024;
+constexpr int kExpectedConfigVersion = 3;
 constexpr size_t kMaxAuditBytes = 2 * 1024 * 1024;
 constexpr size_t kAuditRetention = 1000;
 constexpr size_t kMaxPendingBlocks = 64;
@@ -96,6 +98,7 @@ enum class WebUiLogLevel : unsigned char { Debug, Info, Warn, Error };
 struct ServerContext {
     std::wstring executableDirectory;
     std::wstring dataDirectory;
+    std::wstring geoIpDbDir;
     std::wstring configPath;
     std::wstring auditPath;
     std::wstring logPath;
@@ -105,6 +108,9 @@ struct ServerContext {
     SnapshotSource source;
     ConnectionStore store;
     MetricsCollector metricsCollector;
+    // GeoIP database path, cached from config so the connection refresher can
+    // re-apply GeoIP enrichment without re-reading the config file every tick.
+    std::wstring geoIpDbPath;
     // Process table. Sampled and OWNED by the refresher thread; requests only
     // read the published snapshot through ProcessSnapshot's own mutex.
     ProcessSnapshot processes;
@@ -180,6 +186,19 @@ DWORD WINAPI ConnectionRefresherThread(LPVOID param) {
         // process-wide Winsock lock, and a background thread doing that forever
         // is strictly worse than /api/connections doing it once per request.
         options.webMetadata = true;
+        // Match the /api/connections column set so the store already carries the
+        // enrichment template evaluators need. GeoIP and signature verification
+        // are enabled here when configured - the refresher applies them once
+        // per pass, caching signatures per image path.
+        options.columns = {
+            COL_PROTO, COL_LOCAL, COL_LPORT, COL_REMOTE, COL_RPORT, COL_STATE,
+            COL_PID, COL_PROCESS, COL_SERVICE, COL_PATH,
+            COL_DURATION, COL_SIGNATURE, COL_PPID, COL_INTEGRITY, COL_COUNTRY,
+        };
+        if (context->source.GeoIpLoaded()) {
+            options.geoIpPath = context->geoIpDbPath;
+        }
+        options.signatures = true;
         bool ok = false;
         {
             std::lock_guard<std::mutex> lock(g_storeMutex);
@@ -640,6 +659,9 @@ bool PrepareDataPaths(ServerContext* context) {
     if (ec) return false;
     context->configPath = context->dataDirectory + L"\\config.json";
     context->auditPath = context->dataDirectory + L"\\audit.ndjson";
+    context->geoIpDbDir = context->dataDirectory + L"\\db";
+    std::error_code ec2;
+    std::filesystem::create_directories(context->geoIpDbDir, ec2);
     return true;
 }
 
@@ -745,6 +767,7 @@ void LoadGeoIpFromConfig(ServerContext& context) {
                       "geoIpDbPath in config is not valid UTF-8");
         return;
     }
+    context.geoIpDbPath = dbPath;
     std::wstring error;
     if (context.source.LoadGeoIp(dbPath.c_str(), &error)) {
         WriteWebUiLog(context, WebUiLogLevel::Info,
@@ -879,6 +902,9 @@ bool ReceiveRequest(SOCKET client, HttpRequest* request, int* errorStatus) {
         *errorStatus = 400;
         return false;
     }
+    const bool isUpload = request->method == "POST" &&
+                          request->target.find("/api/geoip/upload") == 0;
+    const size_t maxBody = isUpload ? kMaxUploadBytes : kMaxBodyBytes;
     size_t contentLength = 0;
     const auto length = request->headers.find("content-length");
     if (length != request->headers.end()) {
@@ -889,14 +915,14 @@ bool ReceiveRequest(SOCKET client, HttpRequest* request, int* errorStatus) {
                 return false;
             }
             const size_t digit = static_cast<size_t>(c - '0');
-            if (contentLength > (kMaxBodyBytes - digit) / 10) {
+            if (contentLength > (maxBody - digit) / 10) {
                 *errorStatus = 413;
                 return false;
             }
             contentLength = contentLength * 10 + digit;
         }
     }
-    if (contentLength > kMaxBodyBytes) { *errorStatus = 413; return false; }
+    if (contentLength > maxBody) { *errorStatus = 413; return false; }
     const size_t bodyStart = headerEnd + 4;
     if (data.size() > bodyStart) request->body = data.substr(bodyStart);
     while (request->body.size() < contentLength) {
@@ -1021,6 +1047,22 @@ std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) 
     // Web UI; the CLI and GUI still show it, because they run the scan once per
     // invocation rather than on a timer.
     options.webMetadata = true;
+    // Web UI-specific columns: enrich the JSON with the diagnostic and trust
+    // columns the template evaluators need (duration, signature, ppid,
+    // integrity) plus country when a GeoIP database is configured. The
+    // connection refresher (ConnectionRefresherThread) applies these same
+    // enrichments on its own pass, so the data is already in the store when
+    // /api/connections reads it. Signature verification is cached per image
+    // path, so it costs once per binary, not once per row.
+    options.columns = {
+        COL_PROTO, COL_LOCAL, COL_LPORT, COL_REMOTE, COL_RPORT, COL_STATE,
+        COL_PID, COL_PROCESS, COL_SERVICE, COL_PATH,
+        COL_DURATION, COL_SIGNATURE, COL_PPID, COL_INTEGRITY, COL_COUNTRY,
+    };
+    if (context.source.GeoIpLoaded()) {
+        options.geoIpPath = context.geoIpDbPath;
+    }
+    options.signatures = true;
     std::lock_guard<std::mutex> lock(g_storeMutex);
     const CommandResult result = CmdListInto(context.source, context.store, options);
     if (result.exitCode != kExitOk) return ErrorJson(result.err.empty()
@@ -1101,7 +1143,7 @@ std::string CapabilitiesJson(ServerContext& context) {
         << ",\"geoIp\":{\"configured\":" << (context.source.GeoIpLoaded() ? "true" : "false")
         << ",\"type\":" << (context.source.GeoIpLoaded() ? JsonQuote("GeoLite2-Country") : "null")
         << ",\"error\":null}"
-        << ",\"etw\":true,\"trafficScan\":false,\"dns\":true"
+         << ",\"etw\":true,\"trafficScan\":false,\"dns\":true,\"signatures\":true"
         << ",\"version\":" << JsonQuote("2.0.0") << "}";
     return out.str();
 }
@@ -1977,6 +2019,69 @@ std::string GeoSummaryJson(ServerContext& context) {
     return out.str();
 }
 
+std::string DiagnosticsJson(ServerContext& context) {
+    // Surface the same sampler health the CLI's `doctor` reports, so template
+    // evaluators can gate on it. Unknown is never zero: a missing sampler
+    // reads "null" with a reason, not "0 timeouts".
+    context.lastStoreAccess.store(::GetTickCount64());
+    const SocketTrafficSampler* sampler = ActiveTrafficSampler();
+    const bool pdh = context.metricsCollector.IsRunning();
+    const bool geoLoaded = context.source.GeoIpLoaded();
+    std::ostringstream out;
+    out << "{\"metrics\":{\"pdh\":" << (pdh ? "true" : "false")
+        << ",\"perCore\":" << (pdh && context.metricsCollector.PerCoreAvailable() ? "true" : "false")
+        << ",\"geoIp\":{\"configured\":" << (geoLoaded ? "true" : "false")
+        << ",\"type\":" << (geoLoaded ? JsonQuote("GeoLite2-Country") : "null") << "}}"
+        << ",\"traffic\":{\"scanEnabled\":" << (sampler != nullptr ? "true" : "false");
+    if (sampler != nullptr) {
+        out << ",\"timeouts\":" << sampler->TimeoutCount()
+            << ",\"unreadable\":" << sampler->UnreadableCount()
+            << ",\"scanFailures\":" << sampler->ScanFailureCount();
+    } else {
+        out << ",\"timeouts\":null,\"unreadable\":null,\"scanFailures\":null"
+            << ",\"reason\":" << JsonQuote("no active traffic sampler (web UI disables per-socket scan)");
+    }
+    out << "},\"connectionSnapshotTick\":" << (context.connectionSnapshotTick.load() > 0 ? "true" : "false")
+        << ",\"connectionSnapshotAgeMs\":" << (context.connectionSnapshotTick.load() > 0
+               ? ::GetTickCount64() - context.connectionSnapshotTick.load()
+               : 0)
+        << ",\"connectionRefreshFailed\":" << (context.connectionRefreshFailed.load() ? "true" : "false")
+        << "}";
+    return out.str();
+}
+
+std::string FirewallRulesJson(ServerContext& context) {
+    (void)context;  // firewall ledger is independent of connection state
+    // Expose the WinTCP-tagged firewall rule ledger so templates can check
+    // whether a peer is already blocked. Enumerating the policy store requires
+    // elevation; an unreadable ledger is null with a reason, not an empty array.
+    std::vector<BlockedRule> rules;
+    std::wstring error;
+    const bool ok = ListBlockedRules(&rules, &error);
+    std::ostringstream out;
+    if (!ok) {
+        // A missing/empty result is NOT an error here: CountWinTcpRules returns
+        // 0 with no error when there are no tagged rules.
+        out << "{\"rules\":[],\"available\":" << (error.empty() ? "true" : "false")
+            << ",\"reason\":" << (error.empty() ? "null" : JsonQuote(WideToUtf8(error))) << "}";
+        return out.str();
+    }
+    out << "{\"rules\":[";
+    bool first = true;
+    for (const BlockedRule& b : rules) {
+        if (!first) out << ",";
+        first = false;
+        out << "{\"name\":" << JsonQuote(WideToUtf8(b.name))
+            << ",\"enabled\":" << (b.enabled ? "true" : "false")
+            << ",\"blocking\":" << (b.isBlocking ? "true" : "false")
+            << ",\"remoteAddrs\":" << JsonQuote(WideToUtf8(b.remoteAddrs))
+            << ",\"localPorts\":" << JsonQuote(WideToUtf8(b.localPorts))
+            << ",\"remotePorts\":" << JsonQuote(WideToUtf8(b.remotePorts)) << "}";
+    }
+    out << "],\"available\":true,\"reason\":null}";
+    return out.str();
+}
+
 bool DecodeFormValue(const std::string& raw, std::string* out) {
     if (out == nullptr) return false;
     out->clear();
@@ -2441,15 +2546,6 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         ServeShell(context, L"index.html", &response);
         return response;
     }
-    // The pre-upgrade dashboard, preserved verbatim under webui/legacy. It is the
-    // strangler's fallback: the control room at / is still being ported page by
-    // page, and until a page reaches parity the legacy build keeps every feature
-    // (filter/sort/group/freeze, permit flow, scripts, templates, presets,
-    // bookmarks, alerts) reachable instead of silently lost.
-    if (path == "/legacy" || path == "/legacy/" || path == "/legacy/index.html") {
-        ServeShell(context, L"legacy\\index.html", &response);
-        return response;
-    }
     if (path == "/app.js" || path == "/app.css") {
         response.contentType = path == "/app.js"
                                    ? "text/javascript; charset=utf-8"
@@ -2461,7 +2557,7 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         }
         return response;
     }
-    // Static assets: /js/*, /css/*, /vendor/*, /data/*, /img/*, /fonts/*, /legacy/*.
+    // Static assets: /js/*, /css/*, /vendor/*, /data/*, /img/*, /fonts/*.
     // IsSafeStaticPath owns the allow-list of prefixes AND extensions, so it is
     // the only gate here: this used to repeat the prefix list inline and had
     // already drifted from WebStatic, which is how every subdirectory asset 404'd.
@@ -2611,6 +2707,14 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         response.body = GeoSummaryJson(context);
         return response;
     }
+    if (path == "/api/diagnostics") {
+        response.body = DiagnosticsJson(context);
+        return response;
+    }
+    if (path == "/api/firewall") {
+        response.body = FirewallRulesJson(context);
+        return response;
+    }
     if (path == "/api/config" && request.method == "GET") {
         if (!ReadFileBounded(context.configPath, kMaxBodyBytes, &response.body)) {
             // First run: serve the SHIPPED default (webui\config.default.json)
@@ -2635,6 +2739,64 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
                 response.body = "{\"version\":" + std::to_string(kExpectedConfigVersion) + ",\"rules\":[]}";
             }
         }
+        return response;
+    }
+    // ---- GeoIP database upload ------------------------------------------------
+    // The browser cannot expose local filesystem paths (file.path is hidden by
+    // security), so the Browse button uploads the .mmdb contents to this endpoint.
+    // The server writes the blob to geoIpDbDir and echoes back the on-disk path;
+    // the client then fills the input box and updates the config via /api/config.
+    if (path == "/api/geoip/upload" && request.method == "POST") {
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/octet-stream")) {
+            response.status = 415;
+            response.body = ErrorJson("geoip upload requires application/octet-stream");
+            return response;
+        }
+        if (request.body.empty()) {
+            response.status = 400;
+            response.body = ErrorJson("upload body is empty");
+            return response;
+        }
+        if (request.body.size() > kMaxUploadBytes) {
+            response.status = 413;
+            response.body = ErrorJson("uploaded GeoIP database exceeds the size limit");
+            return response;
+        }
+        const auto fnHeader = request.headers.find("x-filename");
+        if (fnHeader == request.headers.end() || fnHeader->second.empty()) {
+            response.status = 400;
+            response.body = ErrorJson("missing X-Filename header");
+            return response;
+        }
+        std::wstring filename;
+        if (!Utf8ToWide(fnHeader->second, &filename)) {
+            response.status = 400;
+            response.body = ErrorJson("filename is not valid UTF-8");
+            return response;
+        }
+        // Reject path separators / traversal in the filename.
+        if (filename.find_first_of(L"/\\") != std::wstring::npos) {
+            response.status = 400;
+            response.body = ErrorJson("filename contains path separators");
+            return response;
+        }
+        const std::wstring badChars = L":*?<\"|";
+        if (filename.find_first_of(badChars) != std::wstring::npos) {
+            response.status = 400;
+            response.body = ErrorJson("filename contains invalid characters");
+            return response;
+        }
+        const std::wstring destPath = context.geoIpDbDir + L"\\" + filename;
+        if (!WriteFileAtomic(destPath, request.body)) {
+            response.status = 500;
+            response.body = ErrorJson("could not save uploaded GeoIP database");
+            return response;
+        }
+        response.body = "{\"ok\":true,\"path\":" + JsonQuote(WideToUtf8(destPath)) + "}";
         return response;
     }
     if (path == "/api/config" && request.method == "POST") {
@@ -3133,7 +3295,7 @@ DWORD WINAPI WebUiAcceptLoop(LPVOID param) {
 
 }  // namespace
 
-int RunWebUiServer() {
+int RunWebUiServer(unsigned portHint) {
     ServerContext context;
     if (!GetExecutableDirectory(&context.executableDirectory)) {
         std::cout << "webui: could not resolve executable directory\r\n";
@@ -3210,7 +3372,9 @@ int RunWebUiServer() {
     sockaddr_in address = {};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = 0;
+    if (portHint != 0) {
+        address.sin_port = htons(static_cast<u_short>(portHint));
+    }
     if (::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) ==
             SOCKET_ERROR || ::listen(listener, SOMAXCONN) == SOCKET_ERROR) {
         ::closesocket(listener);
