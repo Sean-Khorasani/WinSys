@@ -38,7 +38,7 @@ The Web UI needs the `webui` assets beside `wintcp.exe`. The native CLI and GUI 
 | **System** | Operating-system, processor, memory, and capability information. |
 | **Settings** | Theme, display preferences, refresh interval, GeoIP paths, and audit history. |
 
-Use the sidebar to navigate. **Ctrl+K** opens the command palette; `r` or the refresh button requests an immediate update. The browser polls while the page is open and pauses background work when the tab is hidden.
+Use the sidebar to navigate. **Ctrl+K** opens the command palette; when live, the refresh button requests an immediate update. Use **Pause** in the top bar to hold the current snapshot while inspecting it; **Resume** restarts polling. The browser also pauses background work while its tab is hidden.
 
 ## Map and network flows
 
@@ -52,7 +52,7 @@ The Flows tab groups remote peers by country. The Connections and Listening tabs
 
 ## Processes and automation
 
-The Processes page lists the process snapshot, not only processes that own a connection. Use **Table**, **Tree**, or **Treemap** to change the view; the treemap can be sized by working set or CPU share. A dash indicates a value Windows could not provide, not a measured zero.
+The Processes page lists the process snapshot, not only processes that own a connection. Use **Table**, **Tree**, or **Treemap** to change the view; the treemap can be sized by working set or CPU share. The table includes the full process set supported by the local API, and its filter, sort, view, and scroll position stay in place as samples update. A dash indicates a value Windows could not provide, not a measured zero. On narrow screens, tables scroll horizontally rather than hiding columns.
 
 The Automations page includes monitor templates and a workbench for local WinTCP scripts. Monitor evaluation and browser notifications run only while the dashboard page is open. Closing the page stops those evaluations; it does not stop the background Web UI server. Scripts execute the adjacent `wintcp.exe` with bounded arguments and output. Sensitive actions require a separate confirmation and can still require administrator rights. The Web UI does not provide a persistent scheduler, cloud service, or remote notification service.
 
