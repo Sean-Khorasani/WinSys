@@ -9,9 +9,9 @@
 //
 // It is now a structured, owner-drawn control. The content arrives as a
 // DetailModel - sections of label/value pairs - which the window lays out
-// itself: section headers, a fixed label gutter, alternating row shading,
-// a dimmer note line per section, collapsible sections, and monospace for
-// the values where alignment matters. The model is built once per refresh
+// itself: section headers, aligned label/value pairs, readable multiline
+// command lines, collapsible sections, and monospace for technical values.
+// The model is built once per refresh
 // and the layout is only recomputed when the client area, the model or the
 // theme changes, so a live refresh is a repaint, not a rebuild.
 //
@@ -69,8 +69,8 @@ public:
     void ApplyFont(HFONT font);        // on DPI change
 
 private:
-    // One laid-out row. Everything is a single fixed-height row, so painting is
-    // a straight run of DT_SINGLELINE draws with no wrapping pass.
+    // One laid-out row in the current tab. Field values can wrap and selected
+    // technical fields use a stacked label/value layout.
     //
     // FieldRow is the whole point of the 2026-10-05 rework. A field used to be
     // TWO rows - a FieldLabel row and then a FieldValue row indented to
@@ -78,8 +78,8 @@ private:
     // stacked over its own value. That is the "does not split correctly" report,
     // and it doubled the content height, which is what made the second fault
     // (painting under the button row) hit so easily. One row now carries both
-    // halves: `text` is the label, `value` is the value, and they are drawn in
-    // two columns separated by a dotted leader.
+    // halves: `text` is the label and `value` is the value. Most fields use
+    // aligned columns; long command lines stack below their label.
     struct Line {
         enum Kind { Title, Subtitle, SectionHeader, SectionNote, FieldRow, FieldValue,
                     Connection, Blank,
@@ -108,6 +108,7 @@ private:
         // so it is measured once in RebuildLayout and reused for both. Zero
         // for every other kind.
         int width = 0;
+        bool stacked = false;
         // True for the title/subtitle block and the tab bar: these are fixed
         // at the top of the window and never scroll, so a reader always sees
         // which process and which tab they're in. Only the section body
@@ -121,14 +122,11 @@ private:
     void OnCommand(WORD id);
     void Layout(int cx, int cy);
     void OnPaint();
-    // `fieldInSection` drives alternating-row shading and is advanced by the
-    // body loop in OnPaint.
     // `textRight` is the value column's right edge: the body passes a
     // scrollbar-aware edge so text stops clear of the native control,
     // the header passes the full client edge.
     void PaintLine(HDC mem, const Line& l, int y, int lh, int cx, int m,
-                   int ruleX, int textRight,
-                   int fieldInSection = 0);
+                   int textRight);
     void OnMouseDown(int x, int y);
     void RebuildLayout();
     // Keyboard tab switching (Ctrl+Tab / arrow keys): moves the
@@ -189,12 +187,14 @@ private:
     int headerHeight_ = 0;
 
     HFONT font_ = nullptr;               // borrowed from MainWindow
-    // the three derived faces are FontCache entries, borrowed like
+    HFONT bodyFont_ = nullptr;           // FontCache-owned details body face
+    // The derived faces are FontCache entries, borrowed like
     // font_ itself - never DeleteObject here (see the destructor). The
     // cache owns every handle; deleting one would break every other
     // window holding it.
     HFONT titleFont_ = nullptr;
     HFONT headerFont_ = nullptr;
+    HFONT labelFont_ = nullptr;
     HFONT monoFont_ = nullptr;           // fixed-pitch for values
     HFONT smallFont_ = nullptr;          // notes
     bool fontsReady_ = false;
@@ -204,7 +204,7 @@ private:
     // System-derived palette, refreshed on WM_SYSCOLORCHANGE so high
     // contrast is honoured without a restart.
     HBRUSH brushWindow_ = nullptr;      // background
-    HBRUSH brushAlternate_ = nullptr;   // alternating row shading
+    HBRUSH brushAlternate_ = nullptr;   // subtle technical-value surface
     HBRUSH brushSection_ = nullptr;     // section header band
     HBRUSH brushSectionHover_ = nullptr; // section band under the pointer
     HBRUSH brushAccent_ = nullptr;      // section accent bar + collapse glyph
