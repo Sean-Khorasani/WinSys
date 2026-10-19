@@ -1,12 +1,12 @@
 // main.js - Entry point for the WinTCP Web UI
 
-import { startRouter, route, navigate, setNotFound } from "./router.js";
+import { startRouter, route, navigate, setNotFound, resolve as resolveRoute } from "./router.js";
 import { api } from "./api.js";
 import { createStore } from "./store.js";
 import { createPoller } from "./poller.js";
 import { h, clear } from "./h.js";
 import { icon } from "./icons.js";
-import { fmtNum, fmtBytes, fmtPct, fmtDuration } from "./format.js";
+import { fmtNum, fmtBytes, fmtPct, fmtDuration, setFormatUnits } from "./format.js";
 import { renderOverview, updateOverview } from "./pages/overview.js";
 import { renderPerformance, updatePerformance } from "./pages/performance.js";
 import { renderProcesses, updateProcesses } from "./pages/processes.js";
@@ -19,6 +19,9 @@ import { renderSettings } from "./pages/settings.js";
 import { createCommandPalette } from "./ui/commandpalette.js";
 import { installCspReporter } from "./csp.js";
 import { repaintCharts } from "./charts/timeseries.js";
+import { createSnapshotRefresh } from "./refresh.js";
+import { normalizeConnectionFilters } from "./connectionfilters.js";
+import { notify } from "./ui/feedback.js";
 
 // Global store
 export const store = createStore({
@@ -47,8 +50,18 @@ export const store = createStore({
   processFilter: "",
   processTableScrollTop: 0,
   networkFilter: "",
+  networkPredicates: [],
   networkTableScrollTop: 0,
   networkListeningScrollTop: 0,
+});
+
+let sessionExpiredToast = null;
+window.addEventListener("wintcp:session-expired", () => {
+  if (sessionExpiredToast?.isConnected) return;
+  sessionExpiredToast = notify("Your dashboard session expired. Pending changes were not saved; reload to reconnect.", {
+    error: true,
+    action: { label: "Reload dashboard", onClick: () => window.location.reload() },
+  });
 });
 
 // Apply theme. Charts resolve design tokens into canvas colours at build time,
@@ -109,7 +122,7 @@ function renderSidebar(container) {
       label: "Respond",
       items: [
         { path: "/automations", icon: "zap", label: "Automations" },
-        { path: "/blocks", icon: "shield", label: "Blocked Peers" },
+        { path: "/blocks", icon: "shield", label: "Firewall Rules" },
       ],
     },
     {
@@ -216,7 +229,7 @@ function renderTopbar(container, handlers = {}) {
           title: "Refresh now",
         }, icon("refresh", 16)),
         h("button", {
-          class: "btn btn-ghost btn-icon btn-sm",
+          class: "btn btn-ghost btn-sm",
           id: "topbar-pause",
           type: "button",
           onclick: () => handlers.onTogglePause && handlers.onTogglePause(),
@@ -270,7 +283,7 @@ const PAGE_LABELS = {
   "/network": "Network",
   "/map": "Map",
   "/automations": "Automations",
-  "/blocks": "Blocked Peers",
+  "/blocks": "Firewall Rules",
   "/system": "System",
   "/settings": "Settings",
 };
@@ -291,6 +304,8 @@ const pageUpdateFns = {
 // inside the registration loop is simply not in scope where it is called. That
 // mistake produced a silent ReferenceError on every poll, which the poller's
 // bare catch swallowed - the page just stopped updating.
+let routeGeneration = 0;
+
 function disposePage() {
   const page = document.getElementById("page");
   if (!page) return;
@@ -310,18 +325,41 @@ function disposePage() {
     page._mapDestroy();
     page._mapDestroy = null;
   }
+  if (typeof page._settingsDestroy === "function") {
+    page._settingsDestroy();
+    page._settingsDestroy = null;
+  }
+  if (typeof page._autoDestroy === "function") {
+    page._autoDestroy();
+    page._autoDestroy = null;
+  }
+  if (typeof page._blocksDestroy === "function") {
+    page._blocksDestroy();
+    page._blocksDestroy = null;
+  }
+}
+
+function replacePage() {
+  disposePage();
+  const previous = document.getElementById("page");
+  const page = previous.cloneNode(false);
+  previous.replaceWith(page);
+  return page;
 }
 
 for (const [path, renderFn] of Object.entries(pageMap)) {
   route(path, async () => {
-    const page = document.getElementById("page");
-    disposePage();
-    clear(page);
+    const mine = ++routeGeneration;
+    const page = replacePage();
+    page._rendering = true;
     // A navigation is a fresh render, so the next poll must not skip it.
     pageSignatures.delete(path);
     try {
       await renderFn(page, store);
+      if (mine !== routeGeneration) return;
+      pageSignatures.set(path, pageSignature(path, store.get()));
     } catch (err) {
+      if (mine !== routeGeneration) return;
       // A page that throws must not leave the operator staring at a blank shell.
       clear(page);
       page.append(
@@ -332,6 +370,8 @@ for (const [path, renderFn] of Object.entries(pageMap)) {
         ),
       );
       console.error(`page ${path} failed to render`, err);
+    } finally {
+      page._rendering = false;
     }
     updateTopbarStatus();
   });
@@ -340,8 +380,8 @@ for (const [path, renderFn] of Object.entries(pageMap)) {
 // A hash with no route must say so. Without a handler the sidebar link for
 // /blocks silently did nothing at all.
 setNotFound(async () => {
-  const page = document.getElementById("page");
-  clear(page);
+  routeGeneration++;
+  const page = replacePage();
   const path = (window.location.hash || "").slice(1) || "/";
   page.append(
     h("div", { class: "page-heading" },
@@ -356,8 +396,9 @@ setNotFound(async () => {
 // working, it just forgets.
 async function savePreferences(patch) {
   try {
-    const current = await api.get("/api/config");
-    await api.post("/api/config", { ...current, ...patch });
+    await api.updateConfig((current) => ({
+      ...current, ...patch, preferences: { ...current.preferences, ...patch },
+    }));
   } catch (err) {
     console.warn("could not persist preferences", err);
   }
@@ -365,6 +406,33 @@ async function savePreferences(patch) {
 
 // Initialize
 function init() {
+  document.addEventListener("wintcp:investigate", (event) => {
+    try {
+      const detail = event.detail || {};
+      const predicates = normalizeConnectionFilters(detail.filters);
+      const filters = detail.mode === "add" ? [...(store.get().networkPredicates || []), ...predicates] : predicates;
+      const unique = [...new Map(filters.map((filter) => [JSON.stringify(filter), filter])).values()];
+      store.set({ networkPredicates: unique, networkFilter: "", networkView: "connections", networkTableScrollTop: 0 });
+      if (window.location.hash === "#/network") resolveRoute();
+      else navigate("/network");
+    } catch (error) {
+      notify(error.message, { error: true });
+    }
+  });
+  document.addEventListener("wintcp:firewall-investigate", (event) => {
+    const target = event.detail?.target;
+    if (!target || typeof target !== "object") return;
+    store.set({ firewallTarget: target, firewallRuleName: null, networkView: "blocked", networkTableScrollTop: 0 });
+    if (window.location.hash === "#/network") resolveRoute();
+    else navigate("/network");
+  });
+  document.addEventListener("wintcp:firewall-open-rule", (event) => {
+    const name = event.detail?.name;
+    if (typeof name !== "string" || !name || name.length > 2048) return;
+    store.set({ firewallTarget: null, firewallRuleName: name, networkView: "blocked", networkTableScrollTop: 0 });
+    if (window.location.hash === "#/network") resolveRoute();
+    else navigate("/network");
+  });
   const app = document.getElementById("app-shell");
   clear(app);
   renderSidebar(app);
@@ -396,69 +464,72 @@ function init() {
     { label: "Go to Network", icon: "network", handler: () => navigate("/network") },
     { label: "Go to Map", icon: "globe", handler: () => navigate("/map") },
     { label: "Go to Automations", icon: "zap", handler: () => navigate("/automations") },
-    { label: "Go to Blocked Peers", icon: "shield", handler: () => navigate("/blocks") },
+    { label: "Go to Firewall Rules", icon: "shield", handler: () => navigate("/blocks") },
     { label: "Go to System", icon: "server", handler: () => navigate("/system") },
     { label: "Go to Settings", icon: "settings", handler: () => navigate("/settings") },
-    { label: "Refresh now", icon: "refresh", handler: () => refresh() },
+    { label: "Refresh now", icon: "refresh", handler: () => refresh({ manual: true }).catch(() => {}) },
   ]);
 
   // Start poller. One poll fans out to every read-only endpoint the pages draw
   // from, so a page switch never has to wait on the network to paint.
-  const refresh = async () => {
-    if (store.get().paused) return;
-    try {
-      const [connections, metrics, capabilities, processes, networkSummary, geoSummary, systemInfo] =
-        await Promise.all([
-          api.get("/api/connections"),
-          api.get("/api/metrics/now"),
-          api.get("/api/capabilities"),
-          api.get("/api/processes?sort=cpu&limit=2000"),
-          api.get("/api/network/summary"),
-          api.get("/api/geo/summary"),
-          api.get("/api/system/info"),
-        ]);
-      if (store.get().paused) return;
-      const processRows = processes.processes || [];
-      store.set({
-        connections: connections.connections || [],
-        metrics,
-        capabilities,
-        processes: processRows,
-        // Whether the process list is a real reading or "not sampled yet". The
-        // Overview shows an empty state rather than a zero when it is false.
-        processesKnown: processes.known !== false,
-        processCount: processes.total ?? null,
-        processSampleAgeMs: processes.ageMs ?? null,
-        processSampledAtMs: processes.sampledAtMs ?? null,
-        networkSummary,
-        geoSummary,
-        systemInfo,
-        // Lifted out of the metrics payload so a page does not have to reach
-        // into metrics["sys.uptimeSeconds"] to label itself.
-        sysUptime: metrics["sys.uptimeSeconds"] ?? null,
-        status: "online",
-        lastUpdate: new Date(),
-      });
-    } catch (err) {
-      // Keep the last good data on screen and say the poll failed. Blanking the
-      // dashboard on one transient error is worse than showing stale numbers.
-      store.set({ status: "error", lastError: err.message });
-      console.warn("poll failed", err);
-    }
-    updateTopbarStatus();
-    // Pages that only read once at render time still need to follow the data.
-    rerenderCurrentPage();
-  };
+  let observedConnections = null;
+  const refreshController = createSnapshotRefresh({
+    api,
+    store,
+    onUpdate: () => {
+      const current = store.get();
+      const liveConnections = (current.connections || []).filter((row) => !row.removed && row.rport > 0 && row.state !== "LISTENING");
+      const identities = new Set(liveConnections.map((row) => row.id));
+      const added = observedConnections ? liveConnections.filter((row) => !observedConnections.has(row.id)) : [];
+      observedConnections = identities;
+      if (!current.paused && current.desktopNotifications && added.length &&
+          "Notification" in window && Notification.permission === "granted") {
+        try {
+          const notice = new Notification(`${added.length} new remote connection${added.length === 1 ? "" : "s"}`, {
+            body: [...new Set(added.map((row) => row.process || "Unknown process"))].slice(0, 3).join(", "),
+            tag: "wintcp-connections",
+          });
+          notice.onclick = () => { window.focus(); navigate("/network"); notice.close(); };
+          setTimeout(() => notice.close(), 10000);
+        } catch (error) {
+          console.warn("Connection notification could not be displayed", error);
+        }
+      }
+      updateTopbarStatus();
+      rerenderCurrentPage();
+    },
+  });
+  const refresh = refreshController.refresh;
 
   const poller = createPoller(refresh, state.refreshInterval);
   poller.start();
+  const applyPreferences = (preferences) => {
+    const patch = { ...preferences };
+    if (Number.isFinite(preferences.refreshSeconds)) {
+      patch.refreshInterval = Math.min(60, Math.max(1, preferences.refreshSeconds)) * 1000;
+      poller.setInterval(patch.refreshInterval);
+    }
+    store.set(patch);
+    applyTheme(store.get().theme);
+    applyAccent(store.get().accent);
+    applyDensity(store.get().density);
+    setFormatUnits(store.get().units);
+    const currentPage = window.location.hash.slice(1) || "/";
+    if (currentPage !== "/settings" && currentPage !== "/automations") rerenderCurrentPage();
+  };
+  document.addEventListener("wintcp:preferences", (event) => applyPreferences(event.detail));
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (store.get().theme === "system") applyTheme("system");
+  });
+  setInterval(updateTopbarStatus, 1000);
 
    // Now that the handlers exist, wire the top bar to them.
   const header = app.querySelector(".topbar");
    if (header) header.replaceWith(renderTopbarFragment({
      onPalette: () => palette.open(),
-     onRefresh: () => refresh(),
+     onRefresh: () => refresh({ manual: true }).catch(() => {}),
      onTogglePause: () => {
+       refreshController.invalidate();
        if (store.get().paused) {
          store.set({ paused: false });
          poller.start();
@@ -473,23 +544,20 @@ function init() {
   // Load the persisted preferences (theme, density, refresh cadence) once.
    // Reads from config.preferences (v3) first, falling back to top-level (v2).
    api.get("/api/config").then((config) => {
-     const prefs = config.preferences || config;
+     const prefs = { ...config, ...config.preferences };
      const patch = {};
      if (prefs.theme) patch.theme = prefs.theme;
      if (prefs.accent) patch.accent = prefs.accent;
      if (prefs.density) patch.density = prefs.density;
      if (prefs.units) patch.units = prefs.units;
+     patch.desktopNotifications = prefs.desktopNotifications === true;
      if (Number.isFinite(prefs.refreshSeconds)) {
        // The server stores seconds; the poller wants milliseconds. Clamp so a
        // hand-edited config cannot turn the dashboard into a request storm.
        const seconds = Math.min(Math.max(prefs.refreshSeconds, 1), 60);
-       patch.refreshInterval = seconds * 1000;
-       poller.setInterval(seconds * 1000);
+       patch.refreshSeconds = seconds;
      }
-     store.set(patch);
-     applyTheme(patch.theme || store.get().theme);
-     applyAccent(patch.accent || store.get().accent);
-     applyDensity(patch.density || store.get().density);
+     applyPreferences(patch);
     }).catch(() => { /* defaults already applied */ });
 }
 
@@ -499,7 +567,11 @@ function updateTopbarStatus() {
   const status = store.get().status;
   if (el) {
     const held = store.get().paused;
-    el.textContent = held ? "Paused" : status === "online" ? "Live" : "Reconnecting";
+    const sampledAt = store.get().lastUpdate;
+    const age = sampledAt ? Math.max(0, Math.floor((Date.now() - sampledAt.getTime()) / 1000)) : null;
+    el.textContent = held ? `Paused${age == null ? "" : ` · ${age}s old`}`
+      : status === "online" ? "Live" : status === "degraded" ? "Partial data" : "Reconnecting";
+    el.title = store.get().lastError || (sampledAt ? `Snapshot: ${sampledAt.toLocaleTimeString()}` : "Waiting for a snapshot");
     el.className = `topbar-status is-${held ? "paused" : status}`;
   }
   const pauseButton = document.getElementById("topbar-pause");
@@ -576,6 +648,7 @@ function rerenderCurrentPage() {
   const renderFn = pageMap[path];
   const page = document.getElementById("page");
   if (!renderFn || !page) return;
+  if (page._rendering) return;
   // Skip the first poll's empty state: it would clear and rebuild every chart
   // before there is anything to draw.
   if (!store.get().lastUpdate) return;
@@ -601,14 +674,18 @@ function rerenderCurrentPage() {
 
   const scroll = page.scrollTop;
   const focus = captureFocus();
-  disposePage();
-  clear(page);
-  Promise.resolve(renderFn(page, store))
+  const mine = ++routeGeneration;
+  const replacement = replacePage();
+  replacement._rendering = true;
+  Promise.resolve(renderFn(replacement, store))
     .then(() => {
-      page.scrollTop = scroll;
+      if (mine !== routeGeneration) return;
+      replacement.scrollTop = scroll;
       restoreFocus(focus);
     })
-    .catch((err) => console.error("page refresh failed", err));
+    .catch((err) => {
+      if (mine === routeGeneration) console.error("page refresh failed", err);
+    }).finally(() => { replacement._rendering = false; });
 }
 
 // Render the top bar once its handlers exist. Split out because the fragment
