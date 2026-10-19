@@ -3,6 +3,11 @@
 const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const nf0 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const nf2 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let preferredSi = false;
+
+export function setFormatUnits(units) {
+  preferredSi = units === "si";
+}
 
 export function fmtNum(v, digits = 1) {
   if (v == null || Number.isNaN(v)) return "-";
@@ -14,8 +19,22 @@ export function fmtInt(v) {
   return nf0.format(v);
 }
 
-export function fmtBytes(v, si = false) {
+export function fmtBytes(v, si = preferredSi) {
   if (v == null || Number.isNaN(v)) return "-";
+  if (typeof v === "bigint" || (typeof v === "string" && /^\d+$/.test(v))) {
+    const exact = typeof v === "bigint" ? v : BigInt(v);
+    const base = BigInt(si ? 1000 : 1024);
+    const units = si ? ["B", "KB", "MB", "GB", "TB"] : ["B", "KiB", "MiB", "GiB", "TiB"];
+    let divisor = 1n;
+    let index = 0;
+    while (exact >= divisor * base && index < units.length - 1) {
+      divisor *= base;
+      index++;
+    }
+    const scaled = Number(exact) / Number(divisor);
+    return (index === 0 ? nf0.format(exact) : nf.format(scaled)) + " " + units[index];
+  }
+  if (typeof v !== "number") return "-";
   const base = si ? 1000 : 1024;
   const units = si ? ["B", "KB", "MB", "GB", "TB"] : ["B", "KiB", "MiB", "GiB", "TiB"];
   let i = 0;
@@ -23,7 +42,7 @@ export function fmtBytes(v, si = false) {
   return (i === 0 ? nf0.format(v) : nf.format(v)) + " " + units[i];
 }
 
-export function fmtBps(v, si = false) {
+export function fmtBps(v, si = preferredSi) {
   if (v == null || Number.isNaN(v)) return "-";
   return fmtBytes(v, si) + "/s";
 }
