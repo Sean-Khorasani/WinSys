@@ -81,7 +81,7 @@ private:
     // halves: `text` is the label, `value` is the value, and they are drawn in
     // two columns separated by a dotted leader.
     struct Line {
-        enum Kind { SectionHeader, SectionNote, FieldRow, FieldValue,
+        enum Kind { Title, Subtitle, SectionHeader, SectionNote, FieldRow, FieldValue,
                     Connection, Blank,
                     // a tab-bar slot. Painted in the fixed header region
                     // (does not scroll), unlike every other line which is part
@@ -121,14 +121,13 @@ private:
     void OnCommand(WORD id);
     void Layout(int cx, int cy);
     void OnPaint();
-    // factored row painter. `withLeaders` is false for the pinned header
-    // (the title/tab bar never draw a dotted leader); `fieldInSection` drives
-    // the alternating-row shading and is advanced by the body loop in OnPaint.
+    // `fieldInSection` drives alternating-row shading and is advanced by the
+    // body loop in OnPaint.
     // `textRight` is the value column's right edge: the body passes a
     // scrollbar-aware edge so text stops clear of the native control,
     // the header passes the full client edge.
     void PaintLine(HDC mem, const Line& l, int y, int lh, int cx, int m,
-                   int ruleX, bool withLeaders, int textRight,
+                   int ruleX, int textRight,
                    int fieldInSection = 0);
     void OnMouseDown(int x, int y);
     void RebuildLayout();
@@ -194,7 +193,8 @@ private:
     // font_ itself - never DeleteObject here (see the destructor). The
     // cache owns every handle; deleting one would break every other
     // window holding it.
-    HFONT headerFont_ = nullptr;         // bold, ~125%
+    HFONT titleFont_ = nullptr;
+    HFONT headerFont_ = nullptr;
     HFONT monoFont_ = nullptr;           // fixed-pitch for values
     HFONT smallFont_ = nullptr;          // notes
     bool fontsReady_ = false;
@@ -208,6 +208,7 @@ private:
     HBRUSH brushSection_ = nullptr;     // section header band
     HBRUSH brushSectionHover_ = nullptr; // section band under the pointer
     HBRUSH brushAccent_ = nullptr;      // section accent bar + collapse glyph
+    HBRUSH brushRule_ = nullptr;
     COLORREF clrText_ = RGB(0, 0, 0);
     COLORREF clrDim_ = RGB(0x80, 0x80, 0x80);
     COLORREF clrHeader_ = RGB(0, 0, 0);
