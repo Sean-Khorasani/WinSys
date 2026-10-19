@@ -887,6 +887,20 @@ std::string RenderJsonRows(const std::vector<Connection>& rows,
             out += c.tcpInfo.rttLive ? std::to_string(c.tcpInfo.rttMs) : "null";
             out += ",\"retransBytes\":";
             out += c.tcpInfo.retransKnown ? std::to_string(c.tcpInfo.retransBytes) : "null";
+            // Numeric duration in seconds, for template evaluators that need to
+            // threshold on connection age. The COL_DURATION cell above is a
+            // human-readable string; this is the same value as a number.
+            out += ",\"durationSeconds\":";
+            out += (c.lifetime.firstSeenTick != 0)
+                       ? std::to_string(DurationSeconds(c)) : "null";
+            // Numeric signature state and integrity level for template evaluators.
+            // SignatureLabel values: 0=unchecked, 1=signed, 2=invalid, 3=unsigned, 4=error.
+            out += ",\"signatureState\":";
+            out += (c.security.signature < static_cast<unsigned>(kSigCount))
+                       ? std::to_string(c.security.signature) : "0";
+            out += ",\"integrityLevel\":";
+            out += (c.security.integrity < static_cast<unsigned>(kIntegrityCount))
+                       ? std::to_string(c.security.integrity) : "0";
         }
         out += "}";
         first = false;
