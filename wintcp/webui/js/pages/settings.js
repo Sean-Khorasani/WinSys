@@ -7,6 +7,7 @@
 
 import { h, clear } from "../h.js";
 import { api } from "../api.js";
+import { fmtBytes } from "../format.js";
 import { card, cardHeader, cardTitle, cardContent, emptyState } from "../ui/card.js";
 
 const THEMES = [
@@ -28,6 +29,16 @@ const UNITS = [
   { value: "iec", label: "IEC (KiB, MiB)" },
   { value: "si", label: "SI (kB, MB)" },
 ];
+
+const DEFAULT_PREFS = {
+  theme: "system",
+  accent: "neutral",
+  density: "comfortable",
+  refreshSeconds: 2,
+  units: "iec",
+  geoIpDbPath: "",
+  desktopNotifications: false,
+};
 
 // Read a preference, tolerating both the v2 shape (bare) and the v3 shape
 // (nested under preferences), so an older config keeps working unchanged.
@@ -58,12 +69,57 @@ function select(props, options, current) {
   );
 }
 
+// Build the POST body: save preferences at the top level so that main.js's
+// startup config loader (which reads top-level fields) sees them after restart.
+// The preferences object is also kept for backward compatibility.
+function buildConfigBody(config, prefs) {
+  const base = config || {};
+  return {
+    version: 3,
+    theme: prefs.theme,
+    accent: prefs.accent,
+    density: prefs.density,
+    refreshSeconds: prefs.refreshSeconds,
+    units: prefs.units,
+    geoIpDbPath: prefs.geoIpDbPath,
+    desktopNotifications: prefs.desktopNotifications,
+    preferences: { ...prefs },
+    rules: base.rules || [],
+    scripts: base.scripts || [],
+    presets: base.presets || [],
+    bookmarks: base.bookmarks || [],
+    scriptRuns: base.scriptRuns || [],
+    lastScriptRun: base.lastScriptRun || null,
+    view: base.view || {
+      protocol: "all", state: "all", groupByProcess: false, frozen: false,
+      columns: ["process", "pid", "proto", "local", "remote", "state", "traffic"],
+    },
+  };
+}
+
 export async function renderSettings(page, store) {
+  page._settingsState = { prefs: { ...DEFAULT_PREFS }, config: null };
   clear(page);
   page.append(
     h("div", { class: "page-heading" },
-      h("h1", { class: "page-title" }, "Settings"),
-      h("p", { class: "page-description" }, "Appearance, polling, and the audit trail"),
+      h("div", {},
+        h("h1", { class: "page-title" }, "Settings"),
+        h("p", { class: "page-description" }, "Appearance, polling, and the audit trail"),
+      ),
+      h("div", { class: "settings-actions" },
+        h("button", {
+          id: "settings-save",
+          class: "btn btn-sm btn-primary",
+          type: "button",
+          onclick: () => saveSettings(page),
+        }, "Save"),
+        h("button", {
+          id: "settings-restore",
+          class: "btn btn-sm btn-ghost",
+          type: "button",
+          onclick: () => restoreDefaults(page),
+        }, "Restore defaults"),
+      ),
     ),
     h("div", { class: "settings-grid", id: "settings-grid" }),
   );
@@ -78,45 +134,86 @@ export async function renderSettings(page, store) {
     return;
   }
 
+  page._settingsState.config = config;
   const prefs = {
-    theme: readPref(config, "theme", "system"),
-    accent: readPref(config, "accent", "neutral"),
-    density: readPref(config, "density", "comfortable"),
-    refreshSeconds: readPref(config, "refreshSeconds", 2),
-    units: readPref(config, "units", "iec"),
-    geoIpDbPath: readPref(config, "geoIpDbPath", ""),
-    desktopNotifications: readPref(config, "desktopNotifications", false),
+    theme: readPref(config, "theme", DEFAULT_PREFS.theme),
+    accent: readPref(config, "accent", DEFAULT_PREFS.accent),
+    density: readPref(config, "density", DEFAULT_PREFS.density),
+    refreshSeconds: readPref(config, "refreshSeconds", DEFAULT_PREFS.refreshSeconds),
+    units: readPref(config, "units", DEFAULT_PREFS.units),
+    geoIpDbPath: readPref(config, "geoIpDbPath", DEFAULT_PREFS.geoIpDbPath),
+    desktopNotifications: readPref(config, "desktopNotifications", DEFAULT_PREFS.desktopNotifications),
   };
+  page._settingsState.prefs = prefs;
   const schemaVersion = config.version || 2;
 
   const status = h("p", { class: "settings-status muted", role: "status" }, "");
 
-  // Writes are debounced so dragging a control does not fire a POST per change.
+  // Debounced auto-save for live controls (selects, toggles).
   let pending = null;
-  async function persist(patch) {
+  function scheduleSave(patch) {
     clearTimeout(pending);
-    pending = setTimeout(async () => {
-      status.textContent = "Saving...";
-       try {
-         await api.post("/api/config", {
-           ...config,
-           version: 3,
-           preferences: { ...prefs, ...patch },
-         });
-         status.textContent = "Saved.";
-      } catch (err) {
-        status.textContent = "Not saved: " + err.message;
-        status.className = "settings-status text-danger";
-      }
+    pending = setTimeout(() => {
+      doSave(patch);
     }, 250);
   }
 
-  function applyAndSave(patch) {
-    for (const [key, value] of Object.entries(patch)) prefs[key] = value;
-    if (patch.theme !== undefined) document.documentElement.setAttribute("data-theme", patch.theme);
-    if (patch.accent !== undefined) document.documentElement.setAttribute("data-accent", patch.accent);
-    if (patch.density !== undefined) document.body.classList.toggle("density-compact", patch.density === "compact");
-    persist(patch);
+  async function doSave(patch) {
+    const ov = page._settingsState;
+    if (!ov) return;
+    // Merge patch into prefs
+    const merged = { ...ov.prefs, ...patch };
+    ov.prefs = merged;
+    status.textContent = "Saving...";
+    status.className = "settings-status muted";
+    try {
+      await api.post("/api/config", buildConfigBody(ov.config, merged));
+      ov.config = { ...ov.config, ...merged, preferences: { ...merged } };
+      status.textContent = "Saved.";
+      status.className = "settings-status muted";
+      // Apply immediately for appearance settings
+      applyPrefs(merged);
+    } catch (err) {
+      status.textContent = "Not saved: " + err.message;
+      status.className = "settings-status text-danger";
+    }
+  }
+
+  function applyPrefs(p) {
+    if (p.theme !== undefined) {
+      const resolved = p.theme === "system"
+        ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : p.theme;
+      document.documentElement.setAttribute("data-theme", resolved);
+    }
+    if (p.accent !== undefined) document.documentElement.setAttribute("data-accent", p.accent);
+    if (p.density !== undefined) document.body.classList.toggle("density-compact", p.density === "compact");
+  }
+
+  function applyAndSchedule(patch) {
+    const ov = page._settingsState;
+    ov.prefs = { ...ov.prefs, ...patch };
+    applyPrefs(patch);
+    scheduleSave(patch);
+  }
+
+  // Save all current prefs immediately (triggered by Save button).
+  async function saveSettings(page) {
+    const ov = page._settingsState;
+    if (!ov) return;
+    await doSave({});
+  }
+
+  // Restore defaults and persist (triggered by Restore defaults button).
+  async function restoreDefaults(page) {
+    const ov = page._settingsState;
+    if (!ov) return;
+    ov.prefs = { ...DEFAULT_PREFS };
+    // Re-render the form with defaults
+    await doSave({});
+    // Trigger a re-render to reflect defaults in the form
+    const evt = new Event("settings:restored", { bubbles: true });
+    page.dispatchEvent(evt);
   }
 
   const appearance = card({},
@@ -124,22 +221,22 @@ export async function renderSettings(page, store) {
     cardContent({},
       row("Theme", "Match the system, or pin light or dark", select({
         "aria-label": "Theme",
-        onchange: (e) => applyAndSave({ theme: e.target.value }),
+        onchange: (e) => applyAndSchedule({ theme: e.target.value }),
       }, THEMES, prefs.theme)),
       row("Accent", "Highlight colour for charts and focus rings",
         select({
           "aria-label": "Accent",
-          onchange: (e) => applyAndSave({ accent: e.target.value }),
+          onchange: (e) => applyAndSchedule({ accent: e.target.value }),
         }, ACCENTS.map((a) => ({ value: a, label: a[0].toUpperCase() + a.slice(1) })), prefs.accent)),
       row("Density", "Row height and padding across tables",
         select({
           "aria-label": "Density",
-          onchange: (e) => applyAndSave({ density: e.target.value }),
+          onchange: (e) => applyAndSchedule({ density: e.target.value }),
         }, DENSITIES, prefs.density)),
       row("Units", "Byte prefixes used by every size readout",
         select({
           "aria-label": "Units",
-          onchange: (e) => applyAndSave({ units: e.target.value }),
+          onchange: (e) => applyAndSchedule({ units: e.target.value }),
         }, UNITS, prefs.units)),
     ),
   );
@@ -150,7 +247,7 @@ export async function renderSettings(page, store) {
       row("Refresh interval", "How often the browser asks the server for a new sample",
         select({
           "aria-label": "Refresh interval",
-          onchange: (e) => applyAndSave({ refreshSeconds: Number(e.target.value) }),
+          onchange: (e) => applyAndSchedule({ refreshSeconds: Number(e.target.value) }),
         }, REFRESH_SECONDS.map((s) => ({ value: s, label: `${s}s` })), prefs.refreshSeconds)),
       h("p", { class: "settings-description" },
         "The server samples on its own timer at 1 Hz and stores 15 minutes of history; " +
@@ -167,7 +264,7 @@ export async function renderSettings(page, store) {
           type: "checkbox",
           "aria-label": "Desktop notifications",
           checked: prefs.desktopNotifications ? "" : null,
-          onchange: (e) => applyAndSave({ desktopNotifications: e.target.checked }),
+          onchange: (e) => applyAndSchedule({ desktopNotifications: e.target.checked }),
         })),
       h("p", { class: "settings-description" },
         "Requires notification permission. The browser will prompt the first time this is enabled."),
@@ -178,18 +275,63 @@ export async function renderSettings(page, store) {
     cardHeader({}, cardTitle({}, "GeoIP database")),
     cardContent({},
       row("Database path", "Path to a local GeoLite2-Country.mmdb (or GeoLite2-ASN.mmdb) for country/ASN enrichment. Empty = disabled.",
-        h("input", {
-          class: "input",
-          type: "text",
-          value: prefs.geoIpDbPath,
-          placeholder: "C:\\\\path\\\\to\\\\GeoLite2-Country.mmdb",
-          "aria-label": "GeoIP database path",
-          onchange: (e) => applyAndSave({ geoIpDbPath: e.target.value }),
-        }),
+        h("div", { class: "geoip-input-group" },
+          h("input", {
+            class: "input",
+            type: "text",
+            value: prefs.geoIpDbPath,
+            placeholder: "C:\\path\\to\\GeoLite2-Country.mmdb",
+            "aria-label": "GeoIP database path",
+            oninput: (e) => {
+              const ov = page._settingsState;
+              if (ov) ov.prefs.geoIpDbPath = e.target.value;
+            },
+            onchange: (e) => applyAndSchedule({ geoIpDbPath: e.target.value }),
+          }),
+           h("input", {
+             id: "geoip-file",
+             class: "geoip-file-input",
+             type: "file",
+             accept: ".mmdb,application/octet-stream",
+             class: "geoip-file-input",
+             onchange: async (e) => {
+               const file = e.target.files[0];
+               if (!file) return;
+               const input = page.querySelector('[aria-label="GeoIP database path"]');
+               try {
+                 status.textContent = `Uploading "${file.name}" (${fmtBytes(file.size)})...`;
+                 status.className = "settings-status";
+                 const result = await api.upload("/api/geoip/upload", file, file.name);
+                 if (result.path) {
+                   input.value = result.path;
+                   applyAndSchedule({ geoIpDbPath: result.path });
+                   status.textContent = `Uploaded "${file.name}" to ${result.path}`;
+                 } else {
+                   status.textContent = `Upload failed: ${result.error || "unknown error"}`;
+                   status.className = "settings-status error";
+                 }
+               } catch (err) {
+                 status.textContent = `Upload failed: ${err.message}`;
+                 status.className = "settings-status error";
+               }
+             },
+           }),
+          h("button", {
+            class: "btn btn-sm btn-ghost",
+            type: "button",
+            "aria-label": "Browse for GeoIP database",
+            onclick: () => {
+              const fileInput = page.querySelector("#geoip-file");
+              if (fileInput) fileInput.click();
+            },
+          }, "Browse"),
+        ),
       ),
-      h("p", { class: "settings-description" },
-        "WinTCP ships no database. Download GeoLite2 from MaxMind and enter the .mmdb path here. " +
-        "The Map page and Flows tab will pick it up immediately."),
+       h("p", { class: "settings-description" },
+         "WinTCP ships no database. Download GeoLite2 from MaxMind, then enter the " +
+         "full path to the .mmdb file above, or use the Browse button to upload one. " +
+         "The file is saved to %LOCALAPPDATA%\\WinTCP\\WebUi\\db\\ and its path is " +
+         "written here automatically. The Map page and Flows tab pick up changes immediately."),
     ),
   );
 
@@ -205,6 +347,14 @@ export async function renderSettings(page, store) {
   );
 
   grid.append(appearance, polling, notifications, geoIp, configCard);
+
+  // Auto-save after a short idle period so manual edits are not lost.
+  page.addEventListener("settings:restored", () => {
+    renderSettings(page, store).catch((err) => {
+      clear(grid);
+      grid.append(h("p", { class: "text-danger" }, "Could not reload settings: " + err.message));
+    });
+  });
 
   try {
     const audit = await api.get("/api/audit");
