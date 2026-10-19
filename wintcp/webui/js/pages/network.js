@@ -35,16 +35,22 @@ function sortByName(a, b, dir, keyFn) {
   const an = String(keyFn(a) || "").toLowerCase();
   const bn = String(keyFn(b) || "").toLowerCase();
   const c = an < bn ? -1 : an > bn ? 1 : 0;
-  return dir === SORT_ASC ? c : -c;
+  return (dir === SORT_ASC ? c : -c) || endpointTieBreak(a, b);
+}
+
+function endpointTieBreak(a, b) {
+  const ak = `${a.pid || 0}|${a.proto || ""}|${a.local || a.localAddress || ""}|${a.remote || a.remoteAddress || ""}|${a.state || ""}`;
+  const bk = `${b.pid || 0}|${b.proto || ""}|${b.local || b.localAddress || ""}|${b.remote || b.remoteAddress || ""}|${b.state || ""}`;
+  return ak.localeCompare(bk, undefined, { sensitivity: "base" });
 }
 
 function sortByNum(a, b, dir, keyFn) {
   const av = keyFn(a), bv = keyFn(b);
-  if (av === null && bv === null) return 0;
+  if (av === null && bv === null) return endpointTieBreak(a, b);
   if (av === null) return 1;
   if (bv === null) return -1;
   const c = av - bv;
-  return dir === SORT_ASC ? c : -c;
+  return (dir === SORT_ASC ? c : -c) || endpointTieBreak(a, b);
 }
 
 const connComparators = {
@@ -69,7 +75,7 @@ function defaultConnSort(rows) {
     const pa = (a.process || a.processName || "").toLowerCase();
     const pb = (b.process || b.processName || "").toLowerCase();
     if (pa !== pb) return pa < pb ? -1 : 1;
-    return (a.pid || 0) - (b.pid || 0);
+    return (a.pid || 0) - (b.pid || 0) || endpointTieBreak(a, b);
   });
 }
 
@@ -97,17 +103,55 @@ export async function renderNetwork(page, store) {
   );
 
   const filterInput = page.querySelector("#net-filter");
-  const conns = Array.isArray(state.connections) ? state.connections.slice() : [];
-  const geo = state.geoSummary || {};
+  filterInput.value = store.get().networkFilter || "";
+  let debounce = null;
+  let applyFilterNow = null;
+  const onFilterInput = () => {
+    store.set({ networkFilter: filterInput.value });
+    if (!applyFilterNow) return;
+    if (debounce !== null) clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      debounce = null;
+      applyFilterNow();
+    }, 120);
+  };
+  filterInput.addEventListener("input", onFilterInput);
+  let conns = Array.isArray(state.connections) ? state.connections.slice() : [];
+  let geo = state.geoSummary || {};
+
+  const waitForSnapshot = (nextState) => {
+    if (!nextState.lastUpdate) return;
+    const nextConnections = Array.isArray(nextState.connections) ? nextState.connections : [];
+    geo = nextState.geoSummary || {};
+    if (nextConnections.length === 0) {
+      clear(layout);
+      layout.append(emptyState({}, "No endpoints reported",
+        "The server enumerated the connection tables and they came back empty."));
+      return;
+    }
+    if (typeof page._netDestroy === "function") page._netDestroy();
+    page._netDestroy = null;
+    return renderNetwork(page, store);
+  };
+  const setWaitingLifecycle = () => {
+    page._netUpdate = waitForSnapshot;
+    page._netDestroy = () => {
+      if (debounce !== null) clearTimeout(debounce);
+      filterInput.removeEventListener("input", onFilterInput);
+      page._netUpdate = null;
+    };
+  };
 
   if (!state.lastUpdate) {
     layout.append(emptyState({}, "Waiting for the first sample",
       "The browser polls the server every couple of seconds. This fills in on its own."));
+    setWaitingLifecycle();
     return;
   }
   if (conns.length === 0) {
     layout.append(emptyState({}, "No endpoints reported",
       "The server enumerated the connection tables and they came back empty."));
+    setWaitingLifecycle();
     return;
   }
 
@@ -149,16 +193,44 @@ export async function renderNetwork(page, store) {
       : conns;
     rows = applySort(filteredRows);
     updateSummary();
-    tabs.select(tabs.active(), true);
+    if (connectionTableController) connectionTableController.updateSort(sortKey, sortDir);
+    if (listeningTableController) listeningTableController.updateSort(sortKey, sortDir);
+    refreshActiveView();
+  };
+  applyFilterNow = applyFilter;
+
+  let connectionTableController = null;
+  let listeningTableController = null;
+  let activeView = store.get().networkView;
+  const renderConnectionTable = () => {
+    if (connectionTableController) connectionTableController.destroy();
+    const view = renderConnections(rows, sortKey, sortDir, onSortRef.current, filteredRows, filterInput, store);
+    connectionTableController = view._virtualTable || null;
+    return view;
+  };
+  const renderListeningTable = () => {
+    if (listeningTableController) listeningTableController.destroy();
+    const view = renderListening(rows, sortKey, sortDir, onSortRef.current, store);
+    listeningTableController = view._virtualTable || null;
+    return view;
   };
 
   const tabs = createTabs({
     ariaLabel: "Network views",
     initial: store.get().networkView,
-    onChange: (id) => store.set({ networkView: id }),
+    onChange: (id) => {
+      if (activeView === "connections" && id !== "connections" && connectionTableController) {
+        connectionTableController.destroy();
+      }
+      if (activeView === "listening" && id !== "listening" && listeningTableController) {
+        listeningTableController.destroy();
+      }
+      activeView = id;
+      store.set({ networkView: id });
+    },
     tabs: [
-      { id: "connections", label: "Connections", render: () => renderConnections(rows, sortKey, sortDir, onSortRef.current, filteredRows, filterInput) },
-      { id: "listening", label: "Listening", render: () => renderListening(rows, sortKey, sortDir, onSortRef.current) },
+      { id: "connections", label: "Connections", render: renderConnectionTable },
+      { id: "listening", label: "Listening", render: renderListeningTable },
       { id: "blocked", label: "Blocked", render: () => renderBlocked() },
       { id: "flows", label: "Flows", render: () => renderFlows(rows, geo) },
     ],
@@ -166,26 +238,50 @@ export async function renderNetwork(page, store) {
 
   const onSortRef = { current: handleSort };
 
+  function refreshActiveView() {
+    const active = tabs.active();
+    if (active === "connections" && connectionTableController) {
+      const emptyMessage = filterInput.value.trim() && rows.length === 0
+        ? "No endpoints matched the filter."
+        : "";
+      connectionTableController.updateRows(rows, emptyMessage);
+    } else if (active === "listening") {
+      tabs.select(active, true);
+    } else if (active === "flows") {
+      tabs.select(active, true);
+    }
+  }
+
   layout.append(summary, tabs.element);
   updateSummary();
   await tabs.select(tabs.active(), true);
 
-  let debounce = null;
-  filterInput.addEventListener("input", () => {
-    if (debounce !== null) clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      debounce = null;
-      applyFilter();
-    }, 120);
-  });
+  page._netUpdate = (nextState) => {
+    if (!nextState.lastUpdate) return;
+    conns = Array.isArray(nextState.connections) ? nextState.connections.slice() : [];
+    geo = nextState.geoSummary || {};
+    applyFilter();
+  };
 
   page._netDestroy = () => {
     if (debounce !== null) clearTimeout(debounce);
+    filterInput.removeEventListener("input", onFilterInput);
+    if (connectionTableController) connectionTableController.destroy();
+    if (listeningTableController) listeningTableController.destroy();
+    page._netUpdate = null;
     tabs.destroy();
   };
 }
 
-function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterInput) {
+export function updateNetwork(page, store) {
+  if (typeof page._netUpdate === "function") {
+    page._netUpdate(store.get());
+    return;
+  }
+  return renderNetwork(page, store);
+}
+
+function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterInput, store) {
   const host = h("div", { class: "tab-panel-body" });
   const container = h("div", { class: "net-table" });
   host.append(container);
@@ -213,6 +309,10 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     ],
     rowHeight: 34,
     height: 520,
+    minWidth: "64rem",
+    scrollTop: store.get().networkTableScrollTop || 0,
+    onScroll: (scrollTop) => store.set({ networkTableScrollTop: scrollTop }),
+    rowKey: (row) => `${row.pid || 0}|${row.proto || ""}|${row.local || row.localAddress || ""}|${row.remote || row.remoteAddress || ""}|${row.state || ""}`,
     label: "Open TCP and UDP endpoints",
     emptyMessage: emptyMsg,
     sortKey,
@@ -220,6 +320,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     onSort,
     onRowClick: (row) => showConnectionDetails(row),
   });
+  host._virtualTable = vt;
   vt.updateRows(rows);
 
   host.append(h("p", { class: "muted text-sm proc-note" },
@@ -256,7 +357,7 @@ function renderConnActions(host, row) {
   return wrap;
 }
 
-function renderListening(rows, sortKey, sortDir, onSort) {
+function renderListening(rows, sortKey, sortDir, onSort, store) {
   const host = h("div", { class: "tab-panel-body" });
   const listening = rows.filter(
     (r) => String(r.state || "").toUpperCase() === "LISTENING" ||
@@ -302,6 +403,10 @@ function renderListening(rows, sortKey, sortDir, onSort) {
     ],
     rowHeight: 34,
     height: 440,
+    minWidth: "58rem",
+    scrollTop: store.get().networkListeningScrollTop || 0,
+    onScroll: (scrollTop) => store.set({ networkListeningScrollTop: scrollTop }),
+    rowKey: (row) => `${row.pid || 0}|${row.proto || ""}|${row.local || row.localAddress || ""}|${row.remote || row.remoteAddress || ""}|${row.state || ""}`,
     label: "Listening sockets by exposure",
     emptyMessage: "No listening sockets",
     sortKey,
@@ -309,6 +414,7 @@ function renderListening(rows, sortKey, sortDir, onSort) {
     onSort,
     onRowClick: (row) => showConnectionDetails(row),
   });
+  host._virtualTable = vt;
   vt.updateRows(listening);
 
   host.append(counts, h("div", { class: "section-gap" }), container);
