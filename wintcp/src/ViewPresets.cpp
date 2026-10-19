@@ -4,34 +4,14 @@
 
 #include "ViewPresets.h"
 
-#include <algorithm>
+#include <climits>
+#include <commctrl.h>
+#include <vector>
 
-#include "PromptDialog.h"   // PromptForText
+#include "PromptDialog.h"
+#include "WinCaps.h"
 
 namespace wintcp {
-
-std::wstring ViewPresetDialogs::NumberedList(
-    const std::vector<std::wstring>& names, const wchar_t* question) {
-    const size_t kShownPresets = 12;
-    std::wstring text = std::wstring(L"Type the number of the preset to ") +
-                        question + L":\r\n\r\n";
-    for (size_t i = 0; i < names.size() && i < kShownPresets; ++i)
-        text += std::to_wstring(i + 1) + L".  " + names[i] + L"\r\n";
-    if (names.size() > kShownPresets)
-        text += L"... and " + std::to_wstring(names.size() - kShownPresets) +
-                L" more (type its number anyway)\r\n";
-    return text;
-}
-
-size_t ViewPresetDialogs::ParseIndex(const std::wstring& answer, size_t count) {
-    if (answer.empty() || answer.size() > 4) return 0;
-    for (wchar_t c : answer)
-        if (c < L'0' || c > L'9') return 0;
-    size_t idx = 0;
-    for (wchar_t c : answer) idx = idx * 10 + static_cast<size_t>(c - L'0');
-    if (idx == 0 || idx > count) return 0;
-    return idx;
-}
 
 std::wstring ViewPresetDialogs::Choose(const wchar_t* title,
                                        const wchar_t* question) {
@@ -41,23 +21,35 @@ std::wstring ViewPresetDialogs::Choose(const wchar_t* title,
                       MB_OK | MB_ICONINFORMATION);
         return std::wstring();
     }
-    // A numbered list rather than a combo: with more than a handful of
-    // presets a list box scrolls, and the numbers double as a way to refer to
-    // one in the message box.
-    const std::wstring text = NumberedList(names, question);
-    std::wstring answer;
-    if (!PromptForText(owner_, title, text.c_str(), L"1", 8, &answer))
+    if (names.size() > static_cast<size_t>(INT_MAX - 1000) ||
+        !DelayLoadGuard(owner_, "comctl32.dll"))
         return std::wstring();
-    const size_t idx = ParseIndex(answer, names.size());
-    if (idx == 0) {
-        // One message for both ways this fails: a field that is not a number
-        // and a number past the end. Telling them apart would only produce a
-        // longer message that says the same thing - retry.
-        ::MessageBoxW(owner_, L"Enter just the number of a preset.", title,
-                      MB_OK | MB_ICONERROR);
+
+    std::vector<TASKDIALOG_BUTTON> choices;
+    choices.reserve(names.size());
+    for (size_t i = 0; i < names.size(); ++i)
+        choices.push_back({1000 + static_cast<int>(i), names[i].c_str()});
+
+    TASKDIALOGCONFIG config = {};
+    config.cbSize = sizeof(config);
+    config.hwndParent = owner_;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    config.pszWindowTitle = title;
+    const std::wstring instruction = std::wstring(L"Choose a preset to ") + question;
+    config.pszMainInstruction = instruction.c_str();
+    config.pszContent = L"Choose a saved view:";
+    config.pRadioButtons = choices.data();
+    config.cRadioButtons = static_cast<UINT>(choices.size());
+    config.nDefaultRadioButton = choices.front().nButtonID;
+    config.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+
+    int button = 0;
+    int selected = 0;
+    if (::TaskDialogIndirect(&config, &button, &selected, nullptr) != S_OK ||
+        button != IDOK || selected < 1000)
         return std::wstring();
-    }
-    return names[idx - 1];
+    const size_t index = static_cast<size_t>(selected - 1000);
+    return index < names.size() ? names[index] : std::wstring();
 }
 
 void ViewPresetDialogs::Save() {
