@@ -12,11 +12,17 @@
 import { h, clear } from "../h.js";
 import { createVirtualTable } from "../ui/virtualtable.js";
 import { createTabs } from "../ui/tabs.js";
-import { emptyState } from "../ui/card.js";
+import { emptyState, card, cardHeader, cardTitle, cardContent, cardFooter } from "../ui/card.js";
+import { dialog, openDialog, closeDialog } from "../ui/dialog.js";
+import { api } from "../api.js";
 import { renderTreemap } from "../charts/treemap.js";
 import { fmtBytes, fmtInt, fmtPct, fmtNum } from "../format.js";
+import { icon } from "../icons.js";
 
 const UNAVAILABLE = "\u2014";
+
+const SORT_ASC = "asc";
+const SORT_DESC = "desc";
 
 // Reading helpers. A process whose handle cannot be opened reports null, and the
 // table shows a dash. Showing 0% CPU for a process we could not measure is the
@@ -24,6 +30,48 @@ const UNAVAILABLE = "\u2014";
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const bytes = (v) => (typeof v === "number" && Number.isFinite(v) ? fmtBytes(v) : UNAVAILABLE);
 const pct = (v) => (typeof v === "number" && Number.isFinite(v) ? fmtPct(v) : UNAVAILABLE);
+
+// Sort comparators. Nulls always sort last so unmeasurable rows stay at the
+// bottom regardless of direction, matching the server's "unmeasured last" policy.
+function sortByName(a, b, dir) {
+  const an = (a.name || "").toLowerCase();
+  const bn = (b.name || "").toLowerCase();
+  const c = an < bn ? -1 : an > bn ? 1 : 0;
+  return dir === SORT_ASC ? c : -c;
+}
+function sortByNum(a, b, dir, keyFn) {
+  const av = keyFn(a), bv = keyFn(b);
+  if (av === null && bv === null) return 0;
+  if (av === null) return 1;
+  if (bv === null) return -1;
+  const c = av - bv;
+  return dir === SORT_ASC ? c : -c;
+}
+function defaultSort(rows) {
+  // Default: CPU descending, then name ascending (matches the server's
+  // ordering for the initial load).
+  return rows.slice().sort((a, b) => {
+    const av = num(a.cpuPct), bv = num(b.cpuPct);
+    if (av === null && bv === null) return (a.name || "") < (b.name || "") ? -1 : 1;
+    if (av === null) return 1;
+    if (bv === null) return -1;
+    if (bv - av !== 0) return bv - av;
+    return (a.name || "") < (b.name || "") ? -1 : 1;
+  });
+}
+
+const comparators = {
+  name: sortByName,
+  pid: (a, b, dir) => sortByNum(a, b, dir, (r) => (typeof r.pid === "number" ? r.pid : null)),
+  ppid: (a, b, dir) => sortByNum(a, b, dir, (r) => (typeof r.ppid === "number" ? r.ppid : null)),
+  cpuPct: (a, b, dir) => sortByNum(a, b, dir, (r) => num(r.cpuPct)),
+  memWs: (a, b, dir) => sortByNum(a, b, dir, (r) => num(r.memWs)),
+  memPrivate: (a, b, dir) => sortByNum(a, b, dir, (r) => num(r.memPrivate)),
+  ioRead: (a, b, dir) => sortByNum(a, b, dir, (r) => num(r.ioRead)),
+  ioWrite: (a, b, dir) => sortByNum(a, b, dir, (r) => num(r.ioWrite)),
+  connections: (a, b, dir) => sortByNum(a, b, dir, (r) => (typeof r.connections === "number" ? r.connections : null)),
+  listeners: (a, b, dir) => sortByNum(a, b, dir, (r) => (typeof r.listeners === "number" ? r.listeners : null)),
+};
 
 export async function renderProcesses(page, store) {
   clear(page);
@@ -68,18 +116,40 @@ export async function renderProcesses(page, store) {
     return;
   }
 
+  const storedSortKey = store.get().processSortKey;
+  const storedSortDir = store.get().processSortDir;
+  let sortKey = storedSortKey || null;
+  let sortDir = storedSortDir || null;
+
+  const applySort = (data) => {
+    if (!sortKey) return defaultSort(data);
+    const cmp = comparators[sortKey];
+    if (!cmp) return defaultSort(data);
+    return data.slice().sort((a, b) => cmp(a, b, sortDir));
+  };
+
   // The list is already sorted by whatever /api/processes?sort= asked for, and
   // the server pushed unmeasurable rows last. Filtering must not disturb that
-  // order, so this preserves it rather than re-sorting.
+  // order, so this preserves it rather than re-sorting. But if the user has
+  // clicked a column header, re-sort the filtered set by that column.
   let rows = all;
+  let filteredRows = all;
   const applyFilter = () => {
     const q = filterInput.value.trim().toLowerCase();
-    rows = q
+    filteredRows = q
       ? all.filter((r) => String(r.name || "").toLowerCase().includes(q) ||
                           String(r.pid) === q)
       : all;
+    rows = applySort(filteredRows);
     tabs.select(tabs.active(), true);
     updateSummary();
+  };
+
+  const handleSort = (key, dir) => {
+    sortKey = key;
+    sortDir = dir;
+    store.set({ processSortKey: key, processSortDir: dir });
+    applyFilter();
   };
 
   const summary = h("p", { class: "muted text-sm proc-summary" });
@@ -100,17 +170,18 @@ export async function renderProcesses(page, store) {
     initial: storedView,
     onChange: (id) => store.set({ processView: id }),
     tabs: [
-      { id: "table", label: "Table", render: () => renderTableView(rows) },
+      { id: "table", label: "Table", render: () => renderTableView(rows, sortKey, sortDir, handleSort, filteredRows, filterInput, store) },
       { id: "tree", label: "Tree", render: () => renderTreeView(rows) },
       { id: "treemap", label: "Treemap", render: () => renderTreemapView(rows, store) },
     ],
   });
 
   layout.append(summary, tabs.element);
-  updateSummary();
-  // force: true because on a poll-driven rebuild the panel is genuinely empty
-  // and must be re-rendered, even when the selection has not moved.
-  await tabs.select(tabs.active(), true);
+  // Apply the current filter and sort so the initial render (including poll-
+  // driven re-renders) reflects any persisted sort state. applyFilter calls
+  // tabs.select internally, so this replaces the bare updateSummary +
+  // tabs.select pair below.
+  applyFilter();
 
   let debounce = null;
   filterInput.addEventListener("input", () => {
@@ -131,28 +202,51 @@ export async function renderProcesses(page, store) {
 
 // ---- Table ------------------------------------------------------------------
 
-function renderTableView(rows) {
+function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInput, store) {
   const host = h("div", { class: "tab-panel-body" });
   const container = h("div", { id: "proc-table-container" });
   host.append(container);
 
+  const procState = store ? store.get() : {};
+  const conns = procState.connections || [];
+
+  const pidHasConn = (pid) => {
+    if (!Array.isArray(conns)) return false;
+    return conns.some((c) => c.pid === pid);
+  };
+
+  const emptyMsg = (filterInput && filterInput.value.trim().length > 0 && rows.length === 0)
+    ? "No process matched the filter."
+    : "";
+
   const vt = createVirtualTable(container, {
     columns: [
-      { key: "name", label: "Name", width: 3 },
-      { key: "pid", label: "PID", width: 1 },
-      { key: "ppid", label: "PPID", width: 1 },
-      { key: "cpuPct", label: "CPU %", width: 1, align: "right" },
-      { key: "memWs", label: "Working set", width: 1, align: "right" },
-      { key: "memPrivate", label: "Private", width: 1, align: "right" },
-      { key: "ioRead", label: "I/O read", width: 1, align: "right" },
-      { key: "ioWrite", label: "I/O write", width: 1, align: "right" },
-      { key: "connections", label: "Conns", width: 1, align: "right" },
-      { key: "listeners", label: "Listen", width: 1, align: "right" },
+      { key: "name", label: "Name", width: 3, sortable: true },
+      { key: "pid", label: "PID", width: 1, sortable: true },
+      { key: "ppid", label: "PPID", width: 1, sortable: true },
+      { key: "cpuPct", label: "CPU %", width: 1, align: "right", sortable: true },
+      { key: "memWs", label: "Working set", width: 1, align: "right", sortable: true },
+      { key: "memPrivate", label: "Private", width: 1, align: "right", sortable: true },
+      { key: "ioRead", label: "I/O read", width: 1, align: "right", sortable: true },
+      { key: "ioWrite", label: "I/O write", width: 1, align: "right", sortable: true },
+      { key: "connections", label: "Conns", width: 1, align: "right", sortable: true },
+      { key: "listeners", label: "Listen", width: 1, align: "right", sortable: true },
+      {
+        key: "actions",
+        label: "Actions",
+        width: 1,
+        sortable: false,
+        renderCell: (row) => renderProcActions(row, pidHasConn(row.pid), conns),
+      },
     ],
     rowHeight: 34,
     height: 520,
     label: "Processes on this machine",
-    emptyMessage: "No process matched the filter.",
+    emptyMessage: emptyMsg,
+    sortKey,
+    sortDir,
+    onSort,
+    onRowClick: (row) => showProcessDetails(row),
     // Pre-format here so the virtualiser does no string work per visible row;
     // it also keeps the dash-for-unknown decision in one place.
     format: {
@@ -380,4 +474,106 @@ function renderTreemapView(rows, store) {
   );
   paint();
   return host;
+}
+
+// ---- Row actions (Details / Block) ----------------------------------------
+
+function renderProcActions(row, hasConn, conns) {
+  const wrap = h("div", { class: "row-actions", style: "display: flex; gap: 0.25rem; justify-content: flex-end;" });
+
+  wrap.append(
+    h("button", {
+      class: "btn btn-ghost btn-icon btn-xs",
+      type: "button",
+      title: "Details",
+      onclick: (e) => { e.stopPropagation(); showProcessDetails(row); },
+    }, icon("info", 14)),
+  );
+
+  if (hasConn) {
+    const remoteRow = conns.find((c) => c.pid === row.pid && c.remote);
+    if (remoteRow) {
+      wrap.append(
+        h("button", {
+          class: "btn btn-ghost btn-icon btn-xs",
+          type: "button",
+          title: `Block ${remoteRow.remote}`,
+          onclick: (e) => { e.stopPropagation(); blockPeer(remoteRow); },
+        }, icon("shield", 14)),
+      );
+    }
+  }
+
+  return wrap;
+}
+
+function showProcessDetails(row) {
+  const d = dialog({ class: "details-dialog", "data-details-row": "proc" },
+    h("form", { method: "dialog", class: "dialog-form" },
+       h("div", { class: "dialog-header" },
+         h("h2", { class: "dialog-title" }, row.name || "(unnamed)"),
+         h("button", { type: "submit", class: "btn btn-close btn-sm", "aria-label": "Close" }),
+       ),
+      h("div", { class: "dialog-content" },
+        h("dl", { class: "detail-list" },
+          detailEntry("PID", row.pid != null ? String(row.pid) : UNAVAILABLE),
+          detailEntry("Parent PID", row.ppid != null ? String(row.ppid) : UNAVAILABLE),
+          detailEntry("Path", row.path || UNAVAILABLE),
+          detailEntry("Threads", typeof row.threads === "number" ? fmtInt(row.threads) : UNAVAILABLE),
+          detailEntry("CPU %", num(row.cpuPct) !== null ? fmtPct(row.cpuPct) : UNAVAILABLE),
+          detailEntry("Working set", num(row.memWs) !== null ? fmtBytes(row.memWs) : UNAVAILABLE),
+          detailEntry("Private", num(row.memPrivate) !== null ? fmtBytes(row.memPrivate) : UNAVAILABLE),
+          detailEntry("I/O read", num(row.ioRead) !== null ? fmtBytes(row.ioRead) : UNAVAILABLE),
+          detailEntry("I/O write", num(row.ioWrite) !== null ? fmtBytes(row.ioWrite) : UNAVAILABLE),
+          detailEntry("Connections", typeof row.connections === "number" ? fmtInt(row.connections) : UNAVAILABLE),
+          detailEntry("Listeners", typeof row.listeners === "number" ? fmtInt(row.listeners) : UNAVAILABLE),
+        ),
+      ),
+       h("div", { class: "dialog-footer" },
+         h("button", { type: "submit", class: "btn btn-close btn-sm" }, "Close"),
+       ),
+    ),
+  );
+  document.body.append(d);
+  openDialog(d);
+}
+
+function detailEntry(label, value) {
+  return [
+    h("dt", {}, label),
+    h("dd", {}, value),
+  ];
+}
+
+async function blockPeer(row) {
+  const address = row.remote || row.remoteAddress;
+  const port = row.rport;
+  if (!address || !port) return;
+
+  let plan;
+  try {
+    plan = await api.postForm("/api/block/preview", { address, port: String(port) });
+  } catch (err) {
+    alert(`Could not preview block: ${err.message}`);
+    return;
+  }
+
+  const confirmed = confirm(
+    `Block ${address}:${port}?\n\n` +
+    `This adds a firewall rule blocking outbound traffic to this remote peer on port ${port}.\n` +
+    (plan.plan ? `Plan:\n${plan.plan}\n\n` : "") +
+    `This action is recorded in the audit trail.`
+  );
+  if (!confirmed) return;
+
+  try {
+    const result = await api.postForm("/api/block/commit", { nonce: plan.nonce });
+    if (result.ok) {
+      alert(`Blocked ${address}:${port}. The rule is now active.`);
+    } else {
+      alert(`Block failed: ${result.message || "unknown error"}`);
+    }
+  } catch (err) {
+    alert(`Block failed: ${err.message}`);
+  }
 }
