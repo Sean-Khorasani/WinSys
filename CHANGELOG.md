@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.4 — 2026-10-19
+
+- Refined the desktop Details window with consistent typography, clearer tabs, and a full-width command-line view for long values.
+- Added responsive Web UI inspectors for processes and connections, with precise field copying, held snapshots, and stable identity tracking as samples update.
+- Improved the native blocked-peer manager with filtering, resizable layout, and a selected-rule scope summary.
+- Improved process and network exploration with responsive table layouts, more resilient saved column settings, and map markers linked to the exact connection details.
+- Expanded browser and native regression coverage for inspectors, responsive layouts, map identity, and blocked-peer management.
+
 ## 1.0.2 — 2026-10-18
 
 - Corrected process sampling and ownership details, including safer handling of PID reuse and more complete process metadata.
