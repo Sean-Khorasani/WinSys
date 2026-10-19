@@ -7,7 +7,7 @@
 import { h, clear } from "../h.js";
 import { createVirtualTable } from "../ui/virtualtable.js";
 import { createTabs } from "../ui/tabs.js";
-import { emptyState, card, cardHeader, cardTitle, cardContent, cardFooter } from "../ui/card.js";
+import { emptyState, refreshAction, card, cardHeader, cardTitle, cardContent, cardFooter } from "../ui/card.js";
 import { badge } from "../ui/badge.js";
 import { dialog, openDialog, closeDialog } from "../ui/dialog.js";
 import { api } from "../api.js";
@@ -22,6 +22,7 @@ import { matchesConnectionFilters, connectionFilterLabel, normalizeConnectionFil
 import { createFirewallInventoryView } from "../firewallinventory.js";
 import { addressComparator, numberComparator, stateComparator, textComparator } from "../sort.js";
 import { createColumnLayoutControls } from "../ui/columnlayout.js";
+import { closeInspector, openInspector, updateInspector } from "../ui/inspector.js";
 
 const UNAVAILABLE = "\u2014";
 const num = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -34,7 +35,6 @@ const MAX_RECENT_NETWORK_VIEWS = 10;
 const RECENT_NETWORK_VIEWS_KEY = "wintcp.network.recentViews.v1";
 let activeCloseDialog = null;
 let activeBlockDialog = null;
-let activeDetailsDialog = null;
 
 function copyValues(rows, select) {
   const values = [];
@@ -163,6 +163,7 @@ export async function renderNetwork(page, store) {
   let savedViews = [];
   let savedViewsReady = false;
   let savedViewSaving = false;
+  let configRefreshGeneration = 0;
   let recentViews = [];
   let recentViewTimer = null;
   let restoringNetworkView = false;
@@ -231,6 +232,37 @@ export async function renderNetwork(page, store) {
     recentViewClear.disabled = recentViews.length === 0;
   };
   renderRecentViewOptions("");
+  const refreshSavedViews = async (remote = false) => {
+    const generation = ++configRefreshGeneration;
+    const selectedId = savedViewSelect.value;
+    try {
+      const config = await api.get("/api/config", { signal: savedViewAbort.signal });
+      if (savedViewAbort.signal.aborted || generation !== configRefreshGeneration) return;
+      savedViews = normalizeSavedNetworkViews(config.networkViews);
+      savedViewsReady = true;
+      renderSavedViewOptions(selectedId);
+      savedViewSelect.disabled = false;
+      savedViewSave.disabled = false;
+      setSavedViewStatus(remote ? "Saved views synchronized from another tab."
+        : savedViews.length ? savedViews.length + " saved view(s)." : "No saved views yet.");
+    } catch (error) {
+      if (error.name !== "AbortError") setSavedViewStatus("Saved views unavailable: " + error.message);
+    }
+  };
+  const onRecentStorage = (event) => {
+    if (event.key !== RECENT_NETWORK_VIEWS_KEY) return;
+    try {
+      recentViews = normalizeSavedNetworkViews(JSON.parse(event.newValue || "[]"))
+        .slice(0, MAX_RECENT_NETWORK_VIEWS);
+    } catch {
+      recentViews = [];
+    }
+    renderRecentViewOptions(recentViewSelect.value);
+  };
+  window.addEventListener("storage", onRecentStorage);
+  const unsubscribeConfig = api.subscribeConfigChanges(() => {
+    if (!savedViewSaving && !savedViewAbort.signal.aborted) refreshSavedViews(true);
+  });
   const setSavedViewStatus = (message) => {
     if (!savedViewAbort.signal.aborted) savedViewStatus.textContent = message;
   };
@@ -375,18 +407,7 @@ export async function renderNetwork(page, store) {
   savedViewDelete.addEventListener("click", onDeleteSavedView);
   recentViewSelect.addEventListener("change", onRecentViewChange);
   recentViewClear.addEventListener("click", onClearRecentViews);
-  api.get("/api/config", { signal: savedViewAbort.signal }).then((config) => {
-    if (savedViewAbort.signal.aborted) return;
-    savedViews = normalizeSavedNetworkViews(config.networkViews);
-    savedViewsReady = true;
-    renderSavedViewOptions();
-    savedViewSelect.disabled = false;
-    savedViewSave.disabled = false;
-    setSavedViewStatus(savedViews.length
-      ? savedViews.length + " saved view(s)." : "No saved views yet.");
-  }).catch((error) => {
-    if (error.name !== "AbortError") setSavedViewStatus("Saved views unavailable: " + error.message);
-  });
+  refreshSavedViews();
   let snapshotRows = Array.isArray(state.connections) ? state.connections.slice() : [];
   let conns = snapshotRows.filter((row) => !row.removed);
   let geo = state.geoSummary || {};
@@ -397,7 +418,7 @@ export async function renderNetwork(page, store) {
     geo = nextState.geoSummary || {};
     if (nextConnections.length === 0) {
       clear(layout);
-      layout.append(emptyState({}, "No endpoints reported",
+      layout.append(emptyState({ action: refreshAction() }, "No endpoints reported",
         "The server enumerated the connection tables and they came back empty."));
       return;
     }
@@ -410,6 +431,8 @@ export async function renderNetwork(page, store) {
     page._netDestroy = () => {
       if (debounce !== null) clearTimeout(debounce);
       savedViewAbort.abort();
+      unsubscribeConfig();
+      window.removeEventListener("storage", onRecentStorage);
       filterInput.removeEventListener("input", onFilterInput);
       savedViewSelect.removeEventListener("change", onSavedViewChange);
       savedViewSave.removeEventListener("click", onSaveSavedView);
@@ -421,13 +444,13 @@ export async function renderNetwork(page, store) {
   };
 
   if (!state.lastUpdate) {
-    layout.append(emptyState({}, "Waiting for the first sample",
+    layout.append(emptyState({ action: refreshAction() }, "Waiting for the first sample",
       "The browser polls the server every couple of seconds. This fills in on its own."));
     setWaitingLifecycle();
     return;
   }
   if (snapshotRows.length === 0) {
-    layout.append(emptyState({}, "No endpoints reported",
+    layout.append(emptyState({ action: refreshAction() }, "No endpoints reported",
       "The server enumerated the connection tables and they came back empty."));
     setWaitingLifecycle();
     return;
@@ -693,16 +716,26 @@ export async function renderNetwork(page, store) {
     snapshotRows = Array.isArray(nextState.connections) ? nextState.connections.slice() : [];
     conns = snapshotRows.filter((row) => !row.removed);
     geo = nextState.geoSummary || {};
+    const inspectorKey = document.querySelector(".inspector-dialog")?.dataset.inspectorKey || "";
+    if (inspectorKey.startsWith("connection:")) {
+      const inspected = snapshotRows.find((row) => `connection:${connectionKey(row)}` === inspectorKey);
+      updateInspector(inspectorKey, inspected || null, {
+        missing: "This connection identity is no longer in the latest endpoint snapshot.",
+        status: inspected?.removed ? "This endpoint is closed; showing its retained evidence." : "",
+      });
+    }
     applyFilter();
   };
 
   page._netDestroy = () => {
     closeContextMenu();
+    closeInspector({ restoreFocus: false });
     if (activeCloseDialog) closeDialog(activeCloseDialog);
     if (activeBlockDialog) closeDialog(activeBlockDialog);
-    if (activeDetailsDialog) closeDialog(activeDetailsDialog);
     if (debounce !== null) clearTimeout(debounce);
     savedViewAbort.abort();
+    unsubscribeConfig();
+    window.removeEventListener("storage", onRecentStorage);
     filterInput.removeEventListener("input", onFilterInput);
     savedViewSelect.removeEventListener("change", onSavedViewChange);
     savedViewSave.removeEventListener("click", onSaveSavedView);
@@ -725,6 +758,12 @@ export async function renderNetwork(page, store) {
   const destroy = page._netDestroy;
   await tabs.select(tabs.active(), true);
   if (page._netDestroy !== destroy || !page.isConnected) return;
+  const pendingInspectorKey = store.get().pendingConnectionInspectorKey;
+  if (pendingInspectorKey) {
+    store.set({ pendingConnectionInspectorKey: null });
+    const target = snapshotRows.find((row) => `connection:${connectionKey(row)}` === pendingInspectorKey && !row.removed);
+    if (target) showConnectionDetails(target);
+  }
   applyFilter();
 }
 
@@ -950,6 +989,7 @@ function isListening(row) {
 
 function renderListening(rows, sortKey, sortDir, onSort, store, viewState = null) {
   const host = h("div", { class: "tab-panel-body" });
+  const layoutHost = h("div", { class: "table-layout-host" });
   const listening = rows.filter(isListening);
 
   if (listening.length === 0) {
@@ -1016,11 +1056,19 @@ function renderListening(rows, sortKey, sortDir, onSort, store, viewState = null
     vt.setLayout(next);
     return true;
   };
+  const layoutControls = createColumnLayoutControls(vt, {
+    layoutKey: "network-listening",
+    required: ["process", "pid", "proto", "local", "lport", "actions"],
+    compactHidden: ["exposure", "pid"],
+  });
+  const tableDestroy = vt.destroy;
+  vt.destroy = () => { layoutControls.destroy(); tableDestroy(); };
+  layoutHost.append(layoutControls.element);
   host._virtualTable = vt;
   vt.updateRows(listening);
   if (viewState) vt.restoreViewState(viewState);
 
-  host.append(counts, h("div", { class: "section-gap" }), container);
+  host.append(layoutHost, counts, h("div", { class: "section-gap" }), container);
   host.append(h("p", { class: "muted text-sm proc-note" },
     "Binding describes where a socket listens. Firewall policy and routing also determine reachability."));
   return host;
@@ -1105,54 +1153,86 @@ function renderFlows(rows, geo) {
 }
 
 function showConnectionDetails(row) {
-  if (activeDetailsDialog) closeDialog(activeDetailsDialog);
-  const canOfferBlock = row.remote && String(row.remote) !== "0.0.0.0" &&
-    String(row.remote) !== "*" && row.rport;
+  const remote = row.remote || row.remoteAddress;
+  const canOfferBlock = remote && String(remote) !== "0.0.0.0" &&
+    String(remote) !== "*" && row.rport;
   const blockReason = blockPeerReason(row);
+  const key = `connection:${connectionKey(row)}`;
+  const inspector = openInspector({
+    key, title: "Connection details", subject: "connection identity", row,
+    opener: document.activeElement,
+    sections: (current) => connectionInspectorSections(current || row),
+    actions: (current) => [
+      { label: "Related firewall rules", onClick: () => {
+        closeInspector({ restoreFocus: false });
+        openFirewallRuleResult("", current || row);
+      } },
+      ...(canOfferBlock ? [{
+        label: "Review TCP peer block", className: "btn btn-destructive btn-sm",
+        disabled: Boolean(blockReason),
+        title: blockReason || "Review an outbound TCP peer rule; this does not close the connection.",
+        onClick: () => {
+          closeInspector({ restoreFocus: false });
+          showBlockPeerPreview(current || row);
+        },
+      }] : []),
+    ],
+  });
+  inspector.dataset.detailsRow = "net";
+}
 
-  const d = dialog({ class: "details-dialog", "data-details-row": "net" },
-    h("form", { method: "dialog", class: "dialog-form" },
-       h("div", { class: "dialog-header" },
-         h("h2", { class: "dialog-title" }, "Connection details"),
-         h("button", { type: "submit", class: "btn btn-close btn-sm", "aria-label": "Close" }, "Close"),
-       ),
-      h("div", { class: "dialog-content" },
-        h("dl", { class: "detail-list" },
-          detailEntry("Process", row.process || row.processName || UNAVAILABLE),
-          detailEntry("Snapshot status", row.removed ? "Closed — retained history" : "Live endpoint"),
-          detailEntry("PID", row.pid != null ? String(row.pid) : UNAVAILABLE),
-          detailEntry("Service", row.service || UNAVAILABLE),
-          detailEntry("Path", row.path || UNAVAILABLE),
-          detailEntry("Protocol", row.proto || UNAVAILABLE),
-          detailEntry("Local", row.local || row.localAddress || UNAVAILABLE),
-          detailEntry("Local port", row.lport != null ? String(row.lport) : UNAVAILABLE),
-          detailEntry("Remote", row.remote || row.remoteAddress || UNAVAILABLE),
-          detailEntry("Remote port", row.rport != null ? String(row.rport) : UNAVAILABLE),
-          detailEntry("Hostname", hostnameLabel(row.hostname)),
-          detailEntry("State", row.state || UNAVAILABLE),
-          detailEntry("Country", row.country || UNAVAILABLE),
-          detailEntry("Duration", row.duration || UNAVAILABLE),
-        ),
-      ),
-       h("div", { class: "dialog-footer" },
-         h("button", { type: "submit", class: "btn btn-close btn-sm" }, "Close"),
-         canOfferBlock ? h("button", {
-           type: "button",
-           class: "btn btn-destructive btn-sm",
-           disabled: Boolean(blockReason),
-           title: blockReason || "Review an outbound TCP peer rule; this does not close the connection.",
-           onclick: () => { closeDialog(d); showBlockPeerPreview(row); },
-         }, "Review TCP peer block") : null,
-       ),
-    ),
-  );
-
-  document.body.append(d);
-  activeDetailsDialog = d;
-  d.addEventListener("close", () => {
-    if (activeDetailsDialog === d) activeDetailsDialog = null;
-  }, { once: true });
-  openDialog(d);
+function connectionInspectorSections(row) {
+  const known = (value) => value != null && value !== "" && value !== UNAVAILABLE;
+  const field = (label, value, options = {}) => {
+    const source = Object.prototype.hasOwnProperty.call(options, "copyValue")
+      ? options.copyValue : value;
+    const { copy = true, copyValue, ...metadata } = options;
+    return { label, value, copyValue: copy && known(source) ? String(source) : null, ...metadata };
+  };
+  const local = row.local || row.localAddress;
+  const remote = row.remote || row.remoteAddress;
+  const hostname = resolvedHostname(row.hostname);
+  const rx = row.socketRxBytesExact ?? row.socketRxBytes;
+  const tx = row.socketTxBytesExact ?? row.socketTxBytes;
+  return [
+    { title: "Identity", fields: [
+      field("Process", row.process || row.processName),
+      field("PID", row.pid, { mono: true }),
+      field("Process instance", row.processInstanceId, { mono: true,
+        reason: row.processInstanceId ? "PID lifetime token; a PID alone can be reused." : "Process creation time is unknown, so the owner cannot be verified by lifetime." }),
+      field("Executable path", row.path, { mono: true,
+        reason: row.path ? "" : "Windows did not provide a readable image path." }),
+      field("Service", row.service, { reason: row.service ? "" : "No service attribution is available for this endpoint." }),
+      field("Snapshot state", row.removed ? "Closed — retained history" : "Live endpoint", { copy: false }),
+    ] },
+    { title: "Endpoints", fields: [
+      field("Protocol", row.proto),
+      field("Local endpoint", known(local) ? endpoint(local, row.lport) : null,
+        { mono: true, copyValue: known(local) ? endpoint(local, row.lport) : null }),
+      field("Remote endpoint", known(remote) ? endpoint(remote, row.rport) : null,
+        { mono: true, copyValue: known(remote) && remote !== "*" ? endpoint(remote, row.rport) : null }),
+      field("DNS / reverse name", hostnameLabel(row.hostname), { copyValue: hostname,
+        reason: hostname ? "Reverse DNS is an estimate and may not name the application." : "No resolved reverse name is currently available." }),
+      field("Country estimate", row.country, { copy: false,
+        reason: row.country ? "GeoIP is a country-level estimate, not a precise IP location." : "No country estimate is available." }),
+      field("State", row.state),
+    ] },
+    { title: "Activity", fields: [
+      field("First-observed duration", row.duration, { copy: false,
+        reason: "Duration begins when WinTCP first observed this tuple; it is not the kernel socket creation time." }),
+      field("Last observed", null, { copy: false,
+        reason: "The Web API does not expose a per-row last-observed timestamp." }),
+      field("Received bytes", known(rx) ? fmtBytes(rx) : null, { copy: false,
+        reason: known(rx) ? "Cumulative total, not a rate." : "Per-connection receive counters are unavailable in this snapshot." }),
+      field("Sent bytes", known(tx) ? fmtBytes(tx) : null, { copy: false,
+        reason: known(tx) ? "Cumulative total, not a rate." : "Per-connection send counters are unavailable in this snapshot." }),
+      field("TCP round-trip time", row.rttMs != null ? `${row.rttMs} ms` : null, { copy: false }),
+      field("Retransmitted bytes", row.retransBytes != null ? fmtBytes(row.retransBytes) : null, { copy: false }),
+    ] },
+    { title: "Rules", fields: [
+      field("Firewall interpretation", "Candidate rules do not prove effective reachability.", { copy: false }),
+    ] },
+  ];
 }
 
 function showConnectionClosePreview(row) {
