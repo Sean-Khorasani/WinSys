@@ -1,0 +1,21 @@
+#pragma once
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
+#include <windows.h>
+
+#include <string>
+
+namespace wintcp {
+
+constexpr int kTextSheetEditId = 1000;
+
+bool ShowTextSheet(HWND owner, const wchar_t* title, const std::wstring& text,
+                   HFONT font, bool selectAll = false);
+
+}
