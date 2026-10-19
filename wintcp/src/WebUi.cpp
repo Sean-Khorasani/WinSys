@@ -1932,6 +1932,7 @@ std::string ProcessesJson(ServerContext& context, const std::string& queryString
     }
     out << "],\"total\":" << total << ",\"returned\":" << count
         << ",\"known\":true,\"ageMs\":" << ageMs
+        << ",\"sampledAtMs\":" << snapshot.sampledAtMs
         << ",\"connectionCountsKnown\":"
         << ((total > 0 && rows[0].connectionCountsKnown) ? "true" : "false")
         << "}";
