@@ -146,6 +146,8 @@ bool SnapshotSource::LoadGeoIp(const wchar_t* path, std::wstring* error) {
     return geo_.Load(path, error);
 }
 
+void SnapshotSource::UnloadGeoIp() { geo_.Close(); }
+
 bool SnapshotSource::GeoIpLoaded() const { return geo_.Loaded(); }
 
 std::wstring SnapshotSource::GeoIpLookupV4(uint32_t hostOrderAddr) const {
