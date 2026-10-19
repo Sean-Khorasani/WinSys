@@ -21,12 +21,18 @@ export async function renderPerformance(page, store) {
     lastHistoryTs: null,
     lastCoreKeys: "",
     lastMetricsTs: null,
+    disposed: false,
+    loading: true,
+    requests: new AbortController(),
   };
+  const view = page._perfState;
   page._chartDestroy = () => {
-    for (const chart of page._perfState.charts) {
+    view.disposed = true;
+    view.requests.abort();
+    for (const chart of view.charts) {
       try { chart.destroy(); } catch { /* already gone */ }
     }
-    page._perfState.charts = [];
+    view.charts = [];
   };
   clear(page);
   page.append(
@@ -64,7 +70,8 @@ export async function renderPerformance(page, store) {
   );
 
   renderCoreRail(page, store.get());
-  await mountCharts(page);
+  try { await mountCharts(page); }
+  finally { view.loading = false; }
 }
 
 // Incremental update: refetches fresh history and updates charts via setData
@@ -72,7 +79,7 @@ export async function renderPerformance(page, store) {
 export async function updatePerformance(page, store) {
   const state = store.get();
   const ov = page._perfState;
-  if (!ov) return;
+  if (!ov || ov.disposed || ov.loading) return;
 
   const metricsTs = state.metrics?._timestamp;
 
@@ -82,7 +89,9 @@ export async function updatePerformance(page, store) {
   // 2. Fetch fresh history data and update charts.
   if (metricsTs !== ov.lastHistoryTs) {
     ov.lastHistoryTs = metricsTs;
-    await refreshCharts(page, ov);
+    ov.loading = true;
+    try { await refreshCharts(page, ov); }
+    finally { ov.loading = false; }
   }
 }
 
@@ -237,8 +246,9 @@ async function mountCharts(page) {
 
   let history;
   try {
-    history = await api.get("/api/metrics/history?max=180");
+    history = await api.get("/api/metrics/history?max=180", { signal: ov.requests.signal });
   } catch (err) {
+    if (ov.disposed) return;
     for (const host of hosts) {
       const el = page.querySelector(host.sel);
       if (el) { clear(el); el.append(emptyState({}, "No history yet", err.message)); }
@@ -246,6 +256,7 @@ async function mountCharts(page) {
     return;
   }
 
+  if (ov.disposed) return;
   ov.history = history;
   const t = Array.isArray(history.t) ? history.t : [];
   const series = history.series || {};
@@ -273,9 +284,11 @@ async function mountCharts(page) {
     }
     try {
       const entry = await createTimeseries(el, { height: 200, data: { t, values }, series: host.series });
+      if (ov.disposed) { entry.destroy(); return; }
       el._chartEntry = entry;
       ov.charts.push(entry);
     } catch (err) {
+      if (ov.disposed) return;
       clear(el);
       el.append(emptyState({}, "Chart unavailable", err.message));
     }
@@ -288,11 +301,12 @@ async function refreshCharts(page, ov) {
 
   let history;
   try {
-    history = await api.get("/api/metrics/history?max=180");
+    history = await api.get("/api/metrics/history?max=180", { signal: ov.requests.signal });
   } catch (err) {
     return;
   }
 
+  if (ov.disposed) return;
   const t = Array.isArray(history.t) ? history.t : [];
   const series = history.series || {};
   const toMiB = (arr) => (arr || []).map((v) => (v === null || v === undefined ? null : v / (1024 * 1024)));
@@ -310,9 +324,11 @@ async function refreshCharts(page, ov) {
       }
       try {
         const entry = await createTimeseries(el, { height: 200, data: { t, values }, series: host.series });
+        if (ov.disposed) { entry.destroy(); return; }
         el._chartEntry = entry;
         ov.charts.push(entry);
       } catch (err) {
+        if (ov.disposed) return;
         clear(el);
         el.append(emptyState({}, "Chart unavailable", err.message));
       }
@@ -353,9 +369,11 @@ async function refreshCharts(page, ov) {
         clear(el);
         try {
           const entry = await createTimeseries(el, { height: 200, data: { t, values: buildValues(host, series, toMiB) }, series: host.series });
+          if (ov.disposed) { entry.destroy(); return; }
           el._chartEntry = entry;
           ov.charts.push(entry);
         } catch (err) {
+          if (ov.disposed) return;
           clear(el);
           el.append(emptyState({}, "Chart unavailable", err.message));
         }
