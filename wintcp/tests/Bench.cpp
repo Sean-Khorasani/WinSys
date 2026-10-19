@@ -35,6 +35,8 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 }  // namespace wintcp
 
 #include "ColumnsWin.h"   // profile masks
+#include "Commands.h"
+#include "ConnectionsList.h"
 #include "FontCache.h"
 #include "WebProcesses.h"
 
@@ -1843,7 +1845,7 @@ void CheckAlertRuleSerialisation(TestResult& r) {
 
 
 
-constexpr int kDialogControls = 6;
+constexpr int kDialogControls = 7;
 
 // The portable wintcp.ini grammar. Pure over a string, so the whole
 // reader is pinned with no disk and no registry.
@@ -3623,12 +3625,10 @@ TestResult RunSelfTest() {
         }
     }
 
-    // 3e-bis. The firewall viewer's ledger helpers. Both are pure and
-    //        both decide the ledger's SHAPE, which is why they are pinned
-    //        directly: CountWinTcpRules and RemoveAllWinTcpRules both split on
-    //        the tab and read field 0, so a viewer that reshaped a line would
-    //        silently change what `blocks` counts. That is the one side effect
-    //        the viewer is not allowed to have.
+    // 3e-bis. The firewall viewer's ledger helpers. CountWinTcpRules reads
+    //        field 0 to count peer blocks, while bulk removal must visit both
+    //        rule names on every pair line. Keep the parsing and cleanup target
+    //        list pinned independently of the real firewall.
     {
         const std::wstring a = L"WinTCP block: A-1-2-endpoint";
         const std::wstring b = L"WinTCP block: A-1-2-ports";
@@ -3639,6 +3639,23 @@ TestResult RunSelfTest() {
         Check(r, "blockedpeers.split.two-names-in-order",
               both.size() == 2 && both[0] == a && both[1] == b,
               "n=" + std::to_string(both.size()));
+        Check(r, "blockedpeers.peer-count-uses-first-pair-field-and-legacy-single-name",
+              LedgerPeerName(pair) == a && LedgerPeerName(a) == a &&
+                  LedgerPeerName(L"\t" + b).empty(),
+              "");
+        const std::vector<std::wstring> collected = CollectLedgerRuleNames(
+            {pair, L"\tWinTCP block: B-2-3-ports", L"WinTCP block: C-3-4-endpoint"});
+        Check(r, "blockedpeers.remove-all-targets-both-rules-and-partial-ledger-names",
+              collected.size() == 4 && collected[0] == a && collected[1] == b &&
+                  collected[2] == L"WinTCP block: B-2-3-ports" &&
+                  collected[3] == L"WinTCP block: C-3-4-endpoint",
+              "n=" + std::to_string(collected.size()));
+        Check(r, "firewall.missing-rule-result-is-narrowly-recognized",
+              IsMissingFirewallRuleResult(HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) &&
+                  IsMissingFirewallRuleResult(HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) &&
+                  !IsMissingFirewallRuleResult(E_ACCESSDENIED) &&
+                  !IsMissingFirewallRuleResult(REGDB_E_CLASSNOTREG),
+              "");
 
         // A bare name with no tab is one name, not zero and not two.
         const std::vector<std::wstring> one = SplitLedgerNames(a);
@@ -3702,7 +3719,12 @@ TestResult RunSelfTest() {
         plain.remoteAddrs = L"203.0.113.7";
         plain.remotePorts = L"443";
         plain.enabled = true;
+        plain.enabledKnown = true;
         plain.isBlocking = true;
+        plain.blockingKnown = true;
+        plain.remoteAddrsKnown = true;
+        plain.localPortsKnown = true;
+        plain.remotePortsKnown = true;
         const std::wstring okRow = BlockedPeersRowText(plain);
         Check(r, "blockedpeers.row.plain-has-no-warning",
               okRow.find(L"[disabled]") == std::wstring::npos &&
@@ -3748,6 +3770,12 @@ TestResult RunSelfTest() {
         Check(r, "blockedpeers.cells.empty-scope-reads-any",
               BlockedPeersCellText(anyScope, kBlockedColRemote) == L"any",
               WideToUtf8(BlockedPeersCellText(anyScope, kBlockedColRemote)));
+        BlockedRule unknownRule;
+        unknownRule.name = L"WinTCP block: unknown";
+        Check(r, "blockedpeers.cells.unknown-firewall-data-stays-unknown",
+              BlockedPeersCellText(unknownRule, kBlockedColRemote) == L"unknown" &&
+                  BlockedPeersCellText(unknownRule, kBlockedColStatus) == L"unknown",
+              WideToUtf8(BlockedPeersCellText(unknownRule, kBlockedColStatus)));
         Check(r, "blockedpeers.cells.enabled-status",
               BlockedPeersCellText(plain, kBlockedColStatus) == L"enabled",
               WideToUtf8(BlockedPeersCellText(plain, kBlockedColStatus)));
@@ -3790,8 +3818,8 @@ TestResult RunSelfTest() {
         Check(r, "blockedpeers.dialog.fills-a-right-sized-buffer",
               filled && right.size() <= cap + 64, "size=" + std::to_string(right.size()));
 
-        // The editor added two buttons and a shorter list, so cdit
-        // moved from 4 to 6 and the capacity moved with it. A capacity that
+        // The editor added three buttons and a shorter list, so cdit
+        // moved from 4 to 7 and the capacity moved with it. A capacity that
         // did NOT track cdit would be a buffer the dialog manager reads past
         // the end of, which is the intermittent access violation
         // PromptDialog.cpp is about - so the two are pinned together rather
@@ -3834,6 +3862,8 @@ TestResult RunSelfTest() {
             {"action", [](FwRule* r) { r->allow = true; }},
             {"protocol", [](FwRule* r) { r->protocol = 17; }},
             {"address", [](FwRule* r) { r->remoteAddress = L"203.0.113.8"; }},
+            {"local-address", [](FwRule* r) { r->localAddress = L"192.0.2.8"; }},
+            {"profiles", [](FwRule* r) { r->profiles = 2; }},
             {"remote-ports", [](FwRule* r) { r->remotePorts = L"*"; }},
             {"process",
              [](FwRule* r) { r->processPath = L"C:\\Windows\\System32\\x.exe"; }},
@@ -3936,6 +3966,19 @@ TestResult RunSelfTest() {
         Check(r, "fwrule.validate.refuses-an-empty-address",
               !ValidateFwRule(emptyAddr, &err), WideToUtf8(err));
 
+        FwRule emptyLocalAddr;
+        emptyLocalAddr.localAddress.clear();
+        Check(r, "fwrule.validate.refuses-an-empty-local-address",
+              !ValidateFwRule(emptyLocalAddr, &err), WideToUtf8(err));
+
+        FwRule invalidProfiles;
+        invalidProfiles.profiles = 0;
+        Check(r, "fwrule.validate.refuses-empty-profile-scope",
+              !ValidateFwRule(invalidProfiles, &err), WideToUtf8(err));
+        invalidProfiles.profiles = 8;
+        Check(r, "fwrule.validate.refuses-unknown-profile-bits",
+              !ValidateFwRule(invalidProfiles, &err), WideToUtf8(err));
+
         FwRule emptyPort;
         emptyPort.localPorts.clear();
         Check(r, "fwrule.validate.refuses-an-empty-port-field",
@@ -3974,6 +4017,34 @@ TestResult RunSelfTest() {
         defaults.remoteAddress = L"*";
         Check(r, "fwrule.validate.defaults-are-a-valid-rule",
               ValidateFwRule(defaults, &err), WideToUtf8(err));
+
+        RuleRequest serviceRequest;
+        serviceRequest.address = L"203.0.113.9";
+        serviceRequest.localAddress = L"192.0.2.5";
+        serviceRequest.remotePorts = L"443";
+        serviceRequest.process = L"C:\\Windows\\System32\\svchost.exe";
+        serviceRequest.service = L"Dnscache";
+        serviceRequest.profiles = 2;
+        const CommandResult servicePlan = CmdRule(serviceRequest, true, false);
+        Check(r, "fwrule.plan.preserves-process-and-service-scope",
+              servicePlan.exitCode == kExitOk &&
+                  servicePlan.out.find("process=C:\\Windows\\System32\\svchost.exe") != std::string::npos &&
+                  servicePlan.out.find("service=Dnscache") != std::string::npos &&
+                  servicePlan.out.find("local-address=192.0.2.5") != std::string::npos &&
+                  servicePlan.out.find("profiles=2") != std::string::npos,
+              servicePlan.out + servicePlan.err);
+
+        RuleRequest allowRequest;
+        allowRequest.allow = true;
+        allowRequest.address = L"*";
+        allowRequest.process = L"C:\\Apps\\client.exe";
+        const CommandResult allowPlan = CmdRule(allowRequest, true, false);
+        Check(r, "fwrule.plan.preserves-explicit-application-allow",
+              allowPlan.exitCode == kExitOk &&
+                  allowPlan.out.find("allow  outbound to *") != std::string::npos &&
+                  allowPlan.out.find("process=C:\\Apps\\client.exe") != std::string::npos &&
+                  allowPlan.out.find("block  outbound to") == std::string::npos,
+              allowPlan.out + allowPlan.err);
     }
 
     // 3d3. The pre-join view. A filter with an enrichment clause had NO view
@@ -5014,6 +5085,290 @@ TestResult RunSelfTest() {
         }
     }
 
+    // Field-copy text is pure so tests never touch the user's clipboard.
+    {
+        Connection ipv4 = MakeReferenceTcpRow();
+        ipv4.display.remoteAddress = L"203.0.113.7";
+        ipv4.display.hostname = L"Example.test";
+        ipv4.display.localEndpoint = L"192.0.2.10:51000";
+        ipv4.display.remoteEndpoint = L"203.0.113.7:443";
+        ipv4.display.processPath = L"C:\\Apps\\client.exe";
+        ipv4.identity.pid = 42;
+        ipv4.identity.localPort = 51000;
+        ipv4.identity.remotePort = 443;
+        Connection repeated = ipv4;
+        repeated.display.hostname = L"example.TEST";
+        Connection ipv6 = ipv4;
+        ipv6.display.remoteAddress = L"fe80::1%12";
+        ipv6.display.hostname.clear();
+        ipv6.display.remoteEndpoint = L"[fe80::1%12]:443";
+        ipv6.display.localEndpoint = L"[fe80::2%7]:55000";
+        ipv6.display.processPath = L"System";
+        ipv6.identity.pid = 43;
+        ipv6.identity.localPort = 55000;
+        Connection unresolved = ipv4;
+        unresolved.display.remoteAddress.clear();
+        unresolved.display.hostname = DnsResolver::kPendingHost;
+        const std::vector<Connection> rows{ipv4, repeated, ipv6, unresolved};
+        Check(r, "copy.remote-ip-is-literal-deduplicated-and-keeps-ipv6-scope",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::RemoteIp) ==
+                  L"203.0.113.7\r\nfe80::1%12\r\n");
+        Check(r, "copy.hostname-deduplicates-case-insensitively-and-skips-pending",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::Hostname) == L"Example.test\r\n");
+        Connection placeholderHost = ipv4;
+        placeholderHost.display.hostname = L" (Resolving...) ";
+        Check(r, "copy.hostname-omits-trimmed-web-placeholders",
+              ConnectionsList::CopyFieldText({placeholderHost},
+                  ConnectionsList::CopyField::Hostname).empty());
+        Check(r, "copy.remote-endpoint-keeps-bracketed-ipv6",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::RemoteEndpoint) ==
+                  L"203.0.113.7:443\r\n[fe80::1%12]:443\r\n");
+        Check(r, "copy.local-endpoint-matches-ipv4-and-scoped-ipv6-format",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::LocalEndpoint) ==
+                  L"192.0.2.10:51000\r\n[fe80::2%7]:55000\r\n");
+        Check(r, "copy.local-port-is-exact-and-deduplicated",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::LocalPort) == L"51000\r\n55000\r\n");
+        Check(r, "copy.remote-port-is-exact-and-deduplicated",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::RemotePort) == L"443\r\n");
+        Connection listener = ipv4;
+        listener.identity.state = MIB_TCP_STATE_LISTEN;
+        listener.identity.remotePort = 0;
+        Check(r, "copy.listener-zero-remote-port-stays-unknown",
+              ConnectionsList::CopyFieldText({listener},
+                  ConnectionsList::CopyField::RemotePort).empty());
+        Check(r, "copy.listener-does-not-export-wildcard-as-remote-peer",
+              ConnectionsList::CopyFieldText({listener},
+                  ConnectionsList::CopyField::RemoteIp).empty() &&
+              ConnectionsList::CopyFieldText({listener},
+                  ConnectionsList::CopyField::RemoteEndpoint).empty());
+        Connection history = ipv4;
+        history.flags |= kRowRemoved;
+        Check(r, "copy.retained-history-does-not-export-a-live-peer",
+              ConnectionsList::CopyFieldText({history},
+                  ConnectionsList::CopyField::RemoteIp).empty() &&
+              ConnectionsList::CopyFieldText({history},
+                  ConnectionsList::CopyField::RemoteEndpoint).empty());
+        Connection unknownPeer = ipv4;
+        unknownPeer.identity.remotePort = 0;
+        Check(r, "copy.unknown-remote-port-does-not-export-peer-or-endpoint",
+              ConnectionsList::CopyFieldText({unknownPeer},
+                  ConnectionsList::CopyField::RemoteIp).empty() &&
+              ConnectionsList::CopyFieldText({unknownPeer},
+                  ConnectionsList::CopyField::RemoteEndpoint).empty());
+        Connection unspecifiedScoped = ipv6;
+        unspecifiedScoped.display.remoteAddress = L"0:0::%12";
+        unspecifiedScoped.display.remoteEndpoint = L"[0:0::%12]:443";
+        Check(r, "copy.scoped-ipv6-unspecified-is-not-a-peer",
+              ConnectionsList::CopyFieldText({unspecifiedScoped},
+                  ConnectionsList::CopyField::RemoteIp).empty() &&
+              ConnectionsList::CopyFieldText({unspecifiedScoped},
+                  ConnectionsList::CopyField::RemoteEndpoint).empty());
+        Check(r, "copy.process-path-skips-system-sentinel-and-deduplicates",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::ProcessPath) ==
+                  L"C:\\Apps\\client.exe\r\n");
+        Check(r, "copy.pid-is-decimal-and-deduplicated",
+              ConnectionsList::CopyFieldText(rows,
+                  ConnectionsList::CopyField::ProcessId) == L"42\r\n43\r\n");
+        Connection ownerUnknown = ipv4;
+        ownerUnknown.identity.pid = 0;
+        Check(r, "copy.unknown-pid-is-omitted-not-zero",
+              ConnectionsList::CopyFieldText({ownerUnknown},
+                  ConnectionsList::CopyField::ProcessId).empty());
+    }
+
+    {
+        Connection row = MakeReferenceTcpRow();
+        row.display.processPath = L"C:\\Apps\\client\t\"beta\"\r\nworker.exe";
+        row.identity.pid = 42;
+        Check(r, "copy.tsv-quotes-delimiters-and-preserves-row-shape",
+              ConnectionsList::RowsToText({row}, {COL_PATH, COL_PID}) ==
+                  L"Path\tPID\r\n\"C:\\Apps\\client\t\"\"beta\"\"\r\nworker.exe\"\t42\r\n");
+        row.display.processPath.clear();
+        Check(r, "copy.tsv-keeps-empty-cell-and-populated-cell-distinct",
+              ConnectionsList::RowsToText({row}, {COL_PATH, COL_PID}) ==
+                  L"Path\tPID\r\n\t42\r\n");
+        row.display.processPath.assign(2048, L'x');
+        const std::wstring longPathTsv =
+            ConnectionsList::RowsToText({row}, {COL_PATH});
+        Check(r, "copy.tsv-preserves-full-long-executable-path",
+              longPathTsv == L"Path\r\n" + row.display.processPath + L"\r\n");
+        Check(r, "copy.tsv-ignores-invalid-column-ids",
+              ConnectionsList::RowsToText({row}, {-1, COL_PATH, COL_COUNT}) ==
+                  L"Path\r\n" + row.display.processPath + L"\r\n");
+
+        row.identity.pid = 0;
+        row.display.processPath = L"System";
+        row.identity.remotePort = 443;
+        row.identity.state = MIB_TCP_STATE_ESTAB;
+        row.display.remoteAddress = L"203.0.113.8";
+        row.display.hostname = L"...pending...";
+        Check(r, "copy.tsv-omits-unknown-pid-system-path-and-pending-hostname",
+              ConnectionsList::RowsToText({row},
+                  {COL_PID, COL_PATH, COL_HOST}) ==
+                  L"PID\tPath\tHostname\r\n\t\t\r\n");
+        row.display.processName = L"—";
+        row.display.localAddress = L"—";
+        row.display.remoteAddress = L"-";
+        row.keys.protoLabel = L"…";
+        row.keys.stateLabel = L"pending";
+        Check(r, "copy.tsv-omits-placeholder-cells-across-visible-columns",
+              ConnectionsList::RowsToText({row},
+                  {COL_PROCESS, COL_PROTO, COL_LOCAL, COL_REMOTE, COL_STATE}) ==
+                  L"Process\tProto\tLocal address\tRemote address\tState\r\n"
+                  L"\t\t\t\t\r\n");
+        row.identity.pid = 42;
+        row.display.processPath = L"C:\\Apps\\client.exe";
+        row.display.remoteAddress = L"203.0.113.9";
+        row.display.hostname = L"dns.google";
+        Check(r, "copy.tsv-preserves-known-path-and-resolved-peer-hostname",
+              ConnectionsList::RowsToText({row},
+                  {COL_PID, COL_PATH, COL_HOST}) ==
+                  L"PID\tPath\tHostname\r\n42\tC:\\Apps\\client.exe\t"
+                  L"dns.google\r\n");
+        row.identity.state = MIB_TCP_STATE_LISTEN;
+        Check(r, "copy.tsv-omits-listener-hostname-without-a-peer",
+              ConnectionsList::RowsToText({row}, {COL_HOST}) ==
+                  L"Hostname\r\n\r\n");
+
+        Connection udpHistory;
+        udpHistory.identity.protocol = IPPROTO_UDP;
+        udpHistory.identity.remotePort = 0;
+        udpHistory.display.localAddress = L"::1";
+        udpHistory.keys.stateLabel = L"—";
+        udpHistory.flags = kRowRemoved;
+        Check(r, "copy.tsv-matches-web-for-udp-history-and-empty-peer-port",
+              ConnectionsList::RowsToText(
+                  {udpHistory}, {COL_LOCAL, COL_RPORT, COL_STATE}) ==
+                  L"Local address\tRemote port\tState\r\n"
+                  L"::1\t*\tClosed (retained history)\r\n");
+    }
+
+    {
+        struct ClipboardFixture {
+            std::vector<wchar_t> buffer;
+            UINT allocationFlags = 0;
+            bool allocationFails = false;
+            bool lockFails = false;
+            bool openSucceeds = true;
+            bool emptySucceeds = true;
+            bool setSucceeds = true;
+            bool openAttempted = false;
+            bool emptied = false;
+            bool setAttempted = false;
+            bool closed = false;
+            bool freed = false;
+        };
+        const auto apiFor = [](ClipboardFixture* fixture) {
+            return ClipboardApi{
+                fixture,
+                [](void* context, UINT flags, SIZE_T bytes) -> HGLOBAL {
+                    auto* state = static_cast<ClipboardFixture*>(context);
+                    state->allocationFlags = flags;
+                    if (state->allocationFails) return nullptr;
+                    state->buffer.resize(bytes / sizeof(wchar_t));
+                    return reinterpret_cast<HGLOBAL>(static_cast<ULONG_PTR>(1));
+                },
+                [](void* context, HGLOBAL memory) -> void* {
+                    auto* state = static_cast<ClipboardFixture*>(context);
+                    if (state->lockFails || memory == nullptr) return nullptr;
+                    return state->buffer.data();
+                },
+                [](void*, HGLOBAL) -> BOOL { return TRUE; },
+                [](void* context, HGLOBAL) -> HGLOBAL {
+                    static_cast<ClipboardFixture*>(context)->freed = true;
+                    return nullptr;
+                },
+                [](void* context, HWND) -> BOOL {
+                    auto* state = static_cast<ClipboardFixture*>(context);
+                    state->openAttempted = true;
+                    return state->openSucceeds ? TRUE : FALSE;
+                },
+                [](void* context) -> BOOL {
+                    auto* state = static_cast<ClipboardFixture*>(context);
+                    state->emptied = true;
+                    return state->emptySucceeds ? TRUE : FALSE;
+                },
+                [](void* context, UINT format, HANDLE memory) -> HANDLE {
+                    auto* state = static_cast<ClipboardFixture*>(context);
+                    state->setAttempted = true;
+                    return state->setSucceeds && format == CF_UNICODETEXT
+                        ? memory : nullptr;
+                },
+                [](void* context) -> BOOL {
+                    static_cast<ClipboardFixture*>(context)->closed = true;
+                    return TRUE;
+                }};
+        };
+        const std::wstring text = L"peer \u03A9\r\nendpoint";
+
+        ClipboardFixture success;
+        const ClipboardWriteStatus copied =
+            WriteClipboardText(nullptr, text, apiFor(&success));
+        Check(r, "clipboard.success-transfers-unicode-buffer-ownership",
+              copied == ClipboardWriteStatus::Copied &&
+                  success.allocationFlags == GMEM_MOVEABLE && success.openAttempted &&
+                  success.emptied && success.setAttempted && success.closed &&
+                  !success.freed && success.buffer.size() == text.size() + 1 &&
+                  std::wstring(success.buffer.data()) == text);
+
+        ClipboardFixture empty;
+        Check(r, "clipboard.empty-text-does-not-touch-api",
+              WriteClipboardText(nullptr, L"", apiFor(&empty)) ==
+                  ClipboardWriteStatus::EmptyText && empty.buffer.empty() &&
+                  !empty.openAttempted);
+
+        ClipboardFixture allocationFailure;
+        allocationFailure.allocationFails = true;
+        Check(r, "clipboard.allocation-failure-is-reported-before-open",
+              WriteClipboardText(nullptr, text, apiFor(&allocationFailure)) ==
+                  ClipboardWriteStatus::AllocationFailed &&
+                  !allocationFailure.openAttempted && !allocationFailure.freed);
+
+        ClipboardFixture lockFailure;
+        lockFailure.lockFails = true;
+        Check(r, "clipboard.lock-failure-releases-owned-memory",
+              WriteClipboardText(nullptr, text, apiFor(&lockFailure)) ==
+                  ClipboardWriteStatus::LockFailed && lockFailure.freed &&
+                  !lockFailure.openAttempted);
+
+        ClipboardFixture openFailure;
+        openFailure.openSucceeds = false;
+        Check(r, "clipboard.busy-denial-frees-buffer-without-emptying",
+              WriteClipboardText(nullptr, text, apiFor(&openFailure)) ==
+                  ClipboardWriteStatus::OpenFailed && openFailure.freed &&
+                  !openFailure.emptied && !openFailure.closed);
+
+        ClipboardFixture emptyFailure;
+        emptyFailure.emptySucceeds = false;
+        Check(r, "clipboard-empty-failure-closes-and-preserves-buffer-ownership",
+              WriteClipboardText(nullptr, text, apiFor(&emptyFailure)) ==
+                  ClipboardWriteStatus::EmptyFailed && emptyFailure.closed &&
+                  emptyFailure.freed && !emptyFailure.setAttempted);
+
+        ClipboardFixture setFailure;
+        setFailure.setSucceeds = false;
+        Check(r, "clipboard-set-failure-closes-and-releases-buffer",
+              WriteClipboardText(nullptr, text, apiFor(&setFailure)) ==
+                  ClipboardWriteStatus::SetDataFailed && setFailure.closed &&
+                  setFailure.freed);
+        Check(r, "clipboard.manual-fallback-is-required-only-for-real-failures",
+              !ClipboardNeedsManualFallback(ClipboardWriteStatus::Copied) &&
+                  !ClipboardNeedsManualFallback(ClipboardWriteStatus::EmptyText) &&
+                  ClipboardNeedsManualFallback(ClipboardWriteStatus::InvalidApi) &&
+                  ClipboardNeedsManualFallback(ClipboardWriteStatus::AllocationFailed) &&
+                  ClipboardNeedsManualFallback(ClipboardWriteStatus::LockFailed) &&
+                  ClipboardNeedsManualFallback(ClipboardWriteStatus::OpenFailed) &&
+                  ClipboardNeedsManualFallback(ClipboardWriteStatus::EmptyFailed) &&
+                  ClipboardNeedsManualFallback(ClipboardWriteStatus::SetDataFailed));
+    }
+
     // 4. Snapshot diff: appear / state-change / disappear + one-cycle ghosts.
     {
         ConnectionStore store;
@@ -5073,6 +5428,105 @@ TestResult RunSelfTest() {
               ev.empty() && store.Rows().size() == 3,
               "events=" + std::to_string(ev.size()) +
                   " rows=" + std::to_string(store.Rows().size()));
+    }
+
+    // A reused PID and identical endpoint tuple must start a new row lifetime.
+    {
+        Connection processLifetime = MakeReferenceTcpRow();
+        processLifetime.procMeta.processCreate = FILETIME{123, 456};
+        processLifetime.procMeta.processCreateKnown = true;
+        Check(r, "connection.pid-reuse.same-lifetime-matches",
+              SameProcessLifetime(processLifetime, processLifetime));
+        Connection reusedProcess = processLifetime;
+        ++reusedProcess.procMeta.processCreate.dwLowDateTime;
+        Check(r, "connection.pid-reuse.creation-time-change-refuses-target",
+              !SameProcessLifetime(processLifetime, reusedProcess));
+        Connection unknownLifetime = processLifetime;
+        unknownLifetime.procMeta.processCreateKnown = false;
+        Check(r, "connection.pid-reuse.unknown-lifetime-refuses-target",
+              !SameProcessLifetime(processLifetime, unknownLifetime));
+        Connection differentPid = processLifetime;
+        ++differentPid.identity.pid;
+        Check(r, "connection.pid-reuse.different-pid-refuses-target",
+              !SameProcessLifetime(processLifetime, differentPid));
+
+        ConnectionStore store;
+        Connection original = MakeReferenceTcpRow();
+        original.procMeta.processCreate = FILETIME{123, 456};
+        original.procMeta.processCreateKnown = true;
+        store.ReplaceSnapshot({original});
+        const std::uint64_t originalId = store.Rows()[0].id;
+        store.TakeChangeEvents();
+
+        store.ReplaceSnapshot({original});
+        Check(r, "store.identity.same-process-keeps-socket-row",
+              store.Rows().size() == 1 && store.Rows()[0].id == originalId &&
+                  store.TakeChangeEvents().empty());
+
+        Connection replacement = original;
+        ++replacement.procMeta.processCreate.dwLowDateTime;
+        store.ReplaceSnapshot({replacement});
+        const Connection* live = nullptr;
+        const Connection* retired = nullptr;
+        for (const Connection& row : store.Rows()) {
+            if (row.flags & kRowRemoved) retired = &row;
+            else live = &row;
+        }
+        const std::vector<RowChange> replacementEvents = store.TakeChangeEvents();
+        Check(r, "store.identity.reused-pid-and-tuple-start-new-lifetime",
+              store.Rows().size() == 2 && live != nullptr && retired != nullptr &&
+                  live->id != originalId && retired->id == originalId &&
+                  (live->flags & kRowNew) != 0 &&
+                  (retired->flags & kRowRemoved) != 0 &&
+                  live->procMeta.processCreate.dwLowDateTime !=
+                      original.procMeta.processCreate.dwLowDateTime &&
+                  replacementEvents.size() == 2 &&
+                  replacementEvents[0].kind == kChangeAppear &&
+                  replacementEvents[1].kind == kChangeDisappear);
+    }
+
+    {
+        ConnectionStore store;
+        Connection endpoint = MakeReferenceTcpRow();
+        endpoint.procMeta.processCreate = FILETIME{321, 654};
+        endpoint.procMeta.processCreateKnown = true;
+        store.ReplaceSnapshot({endpoint});
+        const std::uint64_t oldId = store.Rows()[0].id;
+        store.TakeChangeEvents();
+        store.ReplaceSnapshot({});
+        store.TakeChangeEvents();
+        store.ReplaceSnapshot({endpoint});
+        const Connection* live = nullptr;
+        const Connection* retired = nullptr;
+        for (const Connection& row : store.Rows()) {
+            if (row.flags & kRowRemoved) retired = &row;
+            else live = &row;
+        }
+        const std::vector<RowChange> reconnectEvents = store.TakeChangeEvents();
+        Check(r, "store.identity.same-tuple-reconnect-starts-new-socket",
+              store.Rows().size() == 2 && live != nullptr && retired != nullptr &&
+                  live->id != oldId && retired->id == oldId &&
+                  reconnectEvents.size() == 1 &&
+                  reconnectEvents[0].kind == kChangeAppear);
+    }
+
+    {
+        ConnectionStore store;
+        Connection udp = MakeReferenceTcpRow();
+        udp.identity.protocol = IPPROTO_UDP;
+        udp.identity.state = 0;
+        udp.identity.localPort = 5353;
+        udp.procMeta.processCreate = FILETIME{777, 888};
+        udp.procMeta.processCreateKnown = true;
+        store.ReplaceSnapshot({udp, udp});
+        const std::uint64_t firstId = store.Rows()[0].id;
+        const std::uint64_t secondId = store.Rows()[1].id;
+        store.TakeChangeEvents();
+        store.ReplaceSnapshot({udp, udp});
+        Check(r, "store.identity.duplicate-udp-bindings-pair-stably",
+              store.Rows().size() == 2 && firstId != secondId &&
+                  store.Rows()[0].id == firstId && store.Rows()[1].id == secondId &&
+                  store.TakeChangeEvents().empty());
     }
 
     // 4b. Closed sockets are retained as grey ghosts (not dropped after one
@@ -5255,6 +5709,137 @@ TestResult RunSelfTest() {
               hasUnknownTail(ascending, L"brave.exe,chrome.exe,svchost.exe"));
         Check(r, "sort.process-name-descending",
               hasUnknownTail(descending, L"svchost.exe,chrome.exe,brave.exe"));
+    }
+
+    // Address columns sort by address bytes, not by the printable spelling.
+    // IPv6 scope IDs are numeric tie-breakers after the 128-bit address.
+    {
+        ConnectionStore store;
+        std::vector<Connection> rows;
+        const UCHAR addressBytes[][16] = {
+            {10, 0, 0, 10},
+            {10, 0, 0, 100},
+            {10, 0, 0, 2},
+            {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10},
+            {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
+            {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+            {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+        };
+        const wchar_t* const displayAddresses[] = {
+            L"10.0.0.10", L"10.0.0.100", L"10.0.0.2",
+            L"2001:db8::10", L"2001:db8::2", L"fe80::1%10", L"fe80::1%2",
+        };
+        for (size_t i = 0; i < _countof(displayAddresses); ++i) {
+            Connection row = MakeReferenceTcpRow();
+            row.identity.family = (i < 3) ? AF_INET : AF_INET6;
+            row.identity.localPort = static_cast<UINT>(43000 + i);
+            row.identity.remotePort = static_cast<UINT>(44000 + i);
+            std::memcpy(row.identity.family == AF_INET
+                            ? static_cast<void*>(&row.identity.remote4)
+                            : static_cast<void*>(&row.identity.remote6),
+                        addressBytes[i], row.identity.family == AF_INET
+                            ? sizeof(IN_ADDR) : sizeof(IN6_ADDR));
+            row.identity.remoteScope = (i == 5) ? 10 : ((i == 6) ? 2 : 0);
+            row.display.remoteAddress = displayAddresses[i];
+            rows.push_back(std::move(row));
+        }
+        store.ReplaceSnapshot(std::move(rows));
+        ViewQuery query;
+        store.SetSort(COL_REMOTE, true);
+        store.SetView(query);
+        std::wstring ascending;
+        for (size_t i = 0; i < store.View().size(); ++i) {
+            if (i > 0) ascending += L",";
+            ascending += store.ViewRow(i)->display.remoteAddress;
+        }
+        store.SetSort(COL_REMOTE, false);
+        store.SetView(query);
+        std::wstring descending;
+        for (size_t i = 0; i < store.View().size(); ++i) {
+            if (i > 0) descending += L",";
+            descending += store.ViewRow(i)->display.remoteAddress;
+        }
+        Check(r, "sort.remote-address-binary-ascending",
+              ascending == L"10.0.0.2,10.0.0.10,10.0.0.100,2001:db8::2,"
+                           L"2001:db8::10,fe80::1%2,fe80::1%10");
+        Check(r, "sort.remote-address-binary-descending",
+              descending == L"fe80::1%10,fe80::1%2,2001:db8::10,2001:db8::2,"
+                            L"10.0.0.100,10.0.0.10,10.0.0.2");
+    }
+
+    {
+        ConnectionStore store;
+        std::vector<Connection> rows;
+        const UINT ports[] = {100, 2, 10};
+        for (size_t i = 0; i < _countof(ports); ++i) {
+            Connection row = MakeReferenceTcpRow();
+            row.identity.localPort = static_cast<UINT>(45000 + i);
+            row.identity.remotePort = ports[i];
+            rows.push_back(std::move(row));
+        }
+        store.ReplaceSnapshot(std::move(rows));
+        ViewQuery query;
+        store.SetSort(COL_RPORT, true);
+        store.SetView(query);
+        const bool ascending = store.View().size() == 3 &&
+            store.ViewRow(0)->identity.remotePort == 2 &&
+            store.ViewRow(1)->identity.remotePort == 10 &&
+            store.ViewRow(2)->identity.remotePort == 100;
+        store.SetSort(COL_RPORT, false);
+        store.SetView(query);
+        const bool descending = store.View().size() == 3 &&
+            store.ViewRow(0)->identity.remotePort == 100 &&
+            store.ViewRow(1)->identity.remotePort == 10 &&
+            store.ViewRow(2)->identity.remotePort == 2;
+        Check(r, "sort.remote-port-numeric-both-directions", ascending && descending);
+    }
+
+    {
+        ConnectionStore store;
+        std::vector<Connection> rows;
+        const DWORD states[] = {
+            MIB_TCP_STATE_CLOSE_WAIT, MIB_TCP_STATE_ESTAB,
+            MIB_TCP_STATE_SYN_SENT, 999, 0,
+        };
+        for (size_t i = 0; i < _countof(states); ++i) {
+            Connection row = MakeReferenceTcpRow();
+            row.identity.localPort = static_cast<UINT>(46000 + i);
+            row.identity.remotePort = static_cast<UINT>(47000 + i);
+            row.identity.state = states[i];
+            if (i == 4) row.identity.protocol = IPPROTO_UDP;
+            rows.push_back(std::move(row));
+        }
+        store.ReplaceSnapshot(std::move(rows));
+        ViewQuery query;
+        const auto statesMatch = [&store](DWORD first, DWORD second, DWORD third) {
+            if (store.View().size() != 5) return false;
+            const Connection* fourth = store.ViewRow(3);
+            const Connection* fifth = store.ViewRow(4);
+            const bool unknownTail =
+                ((fourth->identity.protocol == IPPROTO_TCP &&
+                  fourth->identity.state == 999 &&
+                  fifth->identity.protocol == IPPROTO_UDP) ||
+                 (fourth->identity.protocol == IPPROTO_UDP &&
+                  fifth->identity.protocol == IPPROTO_TCP &&
+                  fifth->identity.state == 999));
+            return store.View().size() == 5 &&
+                store.ViewRow(0)->identity.state == first &&
+                store.ViewRow(1)->identity.state == second &&
+                store.ViewRow(2)->identity.state == third &&
+                unknownTail;
+        };
+        store.SetSort(COL_STATE, true);
+        store.SetView(query);
+        const bool ascending = statesMatch(MIB_TCP_STATE_ESTAB,
+                                           MIB_TCP_STATE_SYN_SENT,
+                                           MIB_TCP_STATE_CLOSE_WAIT);
+        store.SetSort(COL_STATE, false);
+        store.SetView(query);
+        const bool descending = statesMatch(MIB_TCP_STATE_CLOSE_WAIT,
+                                            MIB_TCP_STATE_SYN_SENT,
+                                            MIB_TCP_STATE_ESTAB);
+        Check(r, "sort.tcp-state-ranked-and-unknown-last-both-directions",
+              ascending && descending);
     }
 
     // 8. Traffic counters + connection counting.
@@ -7481,6 +8066,20 @@ TestResult RunSelfTest() {
                   MatchClause(c, quoted[0]),
               quoted.empty() ? "no clauses" : WideToUtf8(quoted[0].text));
 
+        std::vector<FilterClause> malformed;
+        std::wstring parseError;
+        const bool malformedParsed =
+            ParseFilter(L"note:\"vendor api", malformed, &parseError);
+        Check(r, "filter.unclosed-field-quote-reports-error-and-keeps-fallback",
+              !malformedParsed && parseError == L"Unclosed quote" &&
+                  malformed.size() == 1 &&
+                  malformed[0].text == L"note:\"vendor api");
+        const bool validAfterMalformed =
+            ParseFilter(L"note:vendor", malformed, &parseError);
+        Check(r, "filter.valid-query-clears-parse-error",
+              validAfterMalformed && parseError.empty() &&
+                  malformed.size() == 1 && malformed[0].text == L"vendor");
+
         // The same for the single-quoted form, which cmd.exe users reach for
         // as readily as double quotes.
         std::vector<FilterClause> squoted;
@@ -7503,6 +8102,20 @@ TestResult RunSelfTest() {
         Check(r, "quote.bare-value-searches-everything",
               anyq.size() == 1 && (anyq[0].field == FilterField::Any) &&
                   (anyq[0].text == L"chrome.exe"));
+
+        std::vector<FilterClause> unclosed;
+        const bool unclosedOk = ParseFilter(L"path:\"Program Files", unclosed);
+        Check(r, "quote.unclosed-fails-closed",
+              !unclosedOk && unclosed.size() == 1 &&
+                  unclosed[0].field == FilterField::Any &&
+                  unclosed[0].text == L"path:\"program files" &&
+                  !MatchClause(c, unclosed[0]));
+
+        std::vector<FilterClause> bareUnclosed;
+        Check(r, "quote.unclosed-bare-fails-closed",
+              !ParseFilter(L"\"Program Files", bareUnclosed) &&
+                  bareUnclosed.size() == 1 &&
+                  bareUnclosed[0].text == L"\"program files");
     }
 
     // 31. ViewState and the PresetView alias.
@@ -9488,6 +10101,33 @@ static const unsigned char kClientHello[] = {
         BlockRequest req;
         std::wstring why;
         Connection tcp = MakeReferenceTcpRow();
+        tcp.identity.pid = 42;
+        tcp.procMeta.processCreateKnown = true;
+        Check(r, "close.capability.allows-exact-supported-elevated-target",
+              ConnectionCloseCapabilityReason(tcp, true).empty());
+        Check(r, "close.capability.refuses-unelevated-target-before-action",
+              ConnectionCloseCapabilityReason(tcp, false) ==
+                  "Closing a TCP connection requires an elevated WinTCP process.");
+        Connection unknownLifetime = tcp;
+        unknownLifetime.procMeta.processCreateKnown = false;
+        Check(r, "close.capability-refuses-unknown-process-lifetime-before-elevation",
+              ConnectionCloseCapabilityReason(unknownLifetime, false).find(
+                  "process lifetime is unknown") != std::string::npos);
+        Connection systemProcessClose = tcp;
+        systemProcessClose.identity.pid = 4;
+        Check(r, "close.capability-refuses-system-process-target",
+              ConnectionCloseCapabilityReason(systemProcessClose, true).find(
+                  "System process") != std::string::npos);
+        Connection unsupportedClose = tcp;
+        unsupportedClose.identity.family = AF_INET6;
+        Check(r, "close.capability-refuses-unsupported-ipv6-even-when-elevated",
+              ConnectionCloseCapabilityReason(unsupportedClose, true).find(
+                  "no public IPv6") != std::string::npos);
+        Connection historyClose = tcp;
+        historyClose.flags |= kRowRemoved;
+        Check(r, "close.capability-refuses-retained-history-even-when-elevated",
+              ConnectionCloseCapabilityReason(historyClose, true).find(
+                  "retained history") != std::string::npos);
         Check(r, "cmd.block-maps-tcp",
               ConnectionToBlockRequest(tcp, &req, &why) && !req.ipv6 &&
                   req.remotePort == 443);
@@ -9500,10 +10140,66 @@ static const unsigned char kClientHello[] = {
         lst.identity.state = MIB_TCP_STATE_LISTEN;
         Check(r, "cmd.block-refuses-listen",
               !ConnectionToBlockRequest(lst, &req, &why));
+        Connection historical = tcp;
+        historical.flags |= kRowRemoved;
+        Check(r, "cmd.block-refuses-history",
+              !ConnectionToBlockRequest(historical, &req, &why));
+        MutateOptions historicalClose;
+        historicalClose.dryRun = true;
+        const CommandResult closedHistory = CloseRow(historical, historicalClose);
+        Check(r, "cmd.close-refuses-history-before-elevation",
+              closedHistory.exitCode != kExitOk &&
+              closedHistory.err.find("retained history") != std::string::npos);
+        Connection listenClose = tcp;
+        listenClose.identity.state = MIB_TCP_STATE_LISTEN;
+        MutateOptions closeDryRun;
+        closeDryRun.dryRun = true;
+        const CommandResult closedListener = CloseRow(listenClose, closeDryRun);
+        Check(r, "cmd.close-refuses-listener-before-elevation",
+              closedListener.exitCode != kExitOk &&
+              closedListener.err.find("only established IPv4 TCP") != std::string::npos);
+        Connection udpClose = tcp;
+        udpClose.identity.protocol = IPPROTO_UDP;
+        udpClose.identity.state = 0;
+        const CommandResult closedUdp = CloseRow(udpClose, closeDryRun);
+        Check(r, "cmd.close-refuses-udp-before-elevation",
+              closedUdp.exitCode != kExitOk &&
+              closedUdp.err.find("only established IPv4 TCP") != std::string::npos);
 
-        // CloseTcpConnection only drives SetTcpEntry, which has no IPv6
-        // variant - so an IPv6 TCP row must be refused up front with the IPv6
-        // reason, before any elevation/API attempt is made. Mirrors the GUI
+        Check(r, "close.live-owner-row-matches-exact-target",
+              ConnectionMatchesOwnerPidTcpRow(
+                  tcp, MIB_TCP_STATE_ESTAB, tcp.identity.local4.S_un.S_addr,
+                  static_cast<DWORD>(::htons(static_cast<u_short>(tcp.identity.localPort))),
+                  tcp.identity.remote4.S_un.S_addr,
+                  static_cast<DWORD>(::htons(static_cast<u_short>(tcp.identity.remotePort))),
+                  tcp.identity.pid));
+        Check(r, "close.live-owner-row-refuses-reused-pid-or-tuple",
+              !ConnectionMatchesOwnerPidTcpRow(
+                  tcp, MIB_TCP_STATE_ESTAB, tcp.identity.local4.S_un.S_addr,
+                  static_cast<DWORD>(::htons(static_cast<u_short>(tcp.identity.localPort))),
+                  tcp.identity.remote4.S_un.S_addr,
+                  static_cast<DWORD>(::htons(static_cast<u_short>(tcp.identity.remotePort))),
+                  tcp.identity.pid + 1) &&
+              !ConnectionMatchesOwnerPidTcpRow(
+                  tcp, MIB_TCP_STATE_ESTAB, tcp.identity.local4.S_un.S_addr,
+                  static_cast<DWORD>(::htons(static_cast<u_short>(tcp.identity.localPort + 1))),
+                  tcp.identity.remote4.S_un.S_addr,
+                  static_cast<DWORD>(::htons(static_cast<u_short>(tcp.identity.remotePort))),
+                  tcp.identity.pid));
+
+        Connection unknownCloseLifetime = tcp;
+        unknownCloseLifetime.procMeta.processCreateKnown = false;
+        MutateOptions realClose;
+        realClose.yes = true;
+        const CommandResult unknownCloseResult =
+            CloseRow(unknownCloseLifetime, realClose);
+        Check(r, "cmd.close-refuses-unknown-process-lifetime",
+              unknownCloseResult.exitCode != kExitOk &&
+              unknownCloseResult.err.find("lifetime is unknown") !=
+                  std::string::npos);
+
+        // SetTcpEntry has no IPv6 variant, so an IPv6 TCP row must be refused
+        // before the live-table query or any mutation. Mirrors the GUI
         // predicate that greys "Close connection" for the same rows.
         Connection v6close = tcp;
         v6close.identity.family = AF_INET6;
