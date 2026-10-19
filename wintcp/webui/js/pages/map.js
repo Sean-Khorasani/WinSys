@@ -1,5 +1,5 @@
 import { h, clear } from "../h.js";
-import { hostnameLabel } from "../connections.js";
+import { connectionKey, hostnameLabel } from "../connections.js";
 import { button } from "../ui/button.js";
 import { card, cardHeader, cardTitle, cardContent, emptyState } from "../ui/card.js";
 import { fmtInt } from "../format.js";
@@ -69,6 +69,10 @@ export async function renderMap(page, store) {
       h("div", { class: "map-heading-actions" },
         h("span", { class: "muted text-sm", id: "map-status" }, "Loading map…"),
         button({ id: "map-projection", variant: "outline", "aria-label": "Switch map projection", "aria-pressed": "true" }, "2D map"),
+        h("button", {
+          class: "btn btn-outline btn-sm", id: "map-retry", type: "button", hidden: true,
+          onclick: () => document.dispatchEvent(new Event("wintcp:retry-map")),
+        }, "Retry map"),
       ),
     ),
     h("div", { class: "map-layout" },
@@ -97,6 +101,7 @@ export async function renderMap(page, store) {
   const container = page.querySelector("#map-canvas");
   const status = page.querySelector("#map-status");
   const projectionButton = page.querySelector("#map-projection");
+  const retryButton = page.querySelector("#map-retry");
 
   page._mapDestroy = () => {
     destroyed = true;
@@ -225,6 +230,7 @@ export async function renderMap(page, store) {
         }
       }, 180);
       status.textContent = "";
+      retryButton.hidden = true;
       projectionButton.disabled = false;
     });
     map.on("error", (event) => {
@@ -237,6 +243,7 @@ export async function renderMap(page, store) {
   } catch (error) {
     if (destroyed) return;
     status.textContent = `Map unavailable: ${error.message}`;
+    retryButton.hidden = false;
     renderCountryList(page.querySelector("#map-countries"), [], store.get());
   }
 }
@@ -330,6 +337,7 @@ export function mapData(geoJson, state) {
           protocol: row.proto || "",
           state: row.state || "",
           hostname: hostnameLabel(row.hostname),
+          connectionKey: `connection:${connectionKey(row)}`,
           country: feature.properties.name,
           locationNote: "Country-level GeoIP estimate",
         },
@@ -410,6 +418,12 @@ function installMapInteractions(map, popup) {
     popupId = null;
     popup.remove();
   });
+  map.on("click", "connection-markers", (event) => {
+    const key = event.features?.[0]?.properties?.connectionKey;
+    if (typeof key === "string" && key.startsWith("connection:")) {
+      document.dispatchEvent(new CustomEvent("wintcp:inspect-connection", { detail: { key } }));
+    }
+  });
   map.on("mousemove", "country-fill", (event) => {
     const feature = event.features?.[0];
     if (!feature) return;
@@ -424,7 +438,7 @@ function installMapInteractions(map, popup) {
   });
 }
 
-function connectionPopup(properties) {
+export function connectionPopup(properties) {
   const root = document.createElement("div");
   root.className = "map-tooltip";
   const title = document.createElement("strong");
@@ -448,6 +462,18 @@ function connectionPopup(properties) {
     line.append(key, document.createTextNode(String(value)));
     root.append(line);
   }
+  if (properties.connectionKey) {
+    const inspect = document.createElement("button");
+    inspect.type = "button";
+    inspect.className = "btn btn-outline btn-sm map-inspect-action";
+    inspect.textContent = "Open connection details";
+    inspect.addEventListener("click", () => {
+      document.dispatchEvent(new CustomEvent("wintcp:inspect-connection", {
+        detail: { key: properties.connectionKey },
+      }));
+    });
+    root.append(inspect);
+  }
   return root;
 }
 
@@ -455,11 +481,11 @@ function renderCountryList(container, countries, state) {
   if (!container) return;
   clear(container);
   if (!state.geoSummary?.geoIpConfigured) {
-    container.append(emptyState({}, "GeoIP not configured", "Set a GeoIP database path in Settings to color countries and show connection markers."));
+    container.append(emptyState({ action: { label: "Open Settings", href: "#/settings" } }, "GeoIP not configured", "Set a GeoIP database path in Settings to color countries and show connection markers."));
     return;
   }
   if (!countries.length) {
-    container.append(emptyState({}, "No remote peers resolved", "The current snapshot has no remote connections with a country match."));
+    container.append(emptyState({ action: { label: "View Network", href: "#/network" } }, "No remote peers resolved", "The current snapshot has no remote connections with a country match."));
     return;
   }
   const list = h("div", { class: "country-list" });
