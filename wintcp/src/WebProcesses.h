@@ -70,7 +70,7 @@ struct WebProcessRow {
 // A published, immutable-by-convention snapshot of the process table.
 struct WebProcessSnapshot {
     std::vector<WebProcessRow> rows;
-    uint64_t unixTime = 0;
+    uint64_t sampledAtMs = 0;
     bool known = false;           // false until the first pass completes
     std::string reason;           // why not, when known == false
 };
@@ -96,7 +96,14 @@ public:
     void ClearPathCache();
 
 private:
-    std::wstring ImagePath(DWORD pid);
+    struct CachedImage {
+        FILETIME processCreateTime = {};
+        bool processCreateKnown = false;
+        std::wstring path;
+    };
+
+    std::wstring ImagePath(DWORD pid, const FILETIME& processCreateTime,
+                           bool processCreateKnown);
 
     ProcStatsSampler procStats_;
     // Scratch buffer for NtQuerySystemInformation, reused across passes so a
@@ -106,7 +113,7 @@ private:
     // system processes refuse the query, and re-asking them every second is
     // pure cost. Elevation changes the answer, which is what ClearPathCache is
     // for.
-    std::map<DWORD, std::wstring> pathCache_;
+    std::map<DWORD, CachedImage> pathCache_;
 };
 
 // Thread-safe publication point. One writer (the refresher thread), many readers
