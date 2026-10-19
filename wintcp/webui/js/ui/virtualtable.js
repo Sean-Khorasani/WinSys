@@ -12,9 +12,10 @@ import { h } from "../h.js";
 export function createVirtualTable(container, opts = {}) {
   const {
     columns = [],
-    rowHeight = 40,
+    rowHeight: baseRowHeight = 40,
     height = 400,
     onRowClick = null,
+    onRowContextMenu = null,
     onSort = null,
     sortKey = null,
     sortDir = null,
@@ -24,7 +25,20 @@ export function createVirtualTable(container, opts = {}) {
     scrollTop = 0,
     onScroll = null,
     rowKey = null,
+    format = {},
+    multiSelect = false,
+    onSelectionChange = null,
   } = opts;
+  const allColumns = columns.map((column) => ({ ...column }));
+  let activeColumns = allColumns;
+  let columnOrder = allColumns.map((column) => column.key);
+  let hiddenColumns = new Set();
+  let columnWidths = new Map(allColumns.map((column) => [column.key, column.width || 1]));
+  let rowHeight = document.body.classList.contains("density-compact")
+    ? Math.max(24, baseRowHeight - 6) : baseRowHeight;
+  let destroyed = false;
+  let frame = null;
+  let restoreFrame = null;
   let emptyMessage = initialEmptyMessage;
   let currentSortKey = sortKey;
   let currentSortDir = sortDir;
@@ -32,12 +46,163 @@ export function createVirtualTable(container, opts = {}) {
 
   const state = {
     rows: [],
+    knownRows: [],
     scrollTop: 0,
     viewportH: height,
     startIdx: 0,
     endIdx: 0,
     activeIndex: -1,
   };
+  const selectedRows = new Map();
+  let selectionAnchorKey = null;
+
+  function keyOf(row, index) {
+    return rowKey ? String(rowKey(row)) : String(index);
+  }
+
+  function selectedRowsInViewOrder() {
+    const ordered = [];
+    const found = new Set();
+    for (let index = 0; index < state.rows.length; index++) {
+      const row = state.rows[index];
+      const key = keyOf(row, index);
+      if (!selectedRows.has(key)) continue;
+      ordered.push(selectedRows.get(key));
+      found.add(key);
+    }
+    for (const [key, row] of selectedRows) {
+      if (!found.has(key)) ordered.push(row);
+    }
+    return ordered;
+  }
+
+  function notifySelection() {
+    if (!onSelectionChange) return;
+    const visible = new Set(state.rows.map((row, index) => keyOf(row, index)));
+    const current = new Map(state.knownRows.map((row, index) => [keyOf(row, index), row]));
+    const rows = selectedRowsInViewOrder();
+    let visibleCount = 0;
+    let currentCount = 0;
+    let staleCount = 0;
+    for (const [key] of selectedRows) {
+      const latest = current.get(key);
+      if (latest) {
+        currentCount++;
+        selectedRows.set(key, latest);
+        if (visible.has(key)) visibleCount++;
+      } else {
+        staleCount++;
+      }
+    }
+    onSelectionChange({
+      rows,
+      selectedCount: rows.length,
+      currentCount,
+      visibleCount,
+      hiddenCount: currentCount - visibleCount,
+      staleCount,
+    });
+  }
+
+  function selectedCurrentRows() {
+    const currentKeys = new Set(state.knownRows.map((row, index) => keyOf(row, index)));
+    return selectedRowsInViewOrder().filter((row) => currentKeys.has(String(rowKey(row))));
+  }
+
+  function selectSingle(index) {
+    const row = state.rows[index];
+    if (!row || !multiSelect) return;
+    const key = keyOf(row, index);
+    selectedRows.clear();
+    selectedRows.set(key, row);
+    selectionAnchorKey = key;
+    notifySelection();
+    render();
+  }
+
+  function toggleSelection(index) {
+    const row = state.rows[index];
+    if (!row || !multiSelect) return;
+    const key = keyOf(row, index);
+    if (selectedRows.has(key)) selectedRows.delete(key);
+    else selectedRows.set(key, row);
+    selectionAnchorKey = key;
+    notifySelection();
+    render();
+  }
+
+  function selectRange(index, additive = false) {
+    const row = state.rows[index];
+    if (!row || !multiSelect) return;
+    const key = keyOf(row, index);
+    let anchor = state.rows.findIndex((item, itemIndex) =>
+      keyOf(item, itemIndex) === selectionAnchorKey);
+    if (anchor < 0) {
+      selectionAnchorKey = key;
+      anchor = index;
+    }
+    if (!additive) selectedRows.clear();
+    for (let current = Math.min(anchor, index); current <= Math.max(anchor, index); current++) {
+      const selected = state.rows[current];
+      selectedRows.set(keyOf(selected, current), selected);
+    }
+    notifySelection();
+    render();
+  }
+
+  function clearSelection() {
+    if (!selectedRows.size) return;
+    selectedRows.clear();
+    selectionAnchorKey = null;
+    notifySelection();
+    render();
+  }
+
+  function selectAll() {
+    if (!multiSelect) return;
+    selectedRows.clear();
+    for (let index = 0; index < state.rows.length; index++) {
+      selectedRows.set(keyOf(state.rows[index], index), state.rows[index]);
+    }
+    selectionAnchorKey = state.rows.length ? keyOf(state.rows[0], 0) : null;
+    notifySelection();
+    render();
+  }
+
+  function getViewState() {
+    return { selectedKeys: [...selectedRows.keys()], scrollTop: currentScrollTop };
+  }
+
+  function restoreViewState(viewState) {
+    if (destroyed || !viewState || typeof viewState !== "object") return false;
+    selectedRows.clear();
+    const currentRows = new Map(state.knownRows.map((row, index) => [keyOf(row, index), row]));
+    if (multiSelect && rowKey && Array.isArray(viewState.selectedKeys)) {
+      for (const key of viewState.selectedKeys) {
+        if (typeof key === "string" && currentRows.has(key))
+          selectedRows.set(key, currentRows.get(key));
+      }
+    }
+    selectionAnchorKey = selectedRows.keys().next().value || null;
+    notifySelection();
+    render();
+    const applyScroll = () => {
+      restoreFrame = null;
+      if (destroyed) return;
+      if (!wrapper.isConnected || wrapper.clientHeight === 0) {
+        restoreFrame = requestAnimationFrame(applyScroll);
+        return;
+      }
+      const maxScroll = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight);
+      currentScrollTop = Number.isFinite(viewState.scrollTop)
+        ? Math.max(0, Math.min(maxScroll, viewState.scrollTop)) : 0;
+      wrapper.scrollTop = currentScrollTop;
+      render();
+    };
+    if (restoreFrame !== null) cancelAnimationFrame(restoreFrame);
+    restoreFrame = requestAnimationFrame(applyScroll);
+    return true;
+  }
 
   // tabindex="0" is what makes the scroller keyboard-reachable: without it the
   // region scrolls with the mouse wheel only (axe: scrollable-region-focusable).
@@ -46,6 +211,7 @@ export function createVirtualTable(container, opts = {}) {
     role: "grid",
     tabindex: "0",
     "aria-label": label,
+    "aria-multiselectable": multiSelect ? "true" : undefined,
     "aria-rowcount": "0",
     style: minWidth ? `--virtual-table-min-width: ${minWidth}; position: relative;` : "position: relative;",
   });
@@ -64,7 +230,10 @@ export function createVirtualTable(container, opts = {}) {
       `position: sticky; top: 0; z-index: 1; min-width: var(--virtual-table-min-width, 0);`,
   });
   const headerCells = new Map();
-  columns.forEach((col, index) => {
+  function buildHeaderCells() {
+    header.replaceChildren();
+    headerCells.clear();
+    activeColumns.forEach((col, index) => {
     const isSorted = col.sortable && currentSortKey === col.key;
     const indicator = col.sortable
       ? (isSorted ? (currentSortDir === "asc" ? " \u25B2" : " \u25BC") : "")
@@ -80,21 +249,31 @@ export function createVirtualTable(container, opts = {}) {
     const cell = h("div", {
         role: "columnheader",
         "aria-colindex": String(index + 1),
+        "data-column-key": col.key,
         "aria-sort": isSorted
           ? (currentSortDir === "asc" ? "ascending" : "descending")
           : (col.sortable ? "none" : undefined),
-        style: headerStyle,
+        style: headerStyle + ` text-align: ${col.align || "left"};` +
+          (col.actions ? " padding: 0.5rem 0.375rem;" : ""),
         tabindex: col.sortable ? "0" : undefined,
         onclick: col.sortable && onSort
-          ? () => onSort(col.key, currentSortDir === "asc" ? "desc" : "asc")
+          ? () => onSort(col.key, currentSortKey === col.key && currentSortDir === "asc" ? "desc" : (currentSortKey === col.key ? "asc" : (col.initialSort || "asc")))
           : null,
         onkeydown: (col.sortable && onSort)
-          ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSort(col.key, currentSortDir === "asc" ? "desc" : "asc"); } }
+          ? (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            event.stopPropagation();
+            onSort(col.key, currentSortKey === col.key && currentSortDir === "asc"
+              ? "desc" : (currentSortKey === col.key ? "asc" : (col.initialSort || "asc")));
+          }
           : null,
       }, col.label + indicator);
     headerCells.set(col.key, { col, cell });
-    header.append(cell);
-  });
+      header.append(cell);
+    });
+  }
+  buildHeaderCells();
   function updateSort(nextKey, nextDir) {
     currentSortKey = nextKey;
     currentSortDir = nextDir;
@@ -110,6 +289,50 @@ export function createVirtualTable(container, opts = {}) {
       cell.style.color = isSorted ? "var(--primary)" : "var(--muted-foreground)";
       cell.style.fontWeight = isSorted ? "600" : "500";
     }
+  }
+
+  function getLayout() {
+    return {
+      version: 1,
+      order: columnOrder.slice(),
+      hidden: allColumns.filter((column) => hiddenColumns.has(column.key)).map((column) => column.key),
+      widths: Object.fromEntries(columnWidths),
+    };
+  }
+
+  function setLayout(layout = {}) {
+    const knownKeys = new Set(allColumns.map((column) => column.key));
+    const order = [];
+    for (const key of Array.isArray(layout.order) ? layout.order : []) {
+      if (knownKeys.has(key) && !order.includes(key)) order.push(key);
+    }
+    for (const column of allColumns) if (!order.includes(column.key)) order.push(column.key);
+    const hidden = new Set((Array.isArray(layout.hidden) ? layout.hidden : [])
+      .filter((key) => knownKeys.has(key)));
+    const widths = new Map(allColumns.map((column) => [column.key, column.width || 1]));
+    for (const column of allColumns) {
+      const width = Number(layout.widths?.[column.key]);
+      if (Number.isFinite(width) && width >= 0.5 && width <= 4) widths.set(column.key, width);
+    }
+    let nextColumns = order.filter((key) => !hidden.has(key)).map((key) => {
+      const column = allColumns.find((candidate) => candidate.key === key);
+      return {
+        ...column,
+        width: widths.get(key),
+      };
+    });
+    if (!nextColumns.length && allColumns.length) {
+      hidden.delete(allColumns[0].key);
+      nextColumns = [{ ...allColumns[0], width: widths.get(allColumns[0].key) }];
+    }
+    columnOrder = order;
+    hiddenColumns = hidden;
+    columnWidths = widths;
+    activeColumns = nextColumns;
+    buildHeaderCells();
+    for (const node of rowNodes.values()) node.remove();
+    rowNodes.clear();
+    render();
   }
   headerGroup.append(header);
 
@@ -150,53 +373,80 @@ const rowNodes = new Map();
 
 function buildRow(index) {
   const row = state.rows[index];
+  const key = keyOf(row, index);
   const isActive = index === state.activeIndex;
+  const isSelected = selectedRows.has(key);
   const rowEl = h("div", {
-    class: `virtual-table-row${isActive ? " is-active" : ""}`,
+    class: `virtual-table-row${isActive ? " is-active" : ""}${isSelected ? " is-selected" : ""}${row.removed ? " is-closed" : ""}`,
     role: "row",
     tabindex: "-1",
+    "aria-selected": multiSelect ? String(isSelected) : undefined,
     "aria-rowindex": String(index + 2),   // +1 for the header row, 1-based
     "data-index": String(index),
     "data-row-key": rowKey ? String(rowKey(row)) : undefined,
     style:
       `display: flex; height: ${rowHeight}px; border-bottom: 1px solid var(--border); ` +
       "align-items: center; cursor: pointer; min-width: var(--virtual-table-min-width, 0);",
-    onclick: () => {
+    onclick: (event) => {
+      if (event.target.closest("button, a, input, select, textarea, [contenteditable=true]")) return;
       setActive(index);
+      if (multiSelect && event.shiftKey) {
+        selectRange(index, event.ctrlKey || event.metaKey);
+        return;
+      }
+      if (multiSelect && (event.ctrlKey || event.metaKey)) {
+        toggleSelection(index);
+        return;
+      }
+      selectSingle(index);
       if (onRowClick) onRowClick(row, index);
     },
+    oncontextmenu: onRowContextMenu ? (event) => {
+      event.preventDefault();
+      setActive(index);
+      if (multiSelect && !selectedRows.has(key)) selectSingle(index);
+      onRowContextMenu(row, event, rowEl);
+    } : null,
     onkeydown: (event) => {
+      if (event.target !== rowEl) return;
+      if (onRowContextMenu && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+        event.preventDefault();
+        event.stopPropagation();
+        onRowContextMenu(row, event, rowEl);
+        return;
+      }
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
+        event.stopPropagation();
         setActive(index);
-        if (onRowClick) onRowClick(row, index);
+        if (multiSelect && event.key === " ") toggleSelection(index);
+        else {
+          selectSingle(index);
+          if (onRowClick) onRowClick(row, index);
+        }
       }
     },
   });
-  columns.forEach((col, colIndex) => {
+  activeColumns.forEach((col, colIndex) => {
     const cellStyle = col.actions
       ? `flex: ${col.width || 0.8}; padding: 0 0.375rem; display: flex; gap: 0.25rem; align-items: center; justify-content: flex-end;`
       : `flex: ${col.width || 1}; padding: 0 0.75rem; font-size: 0.875rem; ` +
         "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;";
-    if (col.renderCell && col.renderCell(row) !== undefined) {
-      const cell = h("div", {
-        role: "gridcell",
-        "aria-colindex": String(colIndex + 1),
-        style: cellStyle,
-      });
-      cell.append(col.renderCell(row, rowEl));
-      rowEl.append(cell);
-    } else {
-    const val = row[col.key] != null ? String(row[col.key]) : "-";
-    rowEl.append(
-      h("div", {
-        role: "gridcell",
-        "aria-colindex": String(colIndex + 1),
-        title: val,
-        style: cellStyle,
-      }, val),
-    );
-    }
+    const raw = row[col.key];
+    const value = col.renderCell ? col.renderCell(row, rowEl)
+      : format[col.key] ? format[col.key](row)
+      : raw != null && raw !== "" ? String(raw) : "—";
+    const title = col.title ? col.title(row)
+      : typeof raw === "number" || typeof raw === "bigint" ||
+        (typeof raw === "string" && /^\d+$/.test(raw)) ? String(raw)
+      : typeof value === "string" ? value : "";
+    rowEl.append(h("div", {
+      role: "gridcell",
+      "aria-colindex": String(colIndex + 1),
+      "data-column-key": col.key,
+      title,
+      style: cellStyle + ` text-align: ${col.align || "left"}; min-width: ${col.actions ? "6rem" : "0"};`,
+    }, value));
   });
   return rowEl;
 }
@@ -207,7 +457,8 @@ function buildRow(index) {
 
   // Keep the active row inside the rendered window so the DOM node exists.
   function ensureRendered(index) {
-    const viewportH = wrapper.clientHeight || height;
+    const headerHeight = header.getBoundingClientRect().height;
+    const viewportH = (wrapper.clientHeight || height) - headerHeight;
     if (index * rowHeight < wrapper.scrollTop) {
       wrapper.scrollTop = index * rowHeight;
     } else if ((index + 1) * rowHeight > wrapper.scrollTop + viewportH) {
@@ -226,22 +477,32 @@ function buildRow(index) {
     state.activeIndex = Math.max(0, Math.min(index, total - 1));
     ensureRendered(state.activeIndex);
     const node = rowNodes.get(state.activeIndex);
-    if (node) node.focus();
+    if (node) node.focus({ preventScroll: true });
   }
 
-  function updateRows(newRows, nextEmptyMessage = undefined) {
+  function updateRows(newRows, nextEmptyMessage = undefined, options = {}) {
+    if (destroyed) return;
     const previousRows = state.rows;
-    const activeKey = rowKey && state.activeIndex >= 0
+    const activeKey = rowKey && state.activeIndex >= 0 && previousRows[state.activeIndex]
       ? rowKey(previousRows[state.activeIndex])
       : null;
     const keepFocus = document.activeElement;
-    const focusedIndex = keepFocus && keepFocus.dataset && keepFocus.dataset.index !== undefined
-      ? Number(keepFocus.dataset.index)
-      : -1;
+    const focusedRow = wrapper.contains(keepFocus) ? keepFocus?.closest(".virtual-table-row") : null;
+    const focusedIndex = focusedRow ? Number(focusedRow.dataset.index) : -1;
+    const controls = focusedRow ? [...focusedRow.querySelectorAll("button, a, input, select")] : [];
+    const focusedControl = controls.indexOf(keepFocus);
     const focusedKey = rowKey && focusedIndex >= 0 && previousRows[focusedIndex]
       ? rowKey(previousRows[focusedIndex])
       : null;
     state.rows = Array.isArray(newRows) ? newRows : [];
+    state.knownRows = Array.isArray(options.allRows) ? options.allRows : state.rows;
+    if (multiSelect && rowKey) {
+      for (const row of state.knownRows) {
+        const key = keyOf(row, 0);
+        if (selectedRows.has(key)) selectedRows.set(key, row);
+      }
+      notifySelection();
+    }
     if (typeof nextEmptyMessage === "string") emptyMessage = nextEmptyMessage;
     wrapper.setAttribute("aria-rowcount", String(state.rows.length + 1));
     let restoreTo = focusedIndex >= 0 ? String(focusedIndex) : null;
@@ -263,7 +524,7 @@ function buildRow(index) {
     rowNodes.clear();
     render();
     if (currentScrollTop > 0) {
-      requestAnimationFrame(() => {
+      scheduleRender(() => {
         wrapper.scrollTop = currentScrollTop;
         render();
         if (onScroll) onScroll(wrapper.scrollTop);
@@ -272,11 +533,16 @@ function buildRow(index) {
     if (restoreTo !== null) {
       const focusIndex = Number(restoreTo);
       if (!rowNodes.has(focusIndex)) ensureRendered(focusIndex);
-      if (rowNodes.has(focusIndex)) rowNodes.get(focusIndex).focus();
+      if (rowNodes.has(focusIndex)) {
+        const row = rowNodes.get(focusIndex);
+        const control = focusedControl >= 0 ? row.querySelectorAll("button, a, input, select")[focusedControl] : null;
+        (control || row).focus({ preventScroll: true });
+      }
     }
   }
 
   function render() {
+    if (destroyed) return;
     const total = rowCount();
     const scrollTop = wrapper.scrollTop;
     const viewportH = wrapper.clientHeight || height;
@@ -309,23 +575,33 @@ function buildRow(index) {
         rowNodes.delete(index);
       }
     }
-    for (let i = startIdx; i < endIdx; i++) {
-      if (rowNodes.has(i)) {
-        const existing = rowNodes.get(i);
-        existing.classList.toggle("is-active", i === state.activeIndex);
-        continue;
+    let anchor = spacerBottom;
+    for (let index = endIdx - 1; index >= startIdx; index--) {
+      let node = rowNodes.get(index);
+      if (!node) {
+        node = buildRow(index);
+        rowNodes.set(index, node);
       }
-      const node = buildRow(i);
-      inner.insertBefore(node, spacerBottom);
-      rowNodes.set(i, node);
+      node.classList.toggle("is-active", index === state.activeIndex);
+      node.classList.toggle("is-selected", selectedRows.has(keyOf(state.rows[index], index)));
+      if (multiSelect) node.setAttribute("aria-selected",
+        String(selectedRows.has(keyOf(state.rows[index], index))));
+      if (node.nextSibling !== anchor) inner.insertBefore(node, anchor);
+      anchor = node;
     }
   }
 
   // Keyboard navigation on the scroller. Without this a virtualised grid is
   // mouse-only, and the scrollbar cannot be reached either.
   wrapper.addEventListener("keydown", (event) => {
+    if (event.target.closest("button, a, input, select, textarea, [role=columnheader]")) return;
     const total = rowCount();
     if (total === 0) return;
+    if (multiSelect && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      selectAll();
+      return;
+    }
     const pageRows = Math.max(1, Math.floor((wrapper.clientHeight || height) / rowHeight) - 1);
     const current = state.activeIndex < 0 ? -1 : state.activeIndex;
     let next = null;
@@ -342,10 +618,19 @@ function buildRow(index) {
     setActive(next);
   });
 
+  function scheduleRender(callback = render) {
+    if (destroyed) return;
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      frame = null;
+      if (!destroyed) callback();
+    });
+  }
+
   wrapper.addEventListener("scroll", () => {
     currentScrollTop = wrapper.scrollTop;
     if (onScroll) onScroll(wrapper.scrollTop);
-    requestAnimationFrame(render);
+    scheduleRender();
   });
 
   const onResize = () => {
@@ -356,9 +641,41 @@ function buildRow(index) {
 
   // Consumers that re-render the page throw the old table away; drop the
   // listener so a long session does not accumulate one per page view.
-  const destroy = () => window.removeEventListener("resize", onResize);
+  const resizeObserver = new ResizeObserver(() => scheduleRender());
+  resizeObserver.observe(wrapper);
+  const densityObserver = new MutationObserver(() => {
+    const nextHeight = document.body.classList.contains("density-compact")
+      ? Math.max(24, baseRowHeight - 6) : baseRowHeight;
+    if (rowHeight === nextHeight) return;
+    const topRow = wrapper.scrollTop / rowHeight;
+    rowHeight = nextHeight;
+    for (const node of rowNodes.values()) node.remove();
+    rowNodes.clear();
+    emptyRow.style.height = `${rowHeight}px`;
+    wrapper.scrollTop = topRow * rowHeight;
+    currentScrollTop = wrapper.scrollTop;
+    render();
+  });
+  densityObserver.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+  const destroy = () => {
+    destroyed = true;
+    if (frame !== null) cancelAnimationFrame(frame);
+    if (restoreFrame !== null) cancelAnimationFrame(restoreFrame);
+    resizeObserver.disconnect();
+    densityObserver.disconnect();
+    window.removeEventListener("resize", onResize);
+  };
 
   render();
 
-  return { updateRows, updateSort, render, wrapper, destroy, setActive };
+  return {
+    updateRows, updateSort, render, wrapper, destroy, setActive,
+    clearSelection, selectAll,
+    getViewState, restoreViewState,
+    getLayout, setLayout,
+    getColumns: () => allColumns.map((column) => ({ ...column })),
+    getVisibleColumns: () => activeColumns.map((column) => ({ ...column })),
+    getSelectedRows: selectedRowsInViewOrder,
+    getCurrentSelectedRows: selectedCurrentRows,
+  };
 }
