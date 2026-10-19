@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "Commands.h"         // PidKillVerdict: the kill-guard's verdict
+#include "ConnectionsList.h"
 #include "ConnectionStore.h"   // the column/mask the probe reports
 #include "MainWindowInternal.h"   // kProbeBufChars and the shared constants
 #include "ProcessInfo.h"       // ProcessRecord, EnumerateProcesses
@@ -59,9 +60,34 @@ namespace wintcp {
 // site reads.
 using namespace mw;
 
-const wchar_t* MainWindow::UiProbe(const wchar_t* op, const wchar_t* arg) const {
-    static wchar_t buf[kProbeBufChars];
+const wchar_t* MainWindow::UiProbeAction(const wchar_t* op) {
     if (op == nullptr) return nullptr;
+    if (::wcscmp(op, L"copyFallbackSheet") == 0) {
+        const ClipboardApi unavailableClipboard;
+        CopyTextToClipboard(L"198.51.100.7\r\n2001:db8::7%12",
+                            L"Copied test values.", &unavailableClipboard);
+        return L"1";
+    }
+    if (::wcscmp(op, L"syncColumnOrder") != 0) return nullptr;
+    const std::uint32_t originalVisibleMask = cols_.VisibleMask();
+    cols_.SetVisibleMask(originalVisibleMask | (std::uint32_t{1} << COL_TLS));
+    const bool changed = cols_.SyncOrderFromHeader(list_.Handle());
+    cols_.SetVisibleMask(originalVisibleMask);
+    if (changed) RebuildColumns();
+    return changed ? L"1" : L"0";
+}
+
+const wchar_t* MainWindow::UiProbe(const wchar_t* op, const wchar_t* arg) const {
+    static thread_local wchar_t buf[kProbeBufChars];
+    if (op == nullptr) return nullptr;
+
+    if (::wcscmp(op, L"filterStatus") == 0) {
+        if (hwndStatus_ == nullptr) return L"";
+        buf[0] = L'\0';
+        ::SendMessageW(hwndStatus_, SB_GETTEXTW, 1,
+                       reinterpret_cast<LPARAM>(buf));
+        return buf;
+    }
 
     if (::wcscmp(op, L"frozen") == 0) {
         return frozen_ ? L"1" : L"0";
@@ -142,9 +168,7 @@ const wchar_t* MainWindow::UiProbe(const wchar_t* op, const wchar_t* arg) const 
         return buf;
     }
     if (::wcscmp(op, L"treeSelection") == 0) {
-        // The list selection the tree's current node mapped to, as the pid
-        // the node carries. Empty when nothing is selected or the tree has
-        // no caret item - the harness asserts the mapping exists at all.
+        // PID for the process snapshot indexed by the caret item's data.
         if (hwndTree_ == nullptr) return L"";
         const HTREEITEM item = reinterpret_cast<HTREEITEM>(
             ::SendMessageW(hwndTree_, TVM_GETNEXTITEM, TVGN_CARET, 0));
@@ -155,9 +179,51 @@ const wchar_t* MainWindow::UiProbe(const wchar_t* op, const wchar_t* arg) const 
         if (::SendMessageW(hwndTree_, TVM_GETITEMW, 0,
                            reinterpret_cast<LPARAM>(&it)) == 0)
             return L"";
-::swprintf_s(buf, L"%lu", static_cast<unsigned long>(it.lParam));
-return buf;
-}
+        const ProcessTreeNode* process =
+            ProcessTreeNodeForItemData(treeProcs_, it.lParam);
+        if (process == nullptr) return L"";
+        ::swprintf_s(buf, L"%lu", static_cast<unsigned long>(process->pid));
+        return buf;
+    }
+    if (::wcscmp(op, L"treeSelectionLifetime") == 0) {
+        if (hwndTree_ == nullptr) return L"";
+        const HTREEITEM item = reinterpret_cast<HTREEITEM>(
+            ::SendMessageW(hwndTree_, TVM_GETNEXTITEM, TVGN_CARET, 0));
+        if (item == nullptr) return L"";
+        TVITEMW value = {};
+        value.mask = TVIF_PARAM | TVIF_HANDLE;
+        value.hItem = item;
+        if (::SendMessageW(hwndTree_, TVM_GETITEMW, 0,
+                           reinterpret_cast<LPARAM>(&value)) == 0)
+            return L"";
+        const ProcessTreeNode* process =
+            ProcessTreeNodeForItemData(treeProcs_, value.lParam);
+        if (process == nullptr) return L"";
+        ::swprintf_s(buf, L"%lu:%lu:%d",
+                     static_cast<unsigned long>(process->processCreate.dwLowDateTime),
+                     static_cast<unsigned long>(process->processCreate.dwHighDateTime),
+                     process->processCreateKnown ? 1 : 0);
+        return buf;
+    }
+    if (::wcscmp(op, L"treeNodePid") == 0 && arg != nullptr) {
+        const LPARAM itemData = static_cast<LPARAM>(::_wtoi64(arg));
+        const ProcessTreeNode* process =
+            ProcessTreeNodeForItemData(treeProcs_, itemData);
+        if (process == nullptr) return L"";
+        ::swprintf_s(buf, L"%lu", static_cast<unsigned long>(process->pid));
+        return buf;
+    }
+    if (::wcscmp(op, L"treeNodeLifetime") == 0 && arg != nullptr) {
+        const LPARAM itemData = static_cast<LPARAM>(::_wtoi64(arg));
+        const ProcessTreeNode* process =
+            ProcessTreeNodeForItemData(treeProcs_, itemData);
+        if (process == nullptr) return L"";
+        ::swprintf_s(buf, L"%lu:%lu:%d",
+                     static_cast<unsigned long>(process->processCreate.dwLowDateTime),
+                     static_cast<unsigned long>(process->processCreate.dwHighDateTime),
+                     process->processCreateKnown ? 1 : 0);
+        return buf;
+    }
 
 // What the MODEL says for one row and one COLUMN ID. Uses the COLUMN ID,
 // not the visible index, because the caller is naming a column.
@@ -269,6 +335,34 @@ if (::wcscmp(op, L"listSelectionCount") == 0) {
         ::swprintf_s(buf, L"%d", store_.SortColumn());
         return buf;
     }
+    if (::wcscmp(op, L"actionProcessPid") == 0) {
+        const std::optional<Connection> row = SelectedProcessCopy();
+        if (!row.has_value()) return L"";
+        ::swprintf_s(buf, L"%lu", static_cast<unsigned long>(row->identity.pid));
+        return buf;
+    }
+    if (::wcscmp(op, L"copyProcessPid") == 0) {
+        const std::wstring copied = ConnectionsList::CopyFieldText(
+            SelectedCopyRows(), ConnectionsList::CopyField::ProcessId);
+        ::wcsncpy_s(buf, copied.c_str(), _TRUNCATE);
+        return buf;
+    }
+    if (::wcscmp(op, L"infoTip") == 0 && arg != nullptr) {
+        static wchar_t text[kProbeBufChars];
+        text[0] = L'\0';
+        NMLVGETINFOTIPW info = {};
+        info.hdr.hwndFrom = list_.Handle();
+        info.hdr.idFrom = IDC_LIST;
+        info.hdr.code = LVN_GETINFOTIPW;
+        info.iItem = 0;
+        info.iSubItem = ::_wtoi(arg);
+        info.pszText = text;
+        info.cchTextMax = kProbeBufChars;
+        ::SendMessageW(hwnd_, WM_NOTIFY, IDC_LIST,
+                       reinterpret_cast<LPARAM>(&info));
+        if (info.pszText != text) return L"buffer replaced";
+        return text;
+    }
     if (::wcscmp(op, L"sortAscending") == 0) {
         return store_.SortAscending() ? L"1" : L"0";
     }
@@ -364,6 +458,11 @@ if (::wcscmp(op, L"listSelectionCount") == 0) {
         ::wcsncpy_s(buf, lastRefreshTime_.c_str(), _TRUNCATE);
         return buf;
     }
+    if (::wcscmp(op, L"completedRefreshCount") == 0) {
+        ::swprintf_s(buf, L"%llu", static_cast<unsigned long long>(
+            completedRefreshCount_.load(std::memory_order_relaxed)));
+        return buf;
+    }
     if (::wcscmp(op, L"pendingRefresh") == 0) {
         // The worker's callback inserts here BEFORE posting WM_APP_REFRESH_RESULT
         // and OnRefreshResult erases from it. A non-zero count with an empty
@@ -401,6 +500,13 @@ if (::wcscmp(op, L"listSelectionCount") == 0) {
         // opens it, so an empty answer means "Details was never opened".
         if (detailsPid_ == 0) return L"";
         ::swprintf_s(buf, L"%lu", static_cast<unsigned long>(detailsPid_));
+        return buf;
+    }
+    if (::wcscmp(op, L"detailsLifetime") == 0) {
+        ::swprintf_s(buf, L"%lu:%lu:%d",
+                     static_cast<unsigned long>(detailsProcessCreate_.dwLowDateTime),
+                     static_cast<unsigned long>(detailsProcessCreate_.dwHighDateTime),
+                     detailsProcessCreateKnown_ ? 1 : 0);
         return buf;
     }
     if (::wcscmp(op, L"chartsVisible") == 0) {
