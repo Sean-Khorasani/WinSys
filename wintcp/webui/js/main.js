@@ -11,7 +11,7 @@ import { renderOverview } from "./pages/overview.js";
 import { renderPerformance } from "./pages/performance.js";
 import { renderProcesses } from "./pages/processes.js";
 import { renderNetwork } from "./pages/network.js";
-import { renderMap } from "./pages/map.js";
+import { renderMap, updateMap } from "./pages/map.js";
 import { renderAutomations } from "./pages/automations.js";
 import { renderBlocks } from "./pages/blocks.js";
 import { renderSystem } from "./pages/system.js";
@@ -282,6 +282,10 @@ function disposePage() {
     page._procDestroy();
     page._procDestroy = null;
   }
+  if (typeof page._mapDestroy === "function") {
+    page._mapDestroy();
+    page._mapDestroy = null;
+  }
 }
 
 for (const [path, renderFn] of Object.entries(pageMap)) {
@@ -546,6 +550,12 @@ function rerenderCurrentPage() {
   // Skip the first poll's empty state: it would clear and rebuild every chart
   // before there is anything to draw.
   if (!store.get().lastUpdate) return;
+
+  if (path === "/map") {
+    Promise.resolve(updateMap(page, store))
+      .catch((err) => console.error("page update failed", err));
+    return;
+  }
 
   const signature = pageSignature(path, store.get());
   if (signature !== null && pageSignatures.get(path) === signature) return;
