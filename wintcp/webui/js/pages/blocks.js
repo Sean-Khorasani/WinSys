@@ -62,9 +62,9 @@ export async function renderBlocks(page, store) {
         h("span", { class: "rule-label" }, rule.label || "(no label)"),
         h("a", {
           class: "btn btn-ghost btn-sm",
-          href: "/legacy#automations",
-          title: "Remove or edit this rule in the Automations page",
-        }, "Edit"),
+          href: "#/automations",
+          title: "Manage and remove rules on the Automations page",
+        }, "Manage"),
       ),
     );
   }
