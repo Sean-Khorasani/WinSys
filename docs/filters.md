@@ -9,7 +9,7 @@ One grammar is used everywhere WinTCP selects rows:
 | GUI filter box | `chrome port:443` |
 | `list --filter`, `export --filter` | `wintcp.exe list --filter "state:listen exclude:127."` |
 | `ps --filter` | Filters the **connection rows first**, then aggregates the processes that own them. `ps --filter "proto:udp"` answers "which processes have UDP sockets", not "which processes match the text udp". |
-| `--select` on `kill`, `close`, `block`, `capture`, `details` | `wintcp.exe close --select "pid:5168 remote:107.155.105.90"` |
+| `--select` on `kill`, `close`, `block`, `capture`, `details` | `wintcp.exe close --select "pid:5168 remote:203.0.113.90"` |
 
 A `--select` selector must resolve to **exactly one live row**; see [Selectors](#selectors).
 
@@ -47,7 +47,7 @@ A `--select` selector must resolve to **exactly one live row**; see [Selectors](
 | `path:` | Executable path | `path:c:\bin`, `path:"program files"`. |
 | `host:` | Reverse-DNS name | CLI: needs `--dns`. |
 | `proto:` | Protocol or family | `proto:udp`, `proto:tcp`, `proto:ipv6`. |
-| `country:` | GeoIP country code | `country:de`. CLI: needs `--db` - where to get a database and what `--db` does is in [GeoIP database](../README.md#geoip-database). |
+| `country:` | GeoIP country code | `country:de`. CLI: requires `--db`; see [GeoIP database](../README.md#geoip-database). |
 | `asn:` | Autonomous system | **Both kinds of value.** A bare number is a threshold on the AS number, so `asn:15169` and `asn:15169-20000` work and accept ranges. Anything else is a case-insensitive substring of the cell `AS15169 Google LLC`, so `asn:google` finds the operator by name. A bare `asn:` means "has an autonomous system"; a row with no ASN never matches, whatever the value. CLI: needs `--asn-db`, which is a GeoLite2-ASN file and is separate from `--db`. |
 | `tls:` | TLS summary | **Matches nothing** - the column is never populated, so no row can ever match. See [the column reference](cli.md#column-reference). |
 | `note:` | A bookmark's note | `note:vendor`. A bare `note:` means "has a note". |
