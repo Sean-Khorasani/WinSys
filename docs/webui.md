@@ -46,6 +46,22 @@ Use the sidebar to navigate. **Ctrl+K** opens the command palette. **Pause** hol
 
 ## Inspect and copy connections
 
+Select a connection or process row to open its inspector. On wide screens it
+docks beside the table; on narrow screens it opens as an in-bounds modal. Use
+the width control to resize the docked inspector; its width is remembered
+separately for Network and Processes in this browser profile. Inspectors group
+identity, endpoint, activity, and related-rule information, and provide a copy
+button beside values that can be copied precisely. Action buttons lead to the
+existing reviewed workflows rather than applying destructive changes directly.
+
+**Hold values** keeps the captured details visible while samples continue.
+The inspector reports newer values or a vanished item without silently
+switching to a different connection or process. **Resume live** follows only
+the same stable connection identity or process instance; if that identity is
+unavailable, live following is disabled. Closing an inspector with **Escape**
+or its close button restores focus to the row that opened it. Leaving the page
+closes its inspector.
+
 Right-click a row in **Network**, press **Shift+F10** on a focused row, or use its
 **Connection actions** button. The menu can copy a remote IP without its port,
 the resolved hostname, an endpoint including its port, either port, the PID,
