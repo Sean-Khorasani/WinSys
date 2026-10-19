@@ -102,7 +102,7 @@ This is deliberate. A silently swallowed switch gives a script a **successful** 
 
 ```text
 --filter F    filter grammar: chrome, port:443, pid:1000-2000, state:estab,
-              process:svchost, proto:udp, remote:1.2.3.4, note:"vendor api",
+              process:svchost, proto:udp, remote:192.0.2.4, note:"vendor api",
               cpu:12, rx:2.0. Space = AND, exclude:X negates, "quoted value"
               keeps a space inside one value. Run `wintcp help filters` for the
               full keyword list, and `wintcp help columns` for every column.
@@ -181,21 +181,14 @@ Some columns and filters need the switch that supplies their data. When it is mi
 | `integrity` column, `integrity:` filter | *(nothing)* | `OpenProcessToken` with `TOKEN_QUERY`, read on the handle the resolver already opens. Reads `—` for a process this shell cannot open. |
 
 ## Column reference
-There are exactly **32 columns and that is a deliberate freeze**, not a limit that
-ran into. The persisted visible-set mask is one bit per column in a `UINT32`, and
-it is already full; `architecture.md` records why widening it is an eight-part
-change with a schema migration, and why a feature that needs a 33rd column should
-reuse an existing one rather than grow the mask as a side effect. A
-`static_assert` in `ColumnsWin.h` fails the build at 33 so that a new column
-cannot arrive unnoticed.
+The CLI exposes a fixed set of **32 columns**. Use an existing column when you
+need another way to describe a connection; the set is shared with the GUI and
+saved view formats.
 
-**ASN reuses `country`, and now does so.** This is the case that decision was
-recorded for. The `country` cell renders the two together - `US \xB7 AS15169
-Google LLC` - with the separator appearing only when both are known, so a
-country-only row reads exactly as it always did. The AS number is placed *before*
-the organisation name so that a narrow window, which ellipsises on overflow, can
-never hide which network a row belongs to; `details` and the machine-readable
-formats always carry both in full. There is no 33rd column and no 33rd bit.
+The `country` column can also include ASN information, for example
+`US · AS15169 Google LLC`. Country and ASN lookups use separate databases; a
+row may contain either result or both. Details and machine-readable output keep
+the country and ASN fields separate.
 
 Use `--columns default`, `minimal` or `full` (alias `wide`), or a comma-separated list. The same names are used by `list`, `export` and `--sort`. Run `wintcp.exe help list` for the authoritative list for your build.
 
@@ -209,13 +202,13 @@ Use `--columns default`, `minimal` or `full` (alias `wide`), or a comma-separate
 | Present but never populated | `tls` - still accepted by the CLI, but no longer offered by the window; see the note below |
 | Enrichment | `host` (needs `--dns`), `country` (needs `--db`, and shows the ASN too when `--asn-db` is given), `pinned` (bookmark color; header *bookmarks*), `note` (the bookmark's text; header *Note*) |
 
-> **The `tls` column is inert, and the window no longer offers it.** It is still accepted by the CLI (asking for a reserved column explicitly is a deliberate act), it sorts, it is rendered and it is unit-tested, but **nothing populates it**, so every row shows `-`. Measured on one Windows 11 host: **302 of 302** rows carried the unknown marker, including every established connection, while `host` and `traffic` over those same rows filled normally - so the rest of the pipeline works and `tls` alone has no producer. There is no cheap way to fill it: Windows has no socket-level TLS ioctl, and `TCP_INFO_v0` - the only socket info a separate process can read - carries no TLS fields at all. The two real sources both need elevation, and the capture-based one can only ever cover the connections you choose to capture, so it cannot fill a column across every row.
+> The `tls` column is reserved and has no live data source, so its value is unknown. Windows does not expose TLS details through the socket information used for the connection list. TLS metadata may be available when capturing a handshake; see [Reading the TLS handshake](#reading-the-tls-handshake).
 >
-> The window's **View > Columns** menu therefore does not list it, and no preset or profile can show it. The `ColumnId`, its mask bit and its stored width are all kept - renumbering would shift every column after it and silently change what a saved layout means - so the way back if a socket-level source ever appears is one entry in the display-order list, with no data migration. The reasoning is recorded at the top of `Columns.h`, and a gate check pins the offer set so this cannot reverse silently.
+> The desktop window does not offer this column. It remains accepted by the CLI for compatibility, but displays `-` until a data source is available.
 
 Value conventions:
 
-- **Unknown is `-`, never `0`.** "We could not measure this" and "this is zero" are different answers, and unknown values sort last, in both directions. **The Country cell is the exception**, and an empty one for the same reason: it is a joined value rather than a measured one, so an unenriched row shows an empty cell and not a dash. It also honours the sort rule - `unknownLast` is set for it - which was not true until 2026-10-08, when an empty cell rose to the **top** under `--desc` because an empty string compares below every real value and the direction multiplier had nothing to counteract it.
+- **Unknown is `-`, never `0`.** "We could not measure this" and "this is zero" are different answers, and unknown values sort last in both directions. The Country cell is a joined value, so an unenriched row is empty; empty country values also sort last.
 - `rtt` and `minrtt` are in **milliseconds**. The kernel reports microseconds; the conversion happens once, at the read boundary. A sub-millisecond RTT prints `<1`, never `0`.
 - `retrans` prints `0 B` for a connection that has genuinely never retransmitted. That is a real answer, not a missing one.
 - `ppid` prints `<pid> <parent name>`, or just the number when the parent was not in the snapshot. An **unknown** parent prints `—`: the snapshot not covering a parent is not the same as a process having no parent, and the two are not collapsed.
@@ -224,7 +217,7 @@ Value conventions:
 - `integrity` prints the mandatory level as a word, never the RID: `12288` answers no question a reader has, `High` answers "could this have written to HKLM".
 - `cwnd` is the kernel's congestion window in bytes. Each `rtt`/`minrtt`/`cwnd`/`retrans` field is gated on its own known flag, so a socket with TCP timestamps off still shows its real congestion window.
 - UDP rows print `*:*` for the remote and `—` for the state, as `netstat` does. `proto` prints `UDPv4` / `UDPv6` rather than a generic `UDP`.
-- Link-local IPv6 addresses carry their scope ID (`fe80::1%12`); IPv4-mapped IPv6 (`::ffff:1.2.3.4`) is normalised to `1.2.3.4`.
+- Link-local IPv6 addresses carry their scope ID (`fe80::1%12`); IPv4-mapped IPv6 (`::ffff:192.0.2.4`) is normalised to `192.0.2.4`.
 
 ### Grouped views
 
@@ -386,7 +379,8 @@ The two questions are also reported separately, because they mean different thin
 
 A standard user on a machine that has both tools gets the *elevation* reason, not the tool reason. That asymmetry is the point: the token is a permission the user may be able to change, the tool is not.
 
-`etl2pcap.exe` is the one that is easy to miss. When it is absent the failure used to arrive late - the capture ran, waited out its window, wrote the ETL, and was then discarded at the conversion step. It is now reported up front, as a capability row, before any capture is attempted.
+If `etl2pcap.exe` is unavailable, WinTCP reports the missing capture component
+as a capability before starting a capture.
 
 #### Reading the TLS handshake
 
@@ -403,7 +397,7 @@ What appears depends entirely on where the capture window fell relative to the h
 
 - **A direction that captured no bytes is named, not omitted.** "One side of this connection has no bytes" is otherwise indistinguishable from "we only looked one way".
 - **`not TLS` is only claimed when neither direction begins with a record *and* neither holds a run of them.** One direction holding a contiguous run is positive evidence of TLS, and it outranks the other direction's silence.
-- The test for a run is **contiguity, not a header count**. Random bytes resemble a record header often enough to matter: on one real 131,072-byte mid-stream TLS capture, 13 offsets passed a header test and 5 of those were coincidence. A real record layer declares each record's length, so consecutive headers land at exact offsets, and coincidence cannot fake that.
+- TLS record validation checks **contiguity, not just a header match**. Random bytes can resemble a record header; valid record lengths must place subsequent headers at the expected offsets.
 - **To see an SNI, capture a connection that is being established** - not one that has been up. `pktmon` records only what happens after the filter is armed, so on an established connection the handshake is simply not there to find.
 - Directions are named by endpoint, for the reason given under [Reading the stream](#reading-the-stream).
 
@@ -411,7 +405,7 @@ What appears depends entirely on where the capture window fell relative to the h
 
 | Switch | Behavior |
 |---|---|
-| `--text` | Print the reassembled stream to stdout as a hex dump, one block per direction. This is the command-line equivalent of the GUI's *Follow TCP stream*, which was removed on 2026-10-05. |
+| `--text` | Print the reassembled stream to stdout as a hex dump, with one block per direction. |
 | `--dir both\|first\|second` | Which direction `--text` prints. `first`/`a` and `second`/`b` are accepted, as are the `server`/`client` spellings. Default `both`. An unrecognised value is refused, never treated as `both`. |
 | `--out FILE` | Save the capture as **pcapng**, byte-for-byte, so it opens in Wireshark or `tshark` with no conversion by the reader. An existing file there is refused (exit `2`) unless `--force`. |
 | `--bin` | Instead of the hex dump, write the **raw reassembled stream bytes** to `--out FILE`, with no hex or pcapng framing. Requires `--out`; mutually exclusive with `--text`. With `--dir both` (the default) the two directions are concatenated, `first` writes only to-server bytes, `second` only to-client. An existing file there is refused (exit `2`) unless `--force`. |
@@ -456,11 +450,11 @@ path, pinned.
 
 ### `bookmark`
 
-A bookmark pins a **remote address + remote port**. That pair survives a reconnect, and the port is part of the match: a mark on `1.2.3.4:9999` does not light up a live `1.2.3.4:443` row.
+A bookmark pins a **remote address + remote port**. That pair survives a reconnect, and the port is part of the match: a mark on `192.0.2.4:9999` does not light up a live `192.0.2.4:443` row.
 
 | Subcommand | Behavior |
 |---|---|
-| `add --address A --port P [--tag 0..4] [--note TEXT]` | Creates a bookmark. Addresses normalise (`::ffff:1.2.3.4` becomes `1.2.3.4`); placeholders such as `0.0.0.0` are refused. Adding to an existing endpoint does **not** overwrite a note you wrote. |
+| `add --address A --port P [--tag 0..4] [--note TEXT]` | Creates a bookmark. Addresses normalise (`::ffff:192.0.2.4` becomes `192.0.2.4`); placeholders such as `0.0.0.0` are refused. Adding to an existing endpoint does **not** overwrite a note you wrote. |
 | `note --address A --port P --note TEXT` | Replaces the note. |
 | `colour --address A --port P --tag N` | Changes only the color. Tags: `0` none, `1` red, `2` amber, `3` blue, `4` green. |
 | `list [--format json]` | The store. JSON keys: `address`, `port`, `tag`, `note`. |
@@ -625,7 +619,7 @@ trafficEnabled = no
 **The ini supplies defaults only.** It is read *before* the registry, so an
 existing user's saved settings always win. That ordering is deliberate: the
 alternative — the ini overriding the registry — means a setting changed in the
-GUI silently reverts on the next launch, which is the bug that gets reported as
+GUI silently reverts on the next launch, which can otherwise be mistaken for
 "the app forgets my settings". With this ordering the ini is exactly "what to
 use on a machine I have never run this on".
 
@@ -684,8 +678,8 @@ then each later interval appends `appear`/`disappear`/`state` lines and — with
 `--traffic` — `traffic` lines carrying `rx`/`tx` byte deltas:
 
 ```json
-{"t":"2026-10-14T09:15:02Z","kind":"appear","pid":14232,"process":"teams.exe","proto":"TCPv4","local":"10.0.0.5:51000","remote":"13.107.4.40:443","lport":51000,"rport":443,"state":"ESTABLISHED"}
-{"t":"2026-10-14T09:15:07Z","kind":"traffic","pid":14232,"process":"teams.exe","proto":"TCPv4","local":"10.0.0.5:51000","remote":"13.107.4.40:443","lport":51000,"rport":443,"state":"ESTABLISHED","rx":4096,"tx":2048}
+{"t":"2025-01-15T09:15:02Z","kind":"appear","pid":14232,"process":"Browser.exe","proto":"TCPv4","local":"192.0.2.5:51000","remote":"203.0.113.40:443","lport":51000,"rport":443,"state":"ESTABLISHED"}
+{"t":"2025-01-15T09:15:07Z","kind":"traffic","pid":14232,"process":"Browser.exe","proto":"TCPv4","local":"192.0.2.5:51000","remote":"203.0.113.40:443","lport":51000,"rport":443,"state":"ESTABLISHED","rx":4096,"tx":2048}
 ```
 
 Monitors are not a scheduler and do not do anything to the connection — they
@@ -728,7 +722,3 @@ all five are still shown — even after you hide one of the five manually.
 Both sub-commands want `--db FILE`: without it they exit `2`, and a file that will not load exits `1` carrying the parser's reason. Neither ever fetches anything — obtaining a database, and keeping it current, is covered in [GeoIP database](../README.md#geoip-database).
 
 Record layouts of 24, 28 and 32 bits are all supported (28 is what essentially every real MaxMind database uses). Any other declared size is refused by name, including `record_size = 4`, which is the 32-bit layout stated in bytes rather than bits.
-
-## Migrating from earlier builds
-
-There is no legacy flag mode. The bare flags `-c`, `--json`, `--selftest` and `--bench` are gone, and a leading `-` or `/` argument is now a usage error. The data verbs replace the data flags one for one (`--json` becomes `--format json`). The self-test and benchmark live in the separate test binary `wintcp-dev.exe`.
