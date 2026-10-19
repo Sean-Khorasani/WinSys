@@ -50,4 +50,23 @@ export const api = {
       },
     }),
   raw: (path, options = {}) => request(path, { ...options, raw: true }),
+  upload: (path, blob, filename) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    return fetch(path, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "X-WinTCP-Token": TOKEN,
+        "X-Filename": filename,
+        "Content-Type": "application/octet-stream",
+      },
+      body: blob,
+    }).then((res) => {
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      return res.json();
+    }).finally(() => clearTimeout(timeout));
+  },
 };
