@@ -104,6 +104,8 @@ The visible set, order, widths and sort persist between runs. The persisted colu
 
 Above the list are a **Protocol** combo (All, TCPv4, TCPv6, UDP and so on), a **TCP-state** combo, and a **filter box** with a 250 ms debounce. Both combos carry visible captions (`Protocol:`, `State:`) like the `Filter:` box, and every control-bar control has a tooltip naming what it does. The filter box accepts the field expressions described in the [filter language](filters.md): substring matches, field-restricted matches, ranges, numeric thresholds on live stats, side restrictions, quoting, `exclude:` and implicit AND.
 
+An unmatched quote appears as `Filter syntax: unclosed quote` in the status bar. The GUI keeps the query as a literal search until its quote is corrected; it does not silently clear the filter or show all rows.
+
 The window enforces a minimum size (about 760x420 at 100%) so the right-anchored combos never run off a narrow window, and the search box stretches between the `Filter:` caption and the `Protocol:` caption to use whatever width is left.
 
 Click a column header to sort, and click again to reverse. Sorting by State uses the natural TCP-state order rather than alphabetical order. Sort column, direction, column widths and visibility, and the filter text all persist.
@@ -120,7 +122,19 @@ Presets saved with `wintcp.exe preset save` appear in the **File** menu, so a vi
 
 Why all processes and not the connected ones: the tree is read as a hierarchy, and a hierarchy built from the connection table is missing most of itself. Browser.exe runs 32 renderers and almost none of them holds a socket at any instant, so a connection-only tree showed a browser as one node and nothing else — that was the reported defect. The process list comes from one Toolhelp snapshot and the connection counts from the table, merged in one place.
 
-Every row command works on the tree unchanged. The node you are on is mapped to that process's first row, so **Copy**, **Export**, **Block**, **Close**, **End process** and **Open file location** act on the process you can see. **Details** (double-click, or `Enter`) opens the process dossier even when the process owns **no** connection — which is most of the tree, since a renderer between requests has no socket: the window describes the process itself rather than doing nothing. The status bar shows `N processes, M connections` where the selection count would be. Roots are expanded one level on open, and the first node is selected, so the arrow keys work the moment the mode is switched on.
+**Details**, **End process**, and **Open file location** resolve the selected
+process independently of the connection list. **Details** (double-click or
+`Enter`) also works for a process with no connections. Selecting such a process
+clears any previous endpoint selection. **Close** and **Block this connection**
+require an individual row in the connection table; they do not choose an
+arbitrary endpoint from a process tree or grouped view. The status bar shows
+`N processes, M connections`, counting live connections. Roots are expanded one
+level on open, and the first root is selected for keyboard navigation.
+
+Tree nodes retain the process creation time captured with the view. A reused PID
+does not transfer an action to a replacement process. **End process** is unavailable
+when the captured lifetime is unknown; refresh the view to try again. Windows may
+prevent lifetime or image-path queries for protected processes.
 
 ## Actions
 
@@ -129,9 +143,10 @@ Right-click a row (or double-click to open Details):
 | Command | Behavior |
 |---|---|
 | **Details** | Opens the [Details window](#details-window). Double-clicking a row does the same. |
-| **Copy selected / Copy all** | Copies rows to the clipboard. |
+| **Copy selected / Copy all** | Copies the visible columns as TSV. Cells containing tabs, quotes, or line breaks are escaped so copied rows retain their columns. UDP rows without a remote peer show `*` for the remote port, and retained rows are marked `Closed (retained history)` in the copied state column. |
+| **Copy value** | Copies distinct known values from the selected rows: remote IP, resolved hostname, local/remote endpoint or port, process ID, and executable path. IPv6 scope IDs are retained; pending DNS, unknown values, and the `System` path sentinel are omitted. The status bar reports copy success or failure; if Windows cannot write to the clipboard, a selectable text sheet opens so you can use `Ctrl+A`, then `Ctrl+C`. |
 | **End process** | Ends the owning process after verifying that the PID still refers to the same process (PID-reuse check). Bound to `Ctrl`+`Del` — a stray keypress must not end a process. The scriptable path is `wintcp.exe kill <pid> --yes`. |
-| **Close connection** | Deletes the TCP entry with `SetTcpEntry(DELETE_TCB)`. IPv4 only, and requires administrator rights. Bound to `Del`. |
+| **Close connection** | Revalidates the captured process lifetime and the live IPv4 tuple, state, and owner PID before calling `SetTcpEntry(DELETE_TCB)`. Established IPv4 TCP only; UDP, listeners, and IPv6 are refused. Windows' teardown API accepts a tuple but not a PID, so a narrow race remains if that exact tuple is reused between the final check and the call. Requires administrator rights. Bound to `Del`. |
 | **Open file location** | Opens Explorer on the row's executable, pre-selected — the same `explorer.exe /select,` call the Details window's button makes, so the two cannot disagree. |
 | **Block this connection** | Adds a firewall block rule. IPv4 only, and requires administrator rights. |
 
@@ -174,7 +189,7 @@ The thread list does not show a running/waiting state because Windows does not p
 
 Fields are laid out as a **two-column table**, one row per field:
 
-- The label sits in a fixed-width left column, so every value in the window starts at the same horizontal position regardless of how long its label is. The two are joined by a **dotted leader**, which is what makes a row read as a pair rather than as a caption with a value that happens to share a line.
+- Muted labels sit in a fixed-width left column, with values aligned in the right column. Long values wrap as the window is resized.
 - A **hairline rule** separates the label column from the value column.
 - Values are drawn in a fixed-pitch face only where alignment matters (byte counts, timestamps, addresses); everything else uses the UI font, including the labels.
 - Every section header carries an **accent bar** down its left edge, so the sections read as separated at a glance without hovering anything. Hovering a header highlights it, which is the cue that it can be collapsed.
@@ -316,7 +331,8 @@ The list is a **report view** with sortable **Rule**, **Remote** and **Status** 
 
 - **Delete** removes the selected rule, after a confirmation naming it.
 - **Enable** / **Disable** leave the rule installed and flip its Enabled state. Disabling is not deleting: a disabled rule keeps its identity, its name and its description, so "turn this off for an hour and put it back" is one step instead of delete-then-re-derive. A rule recreated from scratch is a rule whose name may change and whose description is gone.
-- **Remove all** removes every WinTCP rule — the same function the tray menu's **Remove all WinTCP blocks** runs, reached here without the trip through the tray — after a confirmation, with the safe button defaulted.
+- **Remove all** removes every WinTCP rule — both rule names tracked for each blocked peer — after confirming the current rule count, with the safe button defaulted. If removal partially fails, the list is re-read and the main table refreshes when any rule changed.
+- **Open Firewall** launches Windows Firewall with Advanced Security (`wf.msc`) for inspecting policy-managed rules and settings. If Windows cannot open the console, the dialog explains how to launch it manually.
 - **Close** dismisses the dialog. Dismissing it (or `Esc`) without changing anything reports "looked and left", so the main table does not refresh for nothing.
 
 **The list is re-read from the firewall after every action**, and the selection follows the rule it was on when that rule still exists. A manager that closed after each action would take three operations per change, and a manager that kept its own copy of the list would show a state the firewall was not in. If the re-read fails, the list is left as it was rather than emptied — an empty list on a failed read would read as "you have no rules", which is the one answer this dialog must never give wrongly.
