@@ -40,6 +40,8 @@
 #include <windows.h>
 #include <commctrl.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -55,6 +57,8 @@
 #include "Settings.h"
 #include "Columns.h"
 #include "TypeToJump.h"   // the product's label predicate, not a copy
+#include "TextSheetDialog.h"
+#include "Utils.h"
 #include "resource.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -65,6 +69,105 @@ namespace {
 int g_pass = 0;
 int g_fail = 0;
 int g_skip = 0;
+
+struct CopySheetProbe {
+    HWND dialog = nullptr;
+    HWND edit = nullptr;
+    std::atomic<bool> dialogSeen{false};
+    std::atomic<bool> editSeen{false};
+    std::atomic<bool> selected{false};
+    std::atomic<bool> focused{false};
+    std::atomic<bool> copyRequested{false};
+};
+
+CopySheetProbe* g_copySheetProbe = nullptr;
+constexpr wchar_t kCopySheetTitle[] =
+    L"Clipboard unavailable — select text and press Ctrl+C";
+constexpr wchar_t kCopySheetPayload[] =
+    L"198.51.100.7\r\n2001:db8::7%12";
+
+LRESULT CALLBACK CopySheetEditSubclass(HWND hwnd, UINT message,
+                                       WPARAM wParam, LPARAM lParam,
+                                       UINT_PTR subclassId, DWORD_PTR data) {
+    auto* probe = reinterpret_cast<CopySheetProbe*>(data);
+    if (message == WM_COPY) {
+        if (probe != nullptr)
+            probe->copyRequested.store(true, std::memory_order_relaxed);
+        return 0;
+    }
+    if (message == WM_NCDESTROY)
+        ::RemoveWindowSubclass(hwnd, CopySheetEditSubclass, subclassId);
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK CopySheetCreateHook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HCBT_CREATEWND && g_copySheetProbe != nullptr) {
+        const HWND created = reinterpret_cast<HWND>(wParam);
+        auto* info = reinterpret_cast<CBT_CREATEWNDW*>(lParam);
+        const wchar_t* title =
+            (info != nullptr && info->lpcs != nullptr)
+                ? info->lpcs->lpszName : nullptr;
+        if (title != nullptr && ::wcscmp(title, kCopySheetTitle) == 0) {
+            g_copySheetProbe->dialog = created;
+            g_copySheetProbe->dialogSeen.store(true,
+                                               std::memory_order_relaxed);
+        } else if (g_copySheetProbe->dialog != nullptr &&
+                   info != nullptr && info->lpcs != nullptr &&
+                   info->lpcs->hwndParent == g_copySheetProbe->dialog &&
+                   reinterpret_cast<UINT_PTR>(info->lpcs->hMenu) ==
+                       static_cast<UINT_PTR>(kTextSheetEditId)) {
+            g_copySheetProbe->edit = created;
+            g_copySheetProbe->editSeen.store(true,
+                                             std::memory_order_relaxed);
+            ::SetWindowSubclass(created, CopySheetEditSubclass, 1,
+                                reinterpret_cast<DWORD_PTR>(g_copySheetProbe));
+        }
+    }
+    return ::CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+void DriveCopySheet(CopySheetProbe* probe) {
+    const ULONGLONG deadline = ::GetTickCount64() + 5000;
+    while (!probe->dialogSeen.load(std::memory_order_relaxed) &&
+           ::GetTickCount64() < deadline)
+        ::Sleep(10);
+    const HWND dialog = probe->dialog;
+    if (dialog == nullptr) return;
+
+    const ULONGLONG editDeadline = ::GetTickCount64() + 2000;
+    while (!probe->editSeen.load(std::memory_order_relaxed) &&
+           ::GetTickCount64() < editDeadline)
+        ::Sleep(10);
+    const HWND edit = probe->edit;
+    if (edit != nullptr) {
+        wchar_t text[128] = {};
+        DWORD start = 0;
+        DWORD end = 0;
+        const ULONGLONG readyDeadline = ::GetTickCount64() + 1000;
+        bool ready = false;
+        while (!ready && ::GetTickCount64() < readyDeadline) {
+            ::GetWindowTextW(edit, text, static_cast<int>(_countof(text)));
+            ::SendMessageW(edit, EM_GETSEL,
+                           reinterpret_cast<WPARAM>(&start),
+                           reinterpret_cast<LPARAM>(&end));
+            ready = ::wcscmp(text, kCopySheetPayload) == 0 && start == 0 &&
+                    end == ::wcslen(kCopySheetPayload);
+            if (!ready) ::Sleep(10);
+        }
+        probe->selected.store(ready, std::memory_order_relaxed);
+        GUITHREADINFO gui = {};
+        gui.cbSize = sizeof(gui);
+        const DWORD ownerThread = ::GetWindowThreadProcessId(dialog, nullptr);
+        if (::GetGUIThreadInfo(ownerThread, &gui) != FALSE)
+            probe->focused.store(gui.hwndFocus == edit,
+                                 std::memory_order_relaxed);
+        if (ready) ::SendMessageW(edit, WM_COPY, 0, 0);
+        ::SendMessageW(dialog, WM_COMMAND, IDOK, 0);
+        return;
+    }
+
+    ::SendMessageW(dialog, WM_COMMAND, IDOK, 0);
+}
 
 // stdout is often a pipe (golden.bat redirects it), where printf is
 // block-buffered: without this the harness appears to produce NOTHING and a
@@ -247,6 +350,67 @@ void Watchdog() {
     ::ExitProcess(3);
 }
 
+void CALLBACK CloseContextMenuForTest(HWND hwnd, UINT, UINT_PTR timer, DWORD) {
+    ::KillTimer(hwnd, timer);
+    ::EndMenu();
+}
+
+BOOL CALLBACK FindWinTcpDialog(HWND window, LPARAM value) {
+    auto* found = reinterpret_cast<HWND*>(value);
+    if (!::IsWindowVisible(window)) return TRUE;
+    wchar_t className[32] = {0};
+    wchar_t title[128] = {0};
+    if (::GetClassNameW(window, className, static_cast<int>(_countof(className))) == 0 ||
+        ::wcscmp(className, L"#32770") != 0 ||
+        ::GetWindowTextW(window, title, static_cast<int>(_countof(title))) == 0 ||
+        ::wcsncmp(title, L"WinTCP", 6) != 0) {
+        return TRUE;
+    }
+    *found = window;
+    return FALSE;
+}
+
+struct ConnectionPromptProbe {
+    HWND dialog = nullptr;
+};
+
+BOOL CALLBACK FindConnectionPrompt(HWND window, LPARAM value) {
+    auto* probe = reinterpret_cast<ConnectionPromptProbe*>(value);
+    if (probe == nullptr) return TRUE;
+    wchar_t className[32] = {0};
+    wchar_t title[128] = {0};
+    if (::GetClassNameW(window, className, static_cast<int>(_countof(className))) == 0 ||
+        ::wcscmp(className, L"#32770") != 0 ||
+        ::GetWindowTextW(window, title, static_cast<int>(_countof(title))) == 0 ||
+        (::wcscmp(title, L"WinTCP - Close connection") != 0 &&
+         ::wcscmp(title, L"WinTCP - Block connection") != 0)) {
+        return TRUE;
+    }
+    probe->dialog = window;
+    return FALSE;
+}
+
+bool InvokeTreeConnectionActionWithoutPrompt(HWND hwnd, WORD commandId) {
+    std::atomic<bool> commandReturned{false};
+    ConnectionPromptProbe probe;
+    const DWORD uiThreadId = ::GetCurrentThreadId();
+    std::thread modalDriver([&]() {
+        const ULONGLONG deadline = ::GetTickCount64() + 5000;
+        while (!commandReturned.load(std::memory_order_relaxed) &&
+               probe.dialog == nullptr && ::GetTickCount64() < deadline) {
+            ::EnumThreadWindows(uiThreadId, FindConnectionPrompt,
+                                reinterpret_cast<LPARAM>(&probe));
+            if (probe.dialog == nullptr) ::Sleep(10);
+        }
+        if (probe.dialog != nullptr)
+            ::PostMessageW(probe.dialog, WM_COMMAND, IDNO, 0);
+    });
+    Cmd(hwnd, commandId);
+    commandReturned.store(true, std::memory_order_relaxed);
+    modalDriver.join();
+    return probe.dialog == nullptr;
+}
+
 }  // namespace
 
 std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
@@ -258,12 +422,13 @@ std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
     Say("covered headless by --selftest and the CLI verbs, not here.\n");
     std::thread(Watchdog).detach();
 
+
     // ---- the list must actually populate ---------------------------------
     // Nothing else in this file is meaningful until the window shows real
     // data, so this comes first and everything else assumes it passed.
     Mark("populate");
     const bool populated = WaitForRows(w, 1);
-    const long rows = Num(w, "rowCount");
+    long rows = Num(w, "rowCount");
     std::snprintf(line, sizeof(line),
                   "SMOKE the list populates from a real snapshot (%ld rows)",
                   rows);
@@ -277,6 +442,76 @@ std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
              Of(w, "lastError").c_str(), Of(w, "lastRefreshTime").c_str());
         Say("\n=== UI HARNESS ABORTED: empty list ====\n");
         return L"UI HARNESS ABORTED (empty list)";
+    }
+
+    const bool automaticBefore = Is(w, "autoRefresh", 1);
+    if (automaticBefore) Cmd(hwnd, IDM_VIEW_AUTOREFRESH);
+    for (int attempt = 0; attempt < 100 && Is(w, "pendingRefresh", 1); ++attempt)
+        Pump(50);
+    rows = Num(w, "rowCount");
+
+    Mark("filter-syntax-feedback");
+    {
+        HWND edit = ::GetDlgItem(hwnd, IDC_EDIT_SEARCH);
+        const int previousLength = edit == nullptr ? 0 :
+                                   ::GetWindowTextLengthW(edit);
+        std::wstring previousFilter(static_cast<size_t>(previousLength) + 1,
+                                    L'\0');
+        if (edit != nullptr) {
+            ::GetWindowTextW(edit, &previousFilter[0],
+                             static_cast<int>(previousFilter.size()));
+            previousFilter.resize(static_cast<size_t>(previousLength));
+            ::SetWindowTextW(edit, L"note:\"vendor api");
+            Pump(400);
+        }
+        const std::string syntaxStatus = Of(w, "filterStatus");
+        Check(edit != nullptr &&
+                  syntaxStatus.find("Filter syntax: unclosed quote") !=
+                      std::string::npos,
+              "SMOKE filter: unmatched quote reports a visible syntax hint",
+              syntaxStatus.c_str());
+        if (edit != nullptr) {
+            ::SetWindowTextW(edit, previousFilter.c_str());
+            Pump(400);
+        }
+        Check(Of(w, "filterStatus").find("Filter syntax:") ==
+                  std::string::npos,
+              "SMOKE filter: correcting the query clears the syntax hint",
+              Of(w, "filterStatus").c_str());
+    }
+
+    Mark("copy-fallback-sheet");
+    {
+        CopySheetProbe probe;
+        HHOOK hook = ::SetWindowsHookExW(WH_CBT, CopySheetCreateHook, nullptr,
+                                         ::GetCurrentThreadId());
+        Check(hook != nullptr,
+              "SMOKE copy fallback: install a dialog-creation observer");
+        if (hook == nullptr) {
+            Skip("SMOKE copy fallback modal interaction",
+                 "Windows refused a thread-local CBT hook");
+        } else {
+            g_copySheetProbe = &probe;
+            std::thread driver(DriveCopySheet, &probe);
+            const bool triggered =
+                W(w.UiProbeAction(L"copyFallbackSheet")) == "1";
+            driver.join();
+            ::UnhookWindowsHookEx(hook);
+            g_copySheetProbe = nullptr;
+            Check(triggered &&
+                      probe.dialogSeen.load(std::memory_order_relaxed),
+                  "SMOKE copy fallback: actual copy failure opens its text sheet");
+            Check(probe.editSeen.load(std::memory_order_relaxed) &&
+                      probe.selected.load(std::memory_order_relaxed),
+                  "SMOKE copy fallback: the copied text starts selected",
+                  probe.editSeen.load(std::memory_order_relaxed)
+                      ? "the text edit did not select the complete payload"
+                      : "the text edit was not created");
+            Check(probe.focused.load(std::memory_order_relaxed),
+                  "SMOKE copy fallback: keyboard focus starts in the selected text");
+            Check(probe.copyRequested.load(std::memory_order_relaxed),
+                  "SMOKE copy fallback: the selected text accepts a copy command");
+        }
     }
 
     // ---- every row exposes an accessible name|description ----------------
@@ -383,15 +618,261 @@ std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
               "the selected row is not the tree node's process - the "
               "mapping points at something else");
 
+        HWND tree = ::GetDlgItem(hwnd, IDC_PROCESS_TREE);
+        HTREEITEM refreshTarget = nullptr;
+        std::string refreshLifetime;
+        bool rootChildTargetsVerified = false;
+        std::string rootChildTargetDetail;
+        const std::string connectedPidList =
+            "," + Of(w, "connectionPidList") + ",";
+        for (HTREEITEM root = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                 tree, TVM_GETNEXTITEM, TVGN_ROOT, 0));
+             root != nullptr;
+             root = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                 tree, TVM_GETNEXTITEM, TVGN_NEXT,
+                 reinterpret_cast<LPARAM>(root)))) {
+            const HTREEITEM child = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                tree, TVM_GETNEXTITEM, TVGN_CHILD,
+                reinterpret_cast<LPARAM>(root)));
+            if (child == nullptr) continue;
+            TVITEMW item = {};
+            item.mask = TVIF_PARAM | TVIF_HANDLE;
+            item.hItem = root;
+            if (::SendMessageW(tree, TVM_GETITEMW, 0,
+                               reinterpret_cast<LPARAM>(&item)) == 0)
+                continue;
+            const std::string itemData =
+                std::to_string(static_cast<long long>(item.lParam));
+            const std::string lifetime =
+                Of(w, "treeNodeLifetime", itemData.c_str());
+            const std::string rootPid = Of(w, "treeNodePid", itemData.c_str());
+            if (lifetime.size() >= 2 && lifetime.substr(lifetime.size() - 2) == ":1" &&
+                !rootPid.empty() &&
+                connectedPidList.find("," + rootPid + ",") != std::string::npos) {
+                TVITEMW childData = {};
+                childData.mask = TVIF_PARAM | TVIF_HANDLE;
+                childData.hItem = child;
+                const std::string childPid =
+                    ::SendMessageW(tree, TVM_GETITEMW, 0,
+                                   reinterpret_cast<LPARAM>(&childData)) != 0
+                    ? Of(w, "treeNodePid",
+                         std::to_string(static_cast<long long>(childData.lParam)).c_str())
+                    : std::string();
+                ::SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET,
+                               reinterpret_cast<LPARAM>(child));
+                const bool childIsExactTarget = !childPid.empty() &&
+                    Of(w, "actionProcessPid") == childPid && childPid != rootPid;
+                ::SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET,
+                               reinterpret_cast<LPARAM>(root));
+                const bool rootIsExactTarget = Of(w, "actionProcessPid") == rootPid;
+                if (!childIsExactTarget || !rootIsExactTarget) continue;
+                rootChildTargetsVerified = true;
+                rootChildTargetDetail = "root=" + rootPid + " child=" + childPid;
+                refreshTarget = root;
+                refreshLifetime = lifetime;
+                break;
+            }
+        }
+        Check(rootChildTargetsVerified,
+              "SMOKE tree process actions distinguish selected root and child",
+              rootChildTargetDetail.empty()
+                  ? "no root/child pair had verifiable process lifetimes"
+                  : rootChildTargetDetail);
+        if (refreshTarget == nullptr) {
+            Skip("tree mode: preserve selection and expansion through refresh",
+                 "no known-lifetime root with a child has a verifiable connection action target");
+        } else {
+            ::SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET,
+                           reinterpret_cast<LPARAM>(refreshTarget));
+            ::SendMessageW(tree, TVM_EXPAND, TVE_COLLAPSE,
+                           reinterpret_cast<LPARAM>(refreshTarget));
+            const std::string targetPid = Of(w, "treeSelection");
+            Check(Of(w, "treeSelectionLifetime") == refreshLifetime &&
+                      !targetPid.empty(),
+                  "SMOKE tree refresh target has a captured process lifetime",
+                  refreshLifetime);
+            Cmd(hwnd, IDM_FILE_REFRESH);
+            Pump(2000);
+            const std::string restoredLifetime =
+                Of(w, "treeSelectionLifetime");
+            TVITEMW restored = {};
+            restored.mask = TVIF_STATE | TVIF_HANDLE;
+            restored.stateMask = TVIS_EXPANDED;
+            restored.hItem = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                tree, TVM_GETNEXTITEM, TVGN_CARET, 0));
+            const bool collapsed = restored.hItem != nullptr &&
+                ::SendMessageW(tree, TVM_GETITEMW, 0,
+                               reinterpret_cast<LPARAM>(&restored)) != 0 &&
+                (restored.state & TVIS_EXPANDED) == 0;
+            Check(restoredLifetime == refreshLifetime,
+                  "SMOKE tree refresh preserves the exact process-lifetime selection",
+                  restoredLifetime + " expected " + refreshLifetime);
+            Check(collapsed,
+                  "SMOKE tree refresh preserves the selected root's collapsed state",
+                  collapsed ? "collapsed" : "expanded or missing");
+            Check(Of(w, "actionProcessPid") == targetPid,
+                  "SMOKE tree refresh keeps process actions on the selected process",
+                  Of(w, "actionProcessPid"));
+        }
+
+        std::vector<wchar_t> executablePath(32768, L'\0');
+        const DWORD executableLength = ::GetModuleFileNameW(
+            nullptr, executablePath.data(),
+            static_cast<DWORD>(executablePath.size()));
+        STARTUPINFOW startup = {};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION exitTarget = {};
+        const bool exitTargetStarted = executableLength > 0 &&
+            executableLength < executablePath.size() &&
+            ::CreateProcessW(executablePath.data(), nullptr, nullptr, nullptr,
+                             FALSE, CREATE_SUSPENDED, nullptr, nullptr,
+                             &startup, &exitTarget) != FALSE;
+        if (!exitTargetStarted) {
+            Skip("tree refresh clears a process that exited",
+                 WideToUtf8(FormatSystemError(::GetLastError())));
+        } else {
+            Cmd(hwnd, IDM_FILE_REFRESH);
+            Pump(1500);
+            const DWORD exitTargetPid = exitTarget.dwProcessId;
+            const std::string exitTargetPidText =
+                std::to_string(exitTargetPid);
+            std::vector<HTREEITEM> pending;
+            for (HTREEITEM root = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                     tree, TVM_GETNEXTITEM, TVGN_ROOT, 0));
+                 root != nullptr;
+                 root = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                     tree, TVM_GETNEXTITEM, TVGN_NEXT,
+                     reinterpret_cast<LPARAM>(root)))) {
+                pending.push_back(root);
+            }
+            HTREEITEM exitTargetItem = nullptr;
+            while (!pending.empty() && exitTargetItem == nullptr) {
+                const HTREEITEM item = pending.back();
+                pending.pop_back();
+                TVITEMW value = {};
+                value.mask = TVIF_PARAM | TVIF_HANDLE;
+                value.hItem = item;
+                if (::SendMessageW(tree, TVM_GETITEMW, 0,
+                                   reinterpret_cast<LPARAM>(&value)) != 0 &&
+                    Of(w, "treeNodePid",
+                       std::to_string(static_cast<long long>(value.lParam)).c_str()) ==
+                        exitTargetPidText) {
+                    exitTargetItem = item;
+                    break;
+                }
+                for (HTREEITEM child = reinterpret_cast<HTREEITEM>(
+                         ::SendMessageW(tree, TVM_GETNEXTITEM, TVGN_CHILD,
+                                        reinterpret_cast<LPARAM>(item)));
+                     child != nullptr;
+                     child = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                         tree, TVM_GETNEXTITEM, TVGN_NEXT,
+                         reinterpret_cast<LPARAM>(child)))) {
+                    pending.push_back(child);
+                }
+            }
+            Check(exitTargetItem != nullptr,
+                  "SMOKE tree includes the owned suspended process",
+                  exitTargetPidText);
+            if (exitTargetItem != nullptr) {
+                ::SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET,
+                               reinterpret_cast<LPARAM>(exitTargetItem));
+                Check(Of(w, "actionProcessPid") == exitTargetPidText,
+                      "SMOKE tree actions target the selected exit fixture",
+                      Of(w, "actionProcessPid"));
+                const std::string capturedLifetime =
+                    Of(w, "treeSelectionLifetime");
+                const std::uint64_t refreshCountBefore = static_cast<std::uint64_t>(
+                    std::strtoull(Of(w, "completedRefreshCount").c_str(), nullptr, 10));
+                std::atomic<bool> dialogDismissed{false};
+                std::atomic<bool> refreshCompletedInDialog{false};
+                const DWORD uiThread = ::GetCurrentThreadId();
+                std::thread modalDriver([&]() {
+                    const ULONGLONG deadline = ::GetTickCount64() + 9000;
+                    HWND dialog = nullptr;
+                    while (dialog == nullptr && ::GetTickCount64() < deadline) {
+                        ::EnumThreadWindows(uiThread, FindWinTcpDialog,
+                                            reinterpret_cast<LPARAM>(&dialog));
+                        if (dialog == nullptr) ::Sleep(20);
+                    }
+                    if (dialog == nullptr) return;
+                    if (::GetDlgItem(dialog, IDNO) != nullptr) {
+                        ::PostMessageW(hwnd, WM_COMMAND,
+                                       MAKEWPARAM(IDM_FILE_REFRESH, 0), 0);
+                        while (::GetTickCount64() < deadline) {
+                            const std::uint64_t completed = static_cast<std::uint64_t>(
+                                std::strtoull(Of(w, "completedRefreshCount").c_str(),
+                                              nullptr, 10));
+                            if (completed > refreshCountBefore) {
+                                refreshCompletedInDialog.store(true,
+                                    std::memory_order_relaxed);
+                                break;
+                            }
+                            ::Sleep(20);
+                        }
+                        ::PostMessageW(dialog, WM_COMMAND, IDNO, 0);
+                        dialogDismissed.store(true, std::memory_order_relaxed);
+                    } else if (::GetDlgItem(dialog, IDOK) != nullptr) {
+                        ::PostMessageW(dialog, WM_COMMAND, IDOK, 0);
+                        dialogDismissed.store(true, std::memory_order_relaxed);
+                    }
+                });
+                Cmd(hwnd, IDM_CTX_KILL_PROCESS);
+                modalDriver.join();
+                for (int attempt = 0; attempt < 100 &&
+                     Num(w, "pendingRefresh") > 0; ++attempt) Pump(50);
+                const bool modalTargetStayedExact =
+                    Of(w, "actionProcessPid") == exitTargetPidText &&
+                    Of(w, "treeSelectionLifetime") == capturedLifetime;
+                const bool fixtureRemainsAlive =
+                    ::WaitForSingleObject(exitTarget.hProcess, 0) == WAIT_TIMEOUT;
+                Check(dialogDismissed.load(std::memory_order_relaxed) &&
+                          refreshCompletedInDialog.load(std::memory_order_relaxed) &&
+                          modalTargetStayedExact && fixtureRemainsAlive,
+                      "SMOKE cancelling End process after refresh preserves its captured lifetime",
+                      "dismissed=" + std::to_string(dialogDismissed.load()) +
+                          " refreshed=" + std::to_string(refreshCompletedInDialog.load()) +
+                          " target=" + Of(w, "actionProcessPid") +
+                          " lifetime=" + Of(w, "treeSelectionLifetime"));
+            }
+            if (exitTargetItem != nullptr) {
+                const bool exitTargetStopped =
+                    ::TerminateProcess(exitTarget.hProcess, 0) != FALSE &&
+                    ::WaitForSingleObject(exitTarget.hProcess, 5000) == WAIT_OBJECT_0;
+                Check(exitTargetStopped,
+                      "SMOKE tree exit fixture terminates through its owned handle",
+                      exitTargetStopped ? "exited" :
+                          WideToUtf8(FormatSystemError(::GetLastError())));
+                if (exitTargetStopped) {
+                    Cmd(hwnd, IDM_FILE_REFRESH);
+                    Pump(2000);
+                    Check(Of(w, "treeSelection").empty() &&
+                              Of(w, "actionProcessPid").empty() &&
+                              Of(w, "listSelectionPid").empty(),
+                          "SMOKE tree refresh clears an exited action target",
+                          "tree=" + Of(w, "treeSelection") + " action=" +
+                              Of(w, "actionProcessPid") + " list=" +
+                              Of(w, "listSelectionPid"));
+                }
+            }
+            if (::WaitForSingleObject(exitTarget.hProcess, 0) != WAIT_OBJECT_0) {
+                ::TerminateProcess(exitTarget.hProcess, 1);
+                ::WaitForSingleObject(exitTarget.hProcess, 5000);
+            }
+            ::CloseHandle(exitTarget.hThread);
+            ::CloseHandle(exitTarget.hProcess);
+        }
+
         // And back again: the mode is a toggle, not a one-way trip.
         Cmd(hwnd, IDM_VIEW_PROCESSTREE);
         Pump(1500);
         Check(Is(w, "treeMode", 0),
               "SMOKE tree mode: the same command turns it back off",
               Of(w, "treeMode").c_str());
-        Check(Is(w, "rowCount", rows),
-              "SMOKE tree mode: the list's rows survive the round trip",
-              Of(w, "rowCount").c_str());
+        const long rowsAfterTree = Num(w, "rowCount");
+        Check(rowsAfterTree > 0 || rows == 0,
+              "SMOKE tree mode: the populated list returns after the round trip",
+              std::to_string(rows) + " before, " +
+                  std::to_string(rowsAfterTree) + " after");
     }
 
     // ---- Details on a process that owns NO connection --------------------
@@ -406,6 +887,18 @@ std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
         // (OnNotify's first branch), so the section has to enter the mode
         // itself rather than assume the previous section left it there. It
         // does not: that section deliberately switches the mode back off.
+        HWND listHwnd = ::GetDlgItem(hwnd, IDC_LIST);
+        LVITEMW priorSelection = {};
+        priorSelection.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+        priorSelection.state = LVIS_SELECTED | LVIS_FOCUSED;
+        const bool hadRows = Num(w, "rowCount") > 0 && listHwnd != nullptr;
+        if (hadRows)
+            ::SendMessageW(listHwnd, LVM_SETITEMSTATE, 0,
+                           reinterpret_cast<LPARAM>(&priorSelection));
+        const std::string priorConnectionPid = Of(w, "listSelectionPid");
+        Check(hadRows && !priorConnectionPid.empty(),
+              "SMOKE tree target setup starts with a selected connection",
+              priorConnectionPid);
         Cmd(hwnd, IDM_VIEW_PROCESSTREE);
         Pump(1200);
         // The set of PIDs that own a connection, so a node outside it can be
@@ -445,11 +938,12 @@ std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
                 it.hItem = cur;
                 if (::SendMessageW(treeHwnd, TVM_GETITEMW, 0,
                                    reinterpret_cast<LPARAM>(&it))) {
-                    const std::string pid =
-                        std::to_string(static_cast<long>(it.lParam));
-                    if (connected.count(pid) == 0) {
+                    const std::string itemData =
+                        std::to_string(static_cast<long long>(it.lParam));
+                    const std::string pid = Of(w, "treeNodePid", itemData.c_str());
+                    if (!pid.empty() && connected.count(pid) == 0) {
                         want = cur;
-                        wantPid = static_cast<long>(it.lParam);
+                        wantPid = std::stol(pid);
                         break;
                     }
                 }
@@ -479,6 +973,27 @@ std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
                            reinterpret_cast<LPARAM>(want));
             ::SetFocus(treeHwnd);
             Pump(50);
+            Check(Of(w, "listSelectionPid").empty(),
+                  "SMOKE selecting a connection-less process clears the old endpoint",
+                  Of(w, "listSelectionPid"));
+            Check(Of(w, "actionProcessPid") == std::to_string(wantPid),
+                  "SMOKE process actions use the selected connection-less tree node",
+                  Of(w, "actionProcessPid"));
+            Check(Of(w, "copyProcessPid") == std::to_string(wantPid) + "\r\n",
+                  "SMOKE copying a process value targets the selected connection-less node",
+                  Of(w, "copyProcessPid"));
+            const bool closeDidNotPrompt =
+                InvokeTreeConnectionActionWithoutPrompt(hwnd, IDM_CTX_CLOSE_CONNECTION);
+            const bool blockDidNotPrompt =
+                InvokeTreeConnectionActionWithoutPrompt(hwnd, IDM_BLOCK_CONNECTION);
+            Check(closeDidNotPrompt && blockDidNotPrompt &&
+                      Of(w, "listSelectionPid").empty() &&
+                      Of(w, "actionProcessPid") == std::to_string(wantPid),
+                  "SMOKE connection actions cannot retarget the prior row from a connection-less tree node",
+                  "closePrompt=" + std::to_string(!closeDidNotPrompt) +
+                      " blockPrompt=" + std::to_string(!blockDidNotPrompt) +
+                      " listPid=" + Of(w, "listSelectionPid") +
+                      " processPid=" + Of(w, "actionProcessPid"));
             // Enter means "details for this node" in the tree, the way
             // double-click does in the list.
             ::SendMessageW(treeHwnd, WM_KEYDOWN, VK_RETURN, 0);
@@ -496,6 +1011,21 @@ std::wstring RunUiHarness(MainWindow& w, HWND hwnd) {
                   std::string("the window is describing pid '" + pidAfter +
                               "', wanted " + wantPidText)
                       .c_str());
+            TVITEMW wantedItem = {};
+            wantedItem.mask = TVIF_PARAM | TVIF_HANDLE;
+            wantedItem.hItem = want;
+            std::string lifetimeMatch;
+            if (::SendMessageW(treeHwnd, TVM_GETITEMW, 0,
+                               reinterpret_cast<LPARAM>(&wantedItem))) {
+                const std::wstring itemData =
+                    std::to_wstring(wantedItem.lParam);
+                lifetimeMatch = Of(w, "treeNodeLifetime",
+                                   W(itemData.c_str()).c_str());
+            }
+            Check(!lifetimeMatch.empty() &&
+                      lifetimeMatch == Of(w, "detailsLifetime"),
+                  "SMOKE connection-less Details retains the tree snapshot lifetime",
+                  (lifetimeMatch + " vs " + Of(w, "detailsLifetime")).c_str());
         }
 
         // Leave the mode the check was driven in; the section below starts
@@ -1018,6 +1548,86 @@ if (processVisible < 0) {
 }
 Check(Num(w, "trackSelectEnabled") == 0,
       "SMOKE moving the pointer does not enable row selection");
+{
+    HWND connectionList = ::GetDlgItem(hwnd, IDC_LIST);
+    if (Num(w, "rowCount") >= 2) {
+        LVITEMW state = {};
+        state.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+        ::SendMessageW(connectionList, LVM_SETITEMSTATE, static_cast<WPARAM>(-1),
+                       reinterpret_cast<LPARAM>(&state));
+        state.state = LVIS_SELECTED | LVIS_FOCUSED;
+        ::SendMessageW(connectionList, LVM_SETITEMSTATE, 0,
+                       reinterpret_cast<LPARAM>(&state));
+        state.state = LVIS_SELECTED;
+        ::SendMessageW(connectionList, LVM_SETITEMSTATE, 1,
+                       reinterpret_cast<LPARAM>(&state));
+        ::SendMessageW(connectionList, LVM_ENSUREVISIBLE, 1, FALSE);
+        RECT rowRect = {};
+        rowRect.left = LVIR_BOUNDS;
+        const bool rectangleKnown = ::SendMessageW(connectionList, LVM_GETITEMRECT, 1,
+                                                    reinterpret_cast<LPARAM>(&rowRect)) != 0;
+        POINT point = {rowRect.left + 12, (rowRect.top + rowRect.bottom) / 2};
+        ::ClientToScreen(connectionList, &point);
+        constexpr UINT_PTR kMenuTimer = 0x7ff0;
+        if (rectangleKnown && ::SetTimer(hwnd, kMenuTimer, 50, CloseContextMenuForTest) != 0) {
+            ::SendMessageW(hwnd, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(connectionList),
+                           MAKELPARAM(point.x, point.y));
+            ::KillTimer(hwnd, kMenuTimer);
+            Check(Num(w, "listSelectionCount") == 2,
+                  "SMOKE right-click preserves an existing multirow selection",
+                  Of(w, "listSelectionCount"));
+            const LRESULT focused = ::SendMessageW(connectionList, LVM_GETNEXTITEM,
+                static_cast<WPARAM>(-1), LVNI_FOCUSED);
+            Check(focused == 1,
+                  "SMOKE right-click focuses the clicked row within the selection");
+            if (::SetTimer(hwnd, kMenuTimer, 50, CloseContextMenuForTest) != 0) {
+                state.state = 0;
+                ::SendMessageW(connectionList, LVM_SETITEMSTATE,
+                               static_cast<WPARAM>(-1),
+                               reinterpret_cast<LPARAM>(&state));
+                state.state = LVIS_SELECTED | LVIS_FOCUSED;
+                ::SendMessageW(connectionList, LVM_SETITEMSTATE, 0,
+                               reinterpret_cast<LPARAM>(&state));
+                ::SendMessageW(hwnd, WM_CONTEXTMENU,
+                               reinterpret_cast<WPARAM>(connectionList),
+                               MAKELPARAM(point.x, point.y));
+                ::KillTimer(hwnd, kMenuTimer);
+                const LRESULT outsideFocused = ::SendMessageW(
+                    connectionList, LVM_GETNEXTITEM, static_cast<WPARAM>(-1),
+                    LVNI_FOCUSED);
+                Check(Num(w, "listSelectionCount") == 1 && outsideFocused == 1,
+                      "SMOKE right-click outside the selection targets only the clicked row",
+                      "selected=" + Of(w, "listSelectionCount") +
+                          " focused=" + std::to_string(outsideFocused));
+                state.state = 0;
+                ::SendMessageW(connectionList, LVM_SETITEMSTATE,
+                               static_cast<WPARAM>(-1),
+                               reinterpret_cast<LPARAM>(&state));
+                state.state = LVIS_SELECTED | LVIS_FOCUSED;
+                ::SendMessageW(connectionList, LVM_SETITEMSTATE, 0,
+                               reinterpret_cast<LPARAM>(&state));
+                state.state = LVIS_SELECTED;
+                ::SendMessageW(connectionList, LVM_SETITEMSTATE, 1,
+                               reinterpret_cast<LPARAM>(&state));
+                if (::SetTimer(hwnd, kMenuTimer, 50, CloseContextMenuForTest) == 0) {
+                    Skip("SMOKE keyboard context menu",
+                         "the menu timer could not be created after the outside-selection check");
+                } else {
+                    ::SendMessageW(hwnd, WM_CONTEXTMENU,
+                                   reinterpret_cast<WPARAM>(connectionList),
+                                   MAKELPARAM(-1, -1));
+                    ::KillTimer(hwnd, kMenuTimer);
+                    Check(Num(w, "listSelectionCount") == 2,
+                          "SMOKE keyboard context menu preserves the selected rows");
+                }
+            }
+        } else {
+            Skip("SMOKE connection context menu", "the row rectangle or menu timer is unavailable");
+        }
+    } else {
+        Skip("SMOKE connection context selection", "fewer than two endpoints are available");
+    }
+}
 
 // What the list view ACTUALLY DREW, not what the store holds.
 //
@@ -1107,6 +1717,168 @@ Check(Num(w, "trackSelectEnabled") == 0,
 // The three probes this needs are the offer set itself, its size, and the
 // question "is this id offered".
 const std::string tlsArg = std::to_string(COL_TLS);
+{
+    bool hostInitiallyVisible = false;
+    for (long slot = 0; slot < Num(w, "offeredCount"); ++slot) {
+        if (Num(w, "visibleCol", std::to_string(slot).c_str()) == COL_HOST) {
+            hostInitiallyVisible = true;
+            break;
+        }
+    }
+    if (!hostInitiallyVisible) {
+        Cmd(hwnd, static_cast<WORD>(IDM_COL_BASE + COL_HOST));
+        Pump(40);
+    }
+    int hostSlot = -1;
+    for (long slot = 0; slot < Num(w, "offeredCount"); ++slot) {
+        if (Num(w, "visibleCol", std::to_string(slot).c_str()) == COL_HOST) {
+            hostSlot = static_cast<int>(slot);
+            break;
+        }
+    }
+    if (hostSlot >= 0) {
+        int precedingColumn = -1;
+        int originalHostSlot = hostSlot;
+        for (int slot = 0; slot < hostSlot; ++slot) {
+            const int column = static_cast<int>(Num(
+                w, "visibleCol", std::to_string(slot).c_str()));
+            if (column >= 0) {
+                precedingColumn = column;
+                break;
+            }
+        }
+        if (precedingColumn >= 0) {
+            Cmd(hwnd, static_cast<WORD>(IDM_COL_BASE + precedingColumn));
+            Pump(40);
+            hostSlot = -1;
+            for (long slot = 0; slot < Num(w, "offeredCount"); ++slot) {
+                if (Num(w, "visibleCol", std::to_string(slot).c_str()) == COL_HOST) {
+                    hostSlot = static_cast<int>(slot);
+                    break;
+                }
+            }
+        }
+        const std::string tooltip = Of(w, "infoTip", std::to_string(hostSlot).c_str());
+        Check(hostSlot >= 0 && Num(w, "visibleCol", std::to_string(hostSlot).c_str()) == COL_HOST &&
+                  (precedingColumn < 0 || hostSlot != originalHostSlot) &&
+                  tooltip.find("Host:") == 0,
+              "SMOKE hidden-column remapping keeps the hostname tooltip on the correct field",
+              "slot=" + std::to_string(hostSlot) + " preceding=" +
+                  std::to_string(precedingColumn) + " originalSlot=" +
+                  std::to_string(precedingColumn >= 0 ? originalHostSlot : -1) +
+                  " tooltip=" + tooltip);
+        if (precedingColumn >= 0) {
+            Cmd(hwnd, static_cast<WORD>(IDM_COL_BASE + precedingColumn));
+            Pump(40);
+        }
+        HWND connectionList = ::GetDlgItem(hwnd, IDC_LIST);
+        HWND header = ListView_GetHeader(connectionList);
+        const int visibleCount = header == nullptr ? 0 : Header_GetItemCount(header);
+        if (visibleCount >= 2) {
+            std::vector<int> originalColumns(static_cast<size_t>(visibleCount));
+            std::vector<int> originalWidths(static_cast<size_t>(visibleCount));
+            std::vector<int> headerOrder(static_cast<size_t>(visibleCount), -1);
+            for (int slot = 0; slot < visibleCount; ++slot) {
+                originalColumns[static_cast<size_t>(slot)] = static_cast<int>(Num(
+                    w, "visibleCol", std::to_string(slot).c_str()));
+                originalWidths[static_cast<size_t>(slot)] = static_cast<int>(Num(
+                    w, "columnWidth", std::to_string(slot).c_str()));
+            }
+            const auto hostPosition = std::find(originalColumns.begin(),
+                                                originalColumns.end(), COL_HOST);
+            const bool orderRead = ListView_GetColumnOrderArray(
+                connectionList, visibleCount, headerOrder.data()) != FALSE;
+            if (hostPosition != originalColumns.end() && orderRead) {
+                const int hostSubItem = static_cast<int>(
+                    std::distance(originalColumns.begin(), hostPosition));
+                const auto hostHeaderPosition = std::find(
+                    headerOrder.begin(), headerOrder.end(), hostSubItem);
+                const int originalHostPosition = hostHeaderPosition == headerOrder.end()
+                    ? -1
+                    : static_cast<int>(std::distance(headerOrder.begin(),
+                                                      hostHeaderPosition));
+                if (originalHostPosition < 0) {
+                    Skip("SMOKE reordered-column tooltip",
+                         "Host is absent from the native header order array");
+                } else {
+                const int targetPosition = originalHostPosition == 0 ? 1 : 0;
+                std::swap(headerOrder[static_cast<size_t>(originalHostPosition)],
+                          headerOrder[static_cast<size_t>(targetPosition)]);
+                const bool orderSet = ListView_SetColumnOrderArray(
+                    connectionList, visibleCount, headerOrder.data()) != FALSE;
+                const bool synchronized = orderSet &&
+                    W(w.UiProbeAction(L"syncColumnOrder")) == "1";
+                int reorderedHostPosition = -1;
+                bool widthsPreserved = synchronized;
+                std::vector<int> reorderedColumns(static_cast<size_t>(visibleCount));
+                for (int slot = 0; slot < visibleCount; ++slot) {
+                    const int column = static_cast<int>(Num(
+                        w, "visibleCol", std::to_string(slot).c_str()));
+                    reorderedColumns[static_cast<size_t>(slot)] = column;
+                    if (column == COL_HOST) reorderedHostPosition = slot;
+                    const auto original = std::find(originalColumns.begin(),
+                                                    originalColumns.end(), column);
+                    if (original == originalColumns.end()) {
+                        widthsPreserved = false;
+                    } else {
+                        const size_t originalSlot = static_cast<size_t>(
+                            std::distance(originalColumns.begin(), original));
+                        widthsPreserved = widthsPreserved &&
+                            Num(w, "columnWidth", std::to_string(slot).c_str()) ==
+                                originalWidths[originalSlot];
+                    }
+                }
+                const std::string reorderedTip = Of(
+                    w, "infoTip", std::to_string(reorderedHostPosition).c_str());
+                Check(synchronized && reorderedHostPosition == targetPosition &&
+                          reorderedTip.find("Host:") == 0 && widthsPreserved,
+                      "SMOKE reordered columns preserve Host tooltip mapping and widths",
+                      "sync=" + std::to_string(synchronized) + " hostSlot=" +
+                          std::to_string(reorderedHostPosition) + " expected=" +
+                          std::to_string(targetPosition) + " widths=" +
+                          std::to_string(widthsPreserved) + " tooltip=" + reorderedTip);
+
+                std::vector<int> restoreOrder(static_cast<size_t>(visibleCount), -1);
+                bool restoreMapValid = true;
+                for (int originalSlot = 0; originalSlot < visibleCount; ++originalSlot) {
+                    const auto current = std::find(
+                        reorderedColumns.begin(), reorderedColumns.end(),
+                        originalColumns[static_cast<size_t>(originalSlot)]);
+                    if (current == reorderedColumns.end()) {
+                        restoreMapValid = false;
+                        break;
+                    }
+                    restoreOrder[static_cast<size_t>(originalSlot)] =
+                        static_cast<int>(std::distance(reorderedColumns.begin(), current));
+                }
+                const bool restored = restoreMapValid &&
+                    ListView_SetColumnOrderArray(connectionList, visibleCount,
+                                                 restoreOrder.data()) != FALSE &&
+                    W(w.UiProbeAction(L"syncColumnOrder")) == "1";
+                bool originalLayoutRestored = restored;
+                for (int slot = 0; slot < visibleCount; ++slot) {
+                    originalLayoutRestored = originalLayoutRestored &&
+                        Num(w, "visibleCol", std::to_string(slot).c_str()) ==
+                            originalColumns[static_cast<size_t>(slot)];
+                }
+                Check(originalLayoutRestored,
+                      "SMOKE reordered column test restores the original layout");
+                }
+            } else {
+                Skip("SMOKE reordered-column tooltip",
+                     "Host is not visible or the native header order could not be read");
+            }
+        } else {
+            Skip("SMOKE reordered-column tooltip", "fewer than two columns are visible");
+        }
+    } else {
+        Skip("SMOKE hostname tooltip", "the hostname column is hidden");
+    }
+    if (!hostInitiallyVisible) {
+        Cmd(hwnd, static_cast<WORD>(IDM_COL_BASE + COL_HOST));
+        Pump(40);
+    }
+}
 Check(Of(w, "colOffered", tlsArg.c_str()) == "0",
       "SMOKE column machinery: the reserved column is not offered",
       ("colOffered(COL_TLS) answered " + Of(w, "colOffered", tlsArg.c_str()))
