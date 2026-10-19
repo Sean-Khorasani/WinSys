@@ -6,6 +6,9 @@
   "type": "module",
   "scripts": {
     "check": "node run-checks.mjs",
+    "workflows": "node workflow-checks.mjs",
+    "automation": "node isolated-checks.mjs automation-checks.mjs",
+    "restart": "node server-restart-checks.mjs",
     "shots": "node screenshots.mjs"
   },
   "devDependencies": {
