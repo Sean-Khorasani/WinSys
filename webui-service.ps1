@@ -5,7 +5,9 @@ param(
     [string]$Action,
 
     [ValidateSet('DEBUG', 'INFO', 'WARN', 'ERROR')]
-    [string]$LogLevel = 'DEBUG'
+    [string]$LogLevel = 'DEBUG',
+
+    [string]$Port = '45455'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,16 +49,21 @@ function Read-ServiceRecord {
     }
     $servicePid = 0
     [long]$startUtcTicks = 0
+    [int]$servicePort = 0
     if (-not $values.ContainsKey('PID') -or
         -not [int]::TryParse($values['PID'], [ref]$servicePid) -or
         $servicePid -le 0 -or
         -not $values.ContainsKey('STARTUTC') -or
         -not [long]::TryParse($values['STARTUTC'], [ref]$startUtcTicks) -or
         $startUtcTicks -le 0 -or
+        -not $values.ContainsKey('EXE') -or
         [string]::IsNullOrWhiteSpace($values['EXE'])) {
         throw "Invalid service record at $script:PidFile; refusing to guess which process to stop."
     }
-    return [pscustomobject]@{ PID = $servicePid; Exe = $values['EXE']; StartUtcTicks = $startUtcTicks }
+    if ($values.ContainsKey('PORT')) {
+        [int]::TryParse($values['PORT'], [ref]$servicePort) | Out-Null
+    }
+    return [pscustomobject]@{ PID = $servicePid; Exe = $values['EXE']; StartUtcTicks = $startUtcTicks; Port = $servicePort }
 }
 
 function Get-ProcessRecord {
@@ -88,7 +95,6 @@ function Test-ManagedProcess {
 
 function Get-WebUiExe {
     $candidates = @(
-        (Join-Path $script:Root 'build-fast\wintcp.exe'),
         (Join-Path $script:Root 'build\wintcp.exe'),
         (Join-Path $script:Root 'wintcp.exe')
     )
@@ -144,6 +150,12 @@ try {
 
     switch ($Action.ToLowerInvariant()) {
         'start' {
+            [int]$requestedPort = 0
+            if ($Port -ne '0' -and
+                (-not [int]::TryParse($Port, [ref]$requestedPort) -or
+                 $requestedPort -lt 1 -or $requestedPort -gt 65535)) {
+                throw 'Port must be 0 or an integer from 1 through 65535.'
+            }
             $exe = Get-WebUiExe
             $asset = Join-Path (Split-Path -Parent $exe) 'webui\index.html'
             if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
@@ -167,7 +179,7 @@ try {
             }
 
             $level = $script:LogLevel
-            Write-ServiceLog INFO "start requested log_level=$level"
+            Write-ServiceLog INFO "start requested log_level=$level port=$Port"
             $oldLevel = [Environment]::GetEnvironmentVariable('WINTCP_WEBUI_LOG_LEVEL', 'Process')
             $oldFile = [Environment]::GetEnvironmentVariable('WINTCP_WEBUI_LOG_FILE', 'Process')
             $oldBrowser = [Environment]::GetEnvironmentVariable('WINTCP_WEBUI_OPEN_BROWSER', 'Process')
@@ -175,7 +187,9 @@ try {
                 $env:WINTCP_WEBUI_LOG_LEVEL = $level
                 $env:WINTCP_WEBUI_LOG_FILE = $script:LogFile
                 $env:WINTCP_WEBUI_OPEN_BROWSER = '0'
-                $started = Start-Process -FilePath $exe -ArgumentList @('webui', 'serve') `
+                $argList = @('webui', 'serve')
+                if ($requestedPort -ne 0) { $argList += @('--port', $requestedPort) }
+                $started = Start-Process -FilePath $exe -ArgumentList $argList `
                     -WorkingDirectory (Split-Path -Parent $exe) -WindowStyle Hidden -PassThru
                 $null = $started.Handle
             } finally {
@@ -188,8 +202,9 @@ try {
                 PID = $started.Id
                 Exe = $exe
                 StartUtcTicks = $started.StartTime.ToUniversalTime().Ticks
+                Port = $requestedPort
             }
-            $recordText = "PID=$($record.PID)`r`nEXE=$($record.Exe)`r`nSTARTUTC=$($record.StartUtcTicks)`r`n"
+            $recordText = "PID=$($record.PID)`r`nEXE=$($record.Exe)`r`nSTARTUTC=$($record.StartUtcTicks)`r`nPORT=$($record.Port)`r`n"
             [IO.File]::WriteAllText($script:PidFile, $recordText, $script:Utf8NoBom)
 
             $readyLine = $null
