@@ -160,9 +160,9 @@ The GUI does not include a Process Properties shell command or a Follow TCP Stre
 
 ## Details window
 
-A sectioned, modeless window with the process identity, command line, creation time and service; live CPU, memory, disk and network statistics; the full list of connections owned by the same PID; and the selected connection.
+A sectioned, modeless window with process identity, command line, creation time and service; live CPU, memory, disk and network statistics; the full list of connections owned by the same PID; and the selected connection. Available information is grouped into predictable **Process**, **Connection**, **Sockets**, **Security**, and **Notes** tabs.
 
-- The header line reads `process.exe (PID n)`.
+- The header identifies the selected process as `process.exe (PID n)`; the window caption stays generic so the process name is not repeated.
 - It opens centered over the main window and scales with DPI.
 - While open it **refreshes silently on every auto-refresh**. If the tracked process exits, a note appears once.
 - **Copy** and **Open file location** buttons are provided, in a row below the body.
@@ -187,18 +187,15 @@ The thread list does not show a running/waiting state because Windows does not p
 
 ### Layout
 
-Fields are laid out as a **two-column table**, one row per field:
+Fields use a **two-column layout** for ordinary values and a full-width technical surface for the command line:
 
-- Muted labels sit in a fixed-width left column, with values aligned in the right column. Long values wrap as the window is resized.
-- A **hairline rule** separates the label column from the value column.
-- Values are drawn in a fixed-pitch face only where alignment matters (byte counts, timestamps, addresses); everything else uses the UI font, including the labels.
-- Every section header carries an **accent bar** down its left edge, so the sections read as separated at a glance without hovering anything. Hovering a header highlights it, which is the cue that it can be collapsed.
-- Sections are collapsible by clicking their header. A `[-]`/`[+]` chevron marks every collapsible header, and hovering one brightens its band. The state is per-window and is never persisted.
-- The tabs share **one strip**: every slot is measured and painted in the same bold face on a single row, so no tab sits lower or further right than the last (the "cascaded" layout stacked one row per tab). Click, hover and paint all use the strip's own geometry, and section clicks and hover agree with what is painted rather than sitting a header-height below it.
-- Long values are elided rather than wrapped; a visibly shortened value beats a silent cut. Copy the value to the clipboard to get all of it.
-- The body scrolls on a **native scrollbar** (arrows, paging, thumb-drag, Home/End all work), and the keyboard scrolls too: `Up`/`Down` step a line, `PageUp`/`PageDown` a page, `Home`/`End` jump. Tabs switch with `Ctrl`+`Tab` / `Ctrl`+`Shift`+`Tab` (or the `Left`/`Right` arrows when the window itself has focus); section headers and tabs show a hand cursor. The window's accessible name is the plain-text model, so screen readers announce the same text **Copy** puts on the clipboard.
-
-Fields are arranged in a two-column table, with one row per field. Long values are shortened visually; use **Copy** to retrieve the full value. The body scrolls independently of the window controls.
+- Muted labels and readable values align in a consistent two-column grid. Subtle horizontal separators distinguish rows without heavy alternating bands or a vertical divider.
+- The command line uses a full-width, fixed-pitch surface so long arguments wrap in the available width instead of being squeezed into the value column. Other values use the UI face unless fixed-pitch alignment is useful (for example, addresses, timestamps, and byte counts).
+- Section headings have a restrained surface and accent marker. Click a heading to collapse or expand it; the state is local to the open window.
+- Available tabs share one aligned strip with a clear active state. Their order does not depend on which data happened to appear first. The sockets tab is labeled **Sockets** and lists the selected PID's endpoints.
+- The window opens larger than its earlier compact layout, can be resized, and scales with DPI. The body scrolls independently of the pinned identity header and footer controls.
+- **Copy** retrieves the complete text model, including values that wrap on screen. Keyboard scrolling uses `Up`/`Down`, `PageUp`/`PageDown`, `Home`, and `End`; tabs switch with `Ctrl`+`Tab` / `Ctrl`+`Shift`+`Tab` or the `Left`/`Right` arrows when the window has focus.
+- The window's accessible name is the plain-text model, so screen readers announce the same information **Copy** puts on the clipboard.
 
 The same report is available from the command line with `wintcp.exe details`; see the [cookbook](cookbook.md#14-full-dossier-for-one-connection).
 
