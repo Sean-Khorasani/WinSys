@@ -43,6 +43,8 @@ function timeText(iso) {
 }
 
 export async function renderAutomations(page, store) {
+  let disposed = false;
+  const requests = new AbortController();
   clear(page);
   page.append(
     h("div", { class: "page-heading" },
@@ -67,6 +69,11 @@ export async function renderAutomations(page, store) {
     ],
   });
   layout.append(tabs.element);
+  page._autoDestroy = () => {
+    disposed = true;
+    requests.abort();
+    tabs.destroy();
+  };
 
   // Shared state for the Scripts tab workbench.
   const scriptsState = {
@@ -101,13 +108,13 @@ export async function renderAutomations(page, store) {
   let runHistoryEl;
 
   await tabs.select(tabs.active(), true);
-  page._autoDestroy = () => tabs.destroy();
+  if (disposed) return page;
 
   // ---- Templates tab ----
   async function renderTemplates() {
     let data;
     try {
-      data = await api.get("/api/templates");
+      data = await api.get("/api/templates", { signal: requests.signal });
     } catch (err) {
       return emptyState({}, "Template catalogue unavailable", err.message);
     }
@@ -164,7 +171,7 @@ export async function renderAutomations(page, store) {
   async function renderEvents() {
     let data;
     try {
-      data = await api.get("/api/audit");
+      data = await api.get("/api/audit", { signal: requests.signal });
     } catch (err) {
       return emptyState({}, "Audit trail unavailable", err.message);
     }
@@ -201,11 +208,14 @@ export async function renderAutomations(page, store) {
     // Load config + templates on first entry.
     if (!scriptsState.config) {
       try {
-        scriptsState.config = await api.get("/api/config");
+        scriptsState.config = await api.get("/api/config", { signal: requests.signal });
+        if (disposed) return h("div");
         scriptsState.templates = [];
-        const td = await api.get("/api/templates");
+        const td = await api.get("/api/templates", { signal: requests.signal });
+        if (disposed) return h("div");
         scriptsState.templates = Array.isArray(td) ? td : Array.isArray(td.templates) ? td.templates : [];
       } catch (err) {
+        if (disposed) return h("div");
         scriptsState.config = { scripts: [], version: 2 };
       }
     }
@@ -546,18 +556,12 @@ export async function renderAutomations(page, store) {
     }
     const content = scriptsState.editSource;
     const templateId = scriptsState.currentTemplateId || "CUSTOM";
-    if (!Array.isArray(scriptsState.config.scripts)) scriptsState.config.scripts = [];
-    let record = scriptsState.config.scripts.find(
+    const existing = (scriptsState.config.scripts || []).find(
       (item) => item.id === scriptsState.currentScriptId,
     );
-    if (!record && scriptsState.config.scripts.length >= MAX_SAVED_SCRIPTS) {
-      alert("Script library is full. Remove a saved script before adding another.");
-      return;
-    }
-    if (record) {
-      Object.assign(record, { templateId, name, content, updatedAt: new Date().toISOString() });
-    } else {
-      record = {
+    const record = existing ? {
+      ...existing, templateId, name, content, updatedAt: new Date().toISOString(),
+    } : {
         id: crypto.randomUUID(),
         templateId,
         name,
@@ -566,13 +570,22 @@ export async function renderAutomations(page, store) {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      scriptsState.config.scripts.push(record);
-    }
-     scriptsState.currentScriptId = record.id;
-    scriptsState.currentTemplateId = templateId;
     // Persist to server config.
     try {
-       await api.post("/api/config", scriptsState.config);
+      scriptsState.config = await api.updateConfig((current) => {
+        const scripts = [...(current.scripts || [])];
+        const index = scripts.findIndex((item) => item.id === record.id);
+        if (existing && index < 0) throw new Error("This script was removed in another session. Save it as a new script instead.");
+        if (index >= 0) scripts[index] = { ...scripts[index], templateId, name, content, updatedAt: record.updatedAt };
+        else {
+          if (scripts.length >= MAX_SAVED_SCRIPTS) throw new Error("Script library is full. Remove a saved script before adding another.");
+          scripts.push(record);
+        }
+        return { ...current, scripts };
+      });
+      scriptsState.currentScriptId = record.id;
+      scriptsState.currentTemplateId = templateId;
+      if (disposed) return;
       const v = page.querySelector("#script-validation");
       if (v) v.textContent = `Saved locally · ${templateId} · ${timeText(record.updatedAt)}.`;
       const savedList = page.querySelector("#my-script-list");
@@ -590,16 +603,17 @@ export async function renderAutomations(page, store) {
   async function removeManagedScript() {
     if (!scriptsState.currentScriptId) return;
     if (!confirm("Remove this saved script from My scripts? Built-in templates are not affected.")) return;
-    scriptsState.config.scripts = scriptsState.config.scripts.filter(
-      (item) => item.id !== scriptsState.currentScriptId,
-    );
-     scriptsState.currentScriptId = "";
-    scriptsState.currentTemplateId = "CUSTOM";
-    scriptsState.editName = "";
-    scriptsState.editSource = STARTER_SCRIPT;
-    setScriptSourceBadge(null, true);
+    const removedId = scriptsState.currentScriptId;
     try {
-       await api.post("/api/config", scriptsState.config);
+      scriptsState.config = await api.updateConfig((current) => ({
+        ...current, scripts: (current.scripts || []).filter((item) => item.id !== removedId),
+      }));
+      if (disposed) return;
+      scriptsState.currentScriptId = "";
+      scriptsState.currentTemplateId = "CUSTOM";
+      scriptsState.editName = "";
+      scriptsState.editSource = STARTER_SCRIPT;
+      setScriptSourceBadge(null, true);
       const savedList = page.querySelector("#my-script-list");
       if (savedList) {
         clear(savedList);
@@ -948,6 +962,7 @@ export async function renderAutomations(page, store) {
         .find((s) => /exit \d+/.test(s.detail || ""))?.detail || "")?.[1])
       : null;
     const summary = {
+      id: crypto.randomUUID(),
       ts: new Date().toISOString(),
       name,
       templateId: scriptsState.currentTemplateId || "CUSTOM",
@@ -956,14 +971,16 @@ export async function renderAutomations(page, store) {
       exit,
       steps: run.steps.length,
     };
-    if (!Array.isArray(scriptsState.config.scriptRuns)) scriptsState.config.scriptRuns = [];
-    scriptsState.config.scriptRuns = [summary, ...scriptsState.config.scriptRuns].slice(0, 25);
-    scriptsState.config.lastScriptRun = {
+    const lastScriptRun = {
       ...summary,
       output: (run.output || "").slice(0, 6000),
     };
     // Persist to server config so history survives a refresh.
-    api.post("/api/config", scriptsState.config).catch((err) =>
+    api.updateConfig((current) => ({
+      ...current,
+      scriptRuns: [summary, ...(current.scriptRuns || []).filter((item) => item.id !== summary.id)].slice(0, 25),
+      lastScriptRun,
+    })).then((saved) => { scriptsState.config = saved; }).catch((err) =>
       console.warn("could not persist script run", err));
   }
 
