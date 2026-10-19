@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 #include <cwctype>
 #include <unordered_map>
 
@@ -399,10 +400,10 @@ bool ParseDurationRange(const std::wstring& v, long long* lo, long long* hi) {
 // re-flashed 62 rows red then 62 green forever. An event feed that can only
 // ever say DISAPPEAR is worse than no feed.
 //
-// Adding the PID makes the key unique for the cases that actually occur, and
-// `ReplaceSnapshot` additionally matches duplicate keys in order (see
-// PrevKeyIndex), so even two rows that are genuinely indistinguishable keep a
-// stable 1:1 pairing across refreshes instead of collapsing.
+// Adding the PID and known process creation time prevents a reused PID from
+// inheriting a prior process's socket identity. `ReplaceSnapshot` additionally
+// matches duplicate keys in order (see PrevKeyIndex), so indistinguishable rows
+// keep a stable 1:1 pairing across refreshes instead of collapsing.
 //
 // The state is deliberately still NOT part of the key: a connection moving
 // ESTABLISHED -> TIME_WAIT must stay the SAME row (that is what produces the
@@ -410,7 +411,8 @@ bool ParseDurationRange(const std::wstring& v, long long* lo, long long* hi) {
 // is why the PID is matched by pairing rather than by equality on the previous
 // snapshot's value alone.
 ConnectionKey KeyOf(const Connection& c) {
-    static_assert(2 + 16 + 4 + 16 + 4 + 4 <= ConnectionKey::kMaxBytes,
+    static_assert(2 + 16 + 4 + 16 + 4 + 4 + 1 + sizeof(FILETIME) <=
+                      ConnectionKey::kMaxBytes,
                   "the widest key (IPv6) must fit ConnectionKey::bytes");
 
     ConnectionKey k;
@@ -440,6 +442,9 @@ ConnectionKey KeyOf(const Connection& c) {
     }
     push(&c.identity.remotePort, sizeof(UINT));
     push(&c.identity.pid, sizeof(DWORD));
+    k.bytes[k.len++] = c.procMeta.processCreateKnown ? 1 : 0;
+    if (c.procMeta.processCreateKnown)
+        push(&c.procMeta.processCreate, sizeof(FILETIME));
     return k;
 }
 
@@ -473,6 +478,28 @@ bool IsUnknownProcessName(const std::wstring& name) {
 
 int CmpInt(long long a, long long b) {
     return (a < b) ? -1 : ((a > b) ? 1 : 0);
+}
+
+int CompareAddress(const ConnectionIdentity& a, const ConnectionIdentity& b,
+                   bool local) {
+    const int familyCmp = CmpInt(a.family, b.family);
+    if (familyCmp != 0) return familyCmp;
+    if (a.family == AF_INET) {
+        const IN_ADDR& left = local ? a.local4 : a.remote4;
+        const IN_ADDR& right = local ? b.local4 : b.remote4;
+        const int bytesCmp = std::memcmp(&left, &right, sizeof(IN_ADDR));
+        return (bytesCmp < 0) ? -1 : ((bytesCmp > 0) ? 1 : 0);
+    }
+    if (a.family == AF_INET6) {
+        const IN6_ADDR& left = local ? a.local6 : a.remote6;
+        const IN6_ADDR& right = local ? b.local6 : b.remote6;
+        const int bytesCmp = std::memcmp(&left, &right, sizeof(IN6_ADDR));
+        if (bytesCmp != 0) return (bytesCmp < 0) ? -1 : 1;
+        const DWORD leftScope = local ? a.localScope : a.remoteScope;
+        const DWORD rightScope = local ? b.localScope : b.remoteScope;
+        return CmpInt(leftScope, rightScope);
+    }
+    return 0;
 }
 
 int CmpU64(ULONGLONG a, ULONGLONG b) {
@@ -709,8 +736,10 @@ bool ComputeBps(ULONGLONG prevBytes, ULONGLONG nowBytes,
 
 // ---- filter parsing / matching -----------------------------------
 
-bool ParseFilter(const std::wstring& text, std::vector<FilterClause>& out) {
+bool ParseFilter(const std::wstring& text, std::vector<FilterClause>& out,
+                 std::wstring* error) {
     out.clear();
+    if (error != nullptr) error->clear();
     const size_t len = text.size();
     size_t i = 0;
     while (i < len) {
@@ -732,7 +761,15 @@ bool ParseFilter(const std::wstring& text, std::vector<FilterClause>& out) {
             const wchar_t quote = text[i];
             ++i;
             while (i < len && text[i] != quote) t.push_back(text[i++]);
-            if (i < len) ++i;              // closing quote (if present)
+            if (i == len) {
+                out.clear();
+                FilterClause literal;
+                literal.text = ToLowerW(text);
+                out.push_back(std::move(literal));
+                if (error != nullptr) *error = L"Unclosed quote";
+                return false;
+            }
+            ++i;
         } else {
             // A quoted PART of a token: `note:"vendor api"` keeps its field
             // prefix and quotes only the value. Handling only the "token starts
@@ -743,7 +780,15 @@ bool ParseFilter(const std::wstring& text, std::vector<FilterClause>& out) {
                 if (text[i] == L'"' || text[i] == L'\'') {
                     const wchar_t quote = text[i++];
                     while (i < len && text[i] != quote) t.push_back(text[i++]);
-                    if (i < len) ++i;
+                    if (i == len) {
+                        out.clear();
+                        FilterClause literal;
+                        literal.text = ToLowerW(text);
+                        out.push_back(std::move(literal));
+                        if (error != nullptr) *error = L"Unclosed quote";
+                        return false;
+                    }
+                    ++i;
                     continue;
                 }
                 t.push_back(text[i++]);
@@ -2360,11 +2405,23 @@ int ConnectionStore::CompareRows(const Connection& a, const Connection& b,
                          static_cast<long long>(b.identity.protocol));
             if (cmp == 0) cmp = CmpInt(a.identity.family, b.identity.family);
             break;
-        case COL_LOCAL:   cmp = CmpStr(a.keys.lowerLocal, b.keys.lowerLocal); break;
+        case COL_LOCAL:   cmp = CompareAddress(a.identity, b.identity, true); break;
         case COL_LPORT:   cmp = CmpInt(a.identity.localPort, b.identity.localPort); break;
-        case COL_REMOTE:  cmp = CmpStr(a.keys.lowerRemote, b.keys.lowerRemote); break;
+        case COL_REMOTE:  cmp = CompareAddress(a.identity, b.identity, false); break;
         case COL_RPORT:   cmp = CmpInt(a.identity.remotePort, b.identity.remotePort); break;
-        case COL_STATE:   cmp = CmpInt(StateRank(a.identity.state), StateRank(b.identity.state)); break;
+        case COL_STATE: {
+            const int rankA = StateRank(a.identity.state);
+            const int rankB = StateRank(b.identity.state);
+            const bool knownA = a.identity.protocol == IPPROTO_TCP && rankA < 12;
+            const bool knownB = b.identity.protocol == IPPROTO_TCP && rankB < 12;
+            if (knownA != knownB) {
+                unknownLast = true;
+                cmp = knownA ? -1 : 1;
+            } else if (knownA) {
+                cmp = CmpInt(rankA, rankB);
+            }
+            break;
+        }
         case COL_PID:     cmp = CmpInt(a.identity.pid, b.identity.pid); break;
         case COL_PROCESS:
             if (IsUnknownProcessName(a.display.processName) !=
