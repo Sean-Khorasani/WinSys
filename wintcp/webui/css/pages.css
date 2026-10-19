@@ -92,6 +92,22 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 }
 .page-title { font-size: 1.5rem; font-weight: 600; }
 .page-description { font-size: 0.875rem; color: var(--muted-foreground); margin-top: 0.25rem; }
+.network-filter-control { display: grid; gap: 0.25rem; width: min(22rem, 100%); min-width: 0; }
+.network-filter-control .page-filter { width: 100%; max-width: none; }
+.network-filter-help { line-height: 1.35; }
+.network-saved-views {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+.network-saved-views .input { min-width: 0; }
+.network-saved-views [role="status"] { grid-column: 1 / -1; min-height: 1.25rem; }
+@media (max-width: 640px) {
+  .network-page-heading { flex-direction: column; }
+  .network-filter-control { width: 100%; }
+}
 
 /* ---- KPI grid ----
    Six cards, but only when there is genuinely room for six. A hard
@@ -372,6 +388,7 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 .map-accuracy { margin: 0; padding: 0 0.25rem; line-height: 1.5; }
 .maplibregl-map { font: inherit; }
 .maplibregl-ctrl-attrib { font-size: 0.625rem; }
+.maplibregl-ctrl-attrib a { text-decoration: underline; text-underline-offset: 0.12em; }
 .maplibregl-popup-content {
   color: var(--foreground);
   background: var(--popover);
@@ -998,3 +1015,10 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 @media (max-width: 640px) {
   .rule-row { grid-template-columns: 1fr; text-align: center; }
 }
+.firewall-rule-editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+.firewall-rule-editor-field { display: grid; gap: 0.35rem; min-width: 0; }
+.firewall-rule-editor-field :is(.input, .select)[aria-invalid="true"] { border-color: var(--destructive); outline-color: var(--destructive); }
+.firewall-rule-profiles { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; min-width: 0; margin: 0; padding: 0.65rem; border: 1px solid var(--border); border-radius: var(--radius); }
+.firewall-rule-profiles legend { padding: 0 0.25rem; }
+.firewall-rule-profile { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.875rem; }
+@media (max-width: 42rem) { .firewall-rule-editor-grid { grid-template-columns: minmax(0, 1fr); } }
