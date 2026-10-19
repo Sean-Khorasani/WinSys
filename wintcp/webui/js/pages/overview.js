@@ -11,11 +11,17 @@
 // history body must not ride along on every 2 s poll.
 
 import { h, clear } from "../h.js";
+import { liveConnectionSummary } from "../connections.js";
 import { fmtNum, fmtInt, fmtBytes, fmtBps, fmtPct, fmtUptime, fmtDuration } from "../format.js";
 import { card, cardHeader, cardTitle, cardDescription, cardContent, cardFooter, emptyState } from "../ui/card.js";
 import { api } from "../api.js";
 import { createTimeseries } from "../charts/timeseries.js";
 import { sparkline, barList } from "../charts/sparkline.js";
+
+function currentLiveSummary(state) {
+  if (!state.lastUpdate || !Array.isArray(state.connections)) return null;
+  return liveConnectionSummary(state.connections);
+}
 
 const UNAVAILABLE = "\u2014";
 // How far back the "delta versus 5 minutes ago" compares. Five minutes is the
@@ -193,7 +199,18 @@ export async function renderOverview(page, store) {
     charts: new Map(),
     kpiCards: new Map(),
     lastMetricsTs: null,
+    lastConnectionSnapshotTs: null,
     lastHistoryTs: null,
+    disposed: false,
+    loading: true,
+    requests: new AbortController(),
+  };
+  const view = page._overviewState;
+  page._chartDestroy = () => {
+    view.disposed = true;
+    view.requests.abort();
+    for (const info of view.charts.values()) info.entry.destroy();
+    view.charts.clear();
   };
 
   const state = store.get();
@@ -207,10 +224,12 @@ export async function renderOverview(page, store) {
   renderKpis(page, state);
   renderBreakdowns(page, state);
 
-  await Promise.all([
-    mountCharts(page),
-    mountProcesses(page),
-  ]);
+  try {
+    await Promise.all([mountCharts(page), mountProcesses(page)]);
+  } finally {
+    view.loading = false;
+  }
+  if (view.disposed) return;
 
   // Render connections by state on first mount.
   renderConnectionStates(page, state);
@@ -222,7 +241,7 @@ export async function renderOverview(page, store) {
 export async function updateOverview(page, store) {
   const state = store.get();
   const ov = page._overviewState;
-  if (!ov) {
+  if (!ov || ov.disposed || ov.loading) {
     // Not yet initialized; defer to the next poll after the first render.
     return;
   }
@@ -233,10 +252,15 @@ export async function updateOverview(page, store) {
     stamp.textContent = `Updated ${state.lastUpdate.toLocaleTimeString()}`;
   }
 
-  // 2. Update KPI card values if metrics changed.
+  // 2. Update KPI values when metrics or the connection snapshot changes.
   const metricsTs = state.metrics?._timestamp;
-  if (metricsTs !== ov.lastMetricsTs) {
+  const connectionSnapshotTs = state.lastUpdate instanceof Date
+    ? state.lastUpdate.getTime()
+    : null;
+  if (metricsTs !== ov.lastMetricsTs ||
+      connectionSnapshotTs !== ov.lastConnectionSnapshotTs) {
     ov.lastMetricsTs = metricsTs;
+    ov.lastConnectionSnapshotTs = connectionSnapshotTs;
     updateKpiValues(page, state, ov);
   }
 
@@ -246,8 +270,10 @@ export async function updateOverview(page, store) {
   // only set inside mountCharts when t.length >= 2 — so if the first fetch
   // had < 2 samples, the condition was never re-evaluated and the charts
   // never got data.
+  ov.loading = true;
   try {
-    const history = await api.get("/api/metrics/history?max=300");
+    const history = await api.get("/api/metrics/history?max=300", { signal: ov.requests.signal });
+    if (ov.disposed) return;
     if (history && history.t) {
       ov.history = history;
       const t = Array.isArray(history.t) ? history.t : [];
@@ -275,7 +301,10 @@ export async function updateOverview(page, store) {
     }
   } catch (err) {
     // Network error fetching history; keep the existing sparkData.
+  } finally {
+    ov.loading = false;
   }
+  if (ov.disposed) return;
 
   // 5. Update breakdowns if network summary or process data changed.
   updateBreakdowns(page, state, ov);
@@ -290,10 +319,9 @@ export async function updateOverview(page, store) {
 // Update KPIs by patching existing card nodes in place.
 function updateKpiValues(page, state, ov) {
   const metrics = state.metrics || {};
-  const conns = state.connections || [];
-  const summary = state.networkSummary || {};
-  const total = typeof summary.total === "number" ? summary.total : conns.length;
-  const byState = summary.byState || {};
+  const connectionSummary = currentLiveSummary(state);
+  const total = connectionSummary?.total ?? 0;
+  const byState = connectionSummary?.byState || {};
   const established = byState.ESTABLISHED ?? null;
   const listening = byState.LISTENING ?? null;
 
@@ -394,10 +422,22 @@ function updateKpiValues(page, state, ov) {
     const valueNode = card.querySelector(".kpi-value");
     if (!valueNode) return;
     valueNode.innerHTML = "";
-    valueNode.textContent = fmtInt(total);
+    if (connectionSummary) {
+      valueNode.textContent = fmtInt(total);
+    } else {
+      valueNode.append(h("span", {
+        class: "kpi-value-unavailable",
+        title: "the connection snapshot has not been sampled yet",
+      }, UNAVAILABLE));
+    }
+    card.classList.toggle("kpi-card-unknown", connectionSummary === null);
+    if (connectionSummary) card.removeAttribute("title");
+    else card.setAttribute("title", "the connection snapshot has not been sampled yet");
     const foot = card.querySelector(".kpi-foot");
     if (foot) {
-      foot.textContent = established != null
+      foot.textContent = !connectionSummary
+        ? "connection snapshot not sampled yet"
+        : established != null
         ? `${fmtInt(established)} established \u00b7 ${fmtInt(listening ?? 0)} listening`
         : "state breakdown not sampled yet";
     }
@@ -584,10 +624,12 @@ function updateProcesses(page, state) {
 function updateConnectionStates(page, state) {
   const host = page.querySelector("#overview-states");
   if (!host) return;
-  const summary = state.networkSummary;
-  if (!summary) return;
-
-  const byState = summary.byState || {};
+  const summary = currentLiveSummary(state);
+  if (!summary) {
+    clear(host);
+    return;
+  }
+  const byState = summary.byState;
   const states = [
     { key: "ESTABLISHED", label: "Established", color: "info" },
     { key: "LISTENING", label: "Listening", color: "accent" },
@@ -639,11 +681,10 @@ function renderKpis(page, state) {
   const grid = page.querySelector("#kpi-grid");
   clear(grid);
   const metrics = state.metrics || {};
-  const conns = state.connections || [];
-  const summary = state.networkSummary || {};
-  const total = typeof summary.total === "number" ? summary.total : conns.length;
+  const connectionSummary = currentLiveSummary(state);
+  const total = connectionSummary?.total ?? 0;
 
-  const byState = summary.byState || {};
+  const byState = connectionSummary?.byState || {};
   const established = byState.ESTABLISHED ?? null;
   const listening = byState.LISTENING ?? null;
 
@@ -707,13 +748,13 @@ function renderKpis(page, state) {
     {
       id: "connections",
       label: "Connections",
-      known: true,
+      known: connectionSummary !== null,
       value: total,
-      reason: "",
+      reason: connectionSummary ? "" : "the connection snapshot has not been sampled yet",
       format: (v) => fmtInt(v),
       foot: established != null
         ? `${fmtInt(established)} established \u00b7 ${fmtInt(listening ?? 0)} listening`
-        : "state breakdown not sampled yet",
+        : connectionSummary ? "state breakdown not sampled yet" : "connection snapshot not sampled yet",
       extra: { total, established, listening },
     },
     {
@@ -891,8 +932,9 @@ async function mountCharts(page) {
 
   let history;
   try {
-    history = await api.get("/api/metrics/history?max=300");
+    history = await api.get("/api/metrics/history?max=300", { signal: ov.requests.signal });
   } catch (err) {
+    if (ov.disposed) return;
     for (const host of hosts) {
       const el = page.querySelector(host.sel);
       if (el) { clear(el); el.append(emptyState({}, "No history yet", err.message)); }
@@ -900,6 +942,7 @@ async function mountCharts(page) {
     return;
   }
 
+  if (ov.disposed) return;
   ov.history = history;
   const t = Array.isArray(history.t) ? history.t : [];
   const raw = history.series || {};
@@ -945,22 +988,17 @@ async function mountCharts(page) {
         data: { t, values: host.transform(raw) },
         series: host.series,
       });
+      if (ov.disposed) { entry.destroy(); return; }
       el._chartEntry = entry;
       // Store the transform function for future updates; key by element id.
       ov.charts.set(host.sel, { entry, transform: host.transform });
     } catch (err) {
+      if (ov.disposed) return;
       clear(el);
       el.append(emptyState({}, "Chart unavailable", err.message));
     }
   }
 
-  // Teardown hook for page navigation: destroys all charts so they don't leak.
-  page._chartDestroy = () => {
-    for (const info of ov.charts.values()) {
-      try { info.entry.destroy(); } catch { /* already gone */ }
-    }
-    ov.charts.clear();
-  };
 }
 
 // Update chart data in place using setData, avoiding chart destruction.
@@ -1011,16 +1049,19 @@ function paintTrends(page, sparkData, t, raw) {
 }
 
 async function mountProcesses(page) {
+  const view = page._overviewState;
   const host = page.querySelector("#overview-procs");
   if (!host) return;
   let data;
   try {
-    data = await api.get("/api/processes?sort=cpu&limit=8");
+    data = await api.get("/api/processes?sort=cpu&limit=8", { signal: view.requests.signal });
   } catch (err) {
+    if (view.disposed) return;
     clear(host);
     host.append(emptyState({}, "Process list unavailable", err.message));
     return;
   }
+  if (view.disposed) return;
   if (data.known === false) {
     clear(host);
     host.append(emptyState({}, "Process table not sampled", data.reason || "unknown"));
