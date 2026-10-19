@@ -14,6 +14,7 @@ import { emptyState, card, cardHeader, cardTitle, cardDescription, cardContent, 
 import { badge } from "../ui/badge.js";
 import { dialog } from "../ui/dialog.js";
 import { api } from "../api.js";
+import { isTemplateReady } from "../monitors.js";
 import {
   parseScript,
   scriptCommandNodes,
@@ -89,6 +90,19 @@ export async function renderAutomations(page, store) {
   };
   page._autoState = scriptsState;
 
+  // ---- Scripts tab workbench ----
+  // Declared before the initial render to avoid a temporal dead zone:
+  // tabs.select below may call renderScripts, whose ref callbacks write to these.
+  let editorEl;
+  let nameInput;
+  let validationEl;
+  let statusEl;
+  let outputEl;
+  let runStatusEl;
+  let stepListEl;
+  let variableListEl;
+  let runHistoryEl;
+
   await tabs.select(tabs.active(), true);
   page._autoDestroy = () => tabs.destroy();
 
@@ -105,8 +119,8 @@ export async function renderAutomations(page, store) {
       return emptyState({}, "No templates", "The catalogue file did not load.");
     }
 
-    const ready = templates.filter((t) => t.ready || t.evaluator || t.implemented);
-    const pending = templates.filter((t) => !(t.ready || t.evaluator || t.implemented));
+    const ready = templates.filter((t) => isTemplateReady(t.id));
+    const pending = templates.filter((t) => !isTemplateReady(t.id));
 
     const host = h("div", { class: "tab-panel-body" });
 
@@ -135,7 +149,7 @@ export async function renderAutomations(page, store) {
   function templateCardList(templates, allTemplates, state) {
     const list = h("div", { class: "template-grid" });
     for (const t of templates) {
-      const isReady = t.ready || t.evaluator || t.implemented;
+      const isReady = isTemplateReady(t.id);
       const cardEl = h("div", { class: "template-card", tabindex: 0 },
         h("div", { class: "template-card-head" },
           h("div", {},
@@ -235,16 +249,6 @@ export async function renderAutomations(page, store) {
   }
 
   // ---- Scripts tab workbench ----
-  let editorEl;
-  let nameInput;
-  let validationEl;
-  let statusEl;
-  let outputEl;
-  let runStatusEl;
-  let stepListEl;
-  let variableListEl;
-  let runHistoryEl;
-
   async function renderScripts() {
     // Load config + templates on first entry.
     if (!scriptsState.config) {
