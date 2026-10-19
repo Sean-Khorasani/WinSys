@@ -43,13 +43,14 @@ const PAGES = [
 ];
 
 const THEMES = ["light", "dark"];
+const onlyProcessDialog = process.argv.includes("--only-process-dialog");
 const report = { when: new Date().toISOString(), url, pages: [] };
 let failures = 0;
 
 const browser = await chromium.launch({ headless: true });
 try {
   for (const theme of THEMES) {
-    for (const [hash, name] of PAGES) {
+    for (const [hash, name] of (onlyProcessDialog ? [] : PAGES)) {
       const context = await browser.newContext({
         viewport: { width: 1440, height: 900 },
         colorScheme: theme,
@@ -125,6 +126,76 @@ try {
 
       await context.close();
     }
+
+    const dialogContext = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      colorScheme: theme,
+    });
+    await dialogContext.route("**/api/connections*", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ connections: [] }),
+    }));
+    await dialogContext.route("**/api/processes*", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ known: true, total: 2, processes: [
+        { pid: 4101, ppid: 4, instanceId: "4101:1:4101", name: "fixture.exe", path: "C:\\Apps\\fixture.exe", cpuPct: 2, memWs: 1048576 },
+        { pid: 4102, ppid: 4, instanceId: "4102:1:4102", name: "fixture.exe", path: "C:\\Apps\\fixture.exe", cpuPct: 3, memWs: 2097152 },
+      ] }),
+    }));
+    const dialogPage = await dialogContext.newPage();
+    const processResponses = [];
+    const pageErrors = [];
+    dialogPage.on("response", (response) => {
+      if (new URL(response.url()).pathname === "/api/processes")
+        processResponses.push(`${response.status()} ${response.url()}`);
+    });
+    dialogPage.on("pageerror", (error) => pageErrors.push(error.message));
+    await dialogPage.goto(`${url}#/processes`, { waitUntil: "networkidle", timeout: 20000 });
+    await dialogPage.locator("#tab-treemap").waitFor({ timeout: 10000 }).catch(async () => {
+      throw new Error("Process views did not mount: " + JSON.stringify({
+        text: (await dialogPage.locator("#page").innerText()).slice(0, 500),
+        processResponses,
+        pageErrors,
+      }));
+    });
+    await dialogPage.locator("#tab-treemap").click();
+    await dialogPage.getByRole("button", { name: "Group by executable" }).click();
+    await dialogPage.locator('.treemap-tile[aria-label*="fixture.exe; 2 process instances"]').click();
+    await dialogPage.locator(".process-group-dialog").waitFor();
+    const dialogResults = await new AxeBuilder({ page: dialogPage })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .disableRules(["color-contrast"])
+      .analyze();
+    const dialogContrast = await dialogPage.evaluate(auditContrastInPage, {
+      minRatio: 4.5,
+      largeTextMinRatio: 3,
+    });
+    const dialogContrastFailures = dialogContrast.filter((entry) => !entry.passes);
+    const dialogBlocking = dialogResults.violations.filter((entry) =>
+      entry.impact === "serious" || entry.impact === "critical");
+    const dialogFailure = dialogBlocking.length > 0 || dialogContrastFailures.length > 0;
+    report.pages.push({
+      theme,
+      page: "#/processes/grouped-instance-dialog",
+      name: "Grouped process instance dialog",
+      violations: dialogResults.violations.map((entry) => ({
+        id: entry.id, impact: entry.impact, help: entry.help, nodes: entry.nodes.length,
+        sample: entry.nodes.slice(0, 2).map((node) => node.html.slice(0, 160)),
+      })),
+      contrast: {
+        checked: dialogContrast.length,
+        failures: dialogContrastFailures.length,
+        worst: dialogContrast.slice().sort((a, b) => a.ratio - b.ratio).slice(0, 6),
+      },
+      blocking: dialogBlocking.length,
+      passes: dialogResults.passes.length,
+    });
+    if (dialogFailure) failures++;
+    console.log(`[${dialogFailure ? "FAIL" : " ok "}] ${theme.padEnd(5)} grouped process chooser ` +
+      `${dialogBlocking.length} serious/critical, contrast ${dialogContrastFailures.length}/${dialogContrast.length} fail`);
+    await dialogContext.close();
   }
 
   // Explicit contrast measurement for the muted-text token pair. axe reports
@@ -132,7 +203,7 @@ try {
   // ratio makes a regression visible before it becomes a violation.
   console.log("");
   console.log("Muted-text contrast (WCAG AA needs 4.5:1 for body text):");
-  for (const theme of THEMES) {
+  if (!onlyProcessDialog) for (const theme of THEMES) {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       colorScheme: theme,
@@ -159,10 +230,10 @@ try {
   await browser.close();
 }
 
-const out = resolve(repo, "docs", "img");
+const out = resolve(repo, "temp", "webui-reports");
 await mkdir(out, { recursive: true });
 await writeFile(resolve(out, "a11y-report.json"), JSON.stringify(report, null, 2) + "\n", "utf8");
 console.log("");
-console.log(`Report: docs/img/a11y-report.json`);
+console.log(`Report: temp/webui-reports/a11y-report.json`);
 console.log(`${report.pages.length} page/theme audits, ${failures} with serious or critical issues.`);
 process.exit(failures === 0 ? 0 : 1);
