@@ -10,7 +10,9 @@
 namespace wintcp {
 
 void ViewState::ApplyTo(ConnectionStore* store,
-                        std::vector<FilterClause>* out) const {
+                        std::vector<FilterClause>* out,
+                        std::wstring* filterError) const {
+    if (filterError != nullptr) filterError->clear();
     if (store == nullptr) return;
 
     // 1. Sort FIRST, before filtering, because grouping later collapses an
@@ -24,13 +26,11 @@ void ViewState::ApplyTo(ConnectionStore* store,
     //    it after would rebuild twice for the same result.
     store->SetGrouped(grouped);
 
-    // 3. Filter + sort + (re)build the view. ParseFilter never fails: text it
-    //    cannot understand degrades to a plain substring match, which is the
-    //    documented behaviour of the GUI's filter box too. Parsing here rather
-    //    than at each call site is what keeps the two front ends honest - the
-    //    GUI's filter box and the CLI's --filter go down the identical path.
+    // 3. Filter + sort + (re)build the view. A malformed quote keeps a literal
+    //    fallback clause for compatibility while reporting the syntax issue
+    //    to callers that can present it.
     std::vector<FilterClause> program;
-    if (!filter.empty()) ParseFilter(filter, program);
+    if (!filter.empty()) ParseFilter(filter, program, filterError);
     if (out != nullptr) *out = program;
 
     ViewQuery q;
