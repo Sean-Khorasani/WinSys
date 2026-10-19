@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <commctrl.h>
 #include <cstring>
+#include <shellapi.h>
 #include <vector>
 
 #include "BlockConn.h"
@@ -28,6 +29,7 @@ enum : int {
     kIdClose = IDCANCEL,
     kIdEnable = IDOK + 3,
     kIdDisable = IDOK + 4,
+    kIdOpenFirewall = IDOK + 5,
 };
 
 // Control count, in one place. cdit must match it exactly: the dialog manager
@@ -35,7 +37,7 @@ enum : int {
 // inside the dialog loop, which is the failure PromptDialog.cpp documents at
 // length. Any write below that changes the count has to change this too, and
 // the selftest pins the resulting capacity.
-constexpr int kControlCount = 6;
+constexpr int kControlCount = 7;
 
 constexpr size_t Pad4(size_t bytes) { return (bytes + 3) & ~static_cast<size_t>(3); }
 
@@ -248,8 +250,8 @@ std::vector<BYTE> MakeTemplate(const wchar_t* title) {
         return std::vector<BYTE>();
     }
     // Two button rows at the new readable size (the old 76x16
-    // buttons were barely tappable). Row 1: the lifecycle actions.
-    // Row 2: Remove all and Close.
+    // buttons were barely tappable). Row 1: lifecycle actions.
+    // Row 2: bulk removal, Windows Firewall and Close.
     if (!WriteItem(&p, end,
                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 8,
                    106, 88, 23, kIdDelete, 0x81, L"Delete") ||
@@ -258,9 +260,11 @@ std::vector<BYTE> MakeTemplate(const wchar_t* title) {
         !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 192, 106,
                    88, 23, kIdDisable, 0x81, L"Disable") ||
         !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 133,
-                   132, 23, kIdRemoveAll, 0x81, L"Remove all") ||
-        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 144, 133,
-                   132, 23, kIdClose, 0x81, L"Close")) {
+                   104, 23, kIdRemoveAll, 0x81, L"Remove all") ||
+        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 116, 133,
+                   104, 23, kIdOpenFirewall, 0x81, L"Open Firewall") ||
+        !WriteItem(&p, end, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 224, 133,
+                   104, 23, kIdClose, 0x81, L"Close")) {
         return std::vector<BYTE>();
     }
 
@@ -273,6 +277,7 @@ std::vector<BYTE> MakeTemplate(const wchar_t* title) {
 // all. Any total order would sort; this one puts the surprising rows last,
 // where a reader scanning for trouble looks.
 int StatusRank(const BlockedRule& r) {
+    if (!r.blockingKnown || (r.isBlocking && !r.enabledKnown)) return 3;
     if (!r.isBlocking) return 2;
     return r.enabled ? 0 : 1;
 }
@@ -557,6 +562,18 @@ INT_PTR CALLBACK BlockedPeersProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ::EndDialog(hwnd, TRUE);
                 return TRUE;
             }
+            if (id == kIdOpenFirewall && code == BN_CLICKED) {
+                const HINSTANCE opened = ::ShellExecuteW(
+                    hwnd, L"open", L"wf.msc", nullptr, nullptr, SW_SHOWNORMAL);
+                if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+                    ::MessageBoxW(
+                        hwnd,
+                        L"Windows Firewall with Advanced Security could not be opened. "
+                        L"You can launch wf.msc from the Windows Start menu.",
+                        L"WinTCP", MB_OK | MB_ICONERROR);
+                }
+                return TRUE;
+            }
             if (code != BN_CLICKED) break;
             HWND list = GetDlgItem(hwnd, kIdList);
             const int sel = SelectedRuleIndex(list);
@@ -624,19 +641,35 @@ INT_PTR CALLBACK BlockedPeersProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                   L"WinTCP", MB_OK | MB_ICONINFORMATION);
                     return TRUE;
                 }
-                // Removing every rule at once unblocks every peer
-                // this application blocked, so it is confirmed
-                // before it runs.
-                if (::MessageBoxW(hwnd,
-                                  L"Remove EVERY blocked rule?\r\n\r\n"
-                                  L"This unblocks all previously "
-                                  L"blocked peers.",
+                // The list is ledger-backed and contains each installed
+                // WinTCP rule, including both names in a peer-rule pair.
+                const std::wstring prompt =
+                    L"Remove all " + std::to_wstring(st->rules.size()) +
+                    L" WinTCP-managed firewall rules?\r\n\r\n"
+                    L"This unblocks the peers covered by those rules."
+                    L" Any WinTCP rules created since this view was loaded"
+                    L" are included too.";
+                if (::MessageBoxW(hwnd, prompt.c_str(),
                                   L"WinTCP - Remove all blocks",
                                   MB_YESNO | MB_ICONWARNING |
                                       MB_DEFBUTTON2) != IDYES)
                     return TRUE;
+                std::vector<std::wstring> beforeNames;
+                beforeNames.reserve(st->rules.size());
+                for (const BlockedRule& rule : st->rules)
+                    beforeNames.push_back(rule.name);
                 std::wstring error;
                 if (!RemoveAllWinTcpRules(&error)) {
+                    ReloadRules(list, st);
+                    const bool changed = beforeNames.size() != st->rules.size() ||
+                        std::any_of(beforeNames.begin(), beforeNames.end(),
+                            [&](const std::wstring& name) {
+                                return std::none_of(st->rules.begin(), st->rules.end(),
+                                    [&](const BlockedRule& current) {
+                                        return current.name == name;
+                                    });
+                            });
+                    if (changed) st->dirty = true;
                     ::MessageBoxW(
                         hwnd,
                         (L"Could not remove every rule:\r\n" + error).c_str(),
@@ -670,10 +703,16 @@ INT_PTR CALLBACK BlockedPeersProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // unit-tested helper rather than nothing.
 std::wstring BlockedPeersRowText(const BlockedRule& r) {
     std::wstring text = r.name;
-    if (!r.enabled) text += L"  [disabled]";
-    if (!r.isBlocking) text += L"  [not a block]";
-    if (!r.remoteAddrs.empty()) text += L"  " + r.remoteAddrs;
-    if (!r.remotePorts.empty()) text += L":" + r.remotePorts;
+    if (!r.enabledKnown) text += L"  [status unknown]";
+    else if (!r.enabled) text += L"  [disabled]";
+    if (!r.blockingKnown) text += L"  [rule type unknown]";
+    else if (!r.isBlocking) text += L"  [not a block]";
+    if (!r.remoteAddrsKnown) text += L"  [remote scope unknown]";
+    else if (!r.remoteAddrs.empty() && r.remoteAddrs != L"*")
+        text += L"  " + r.remoteAddrs;
+    if (!r.remotePortsKnown) text += L"  [remote ports unknown]";
+    else if (!r.remotePorts.empty() && r.remotePorts != L"*")
+        text += L":" + r.remotePorts;
     if (text.size() > kRowTextChars) {
         return Utf8ToWide(
             TruncateToWidthOpt(WideToUtf8(text), kRowTextChars).c_str());
@@ -692,9 +731,12 @@ int BlockedPeersControlCount() {
 // than text suffixes, so sorting by Status groups them.
 std::wstring BlockedPeersCellText(const BlockedRule& r, int column) {
     if (column == kBlockedColRemote) {
-        if (r.remoteAddrs.empty()) return std::wstring(L"any");
-        std::wstring text = r.remoteAddrs;
-        if (!r.remotePorts.empty()) text += L":" + r.remotePorts;
+        if (!r.remoteAddrsKnown || !r.remotePortsKnown)
+            return std::wstring(L"unknown");
+        std::wstring text = (r.remoteAddrs.empty() || r.remoteAddrs == L"*")
+                                ? L"any" : r.remoteAddrs;
+        if (!r.remotePorts.empty() && r.remotePorts != L"*")
+            text += L":" + r.remotePorts;
         if (text.size() > kRowTextChars) {
             return Utf8ToWide(
                 TruncateToWidthOpt(WideToUtf8(text), kRowTextChars).c_str());
@@ -702,6 +744,8 @@ std::wstring BlockedPeersCellText(const BlockedRule& r, int column) {
         return text;
     }
     if (column == kBlockedColStatus) {
+        if (!r.blockingKnown || (r.isBlocking && !r.enabledKnown))
+            return std::wstring(L"unknown");
         if (!r.isBlocking) return std::wstring(L"not a block");
         return r.enabled ? std::wstring(L"enabled")
                          : std::wstring(L"disabled");
