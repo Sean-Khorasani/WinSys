@@ -74,7 +74,7 @@ bool ConnectionsList::Create(HWND parent, HINSTANCE instance) {
     ::SendMessageW(hwnd_, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
                    LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES |
                        LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP |
-                       LVS_EX_LABELTIP | LVS_EX_INFOTIP | LVS_EX_TRACKSELECT);
+                       LVS_EX_LABELTIP | LVS_EX_INFOTIP);
     ::SendMessageW(hwnd_, LVM_SETITEMCOUNT, 0, 0);
     return true;
 }
@@ -98,10 +98,12 @@ std::optional<LRESULT> ConnectionsList::HandleNotify(const NMHDR* hdr) {
             return 0;
         case LVN_COLUMNCLICK: {
             const auto* click = reinterpret_cast<const NMLISTVIEW*>(hdr);
+            const int columnId = cols_.VisibleToCol(click->iSubItem);
+            if (columnId < 0) return 0;
             bool asc = true;
-            if (click->iSubItem == store_.SortColumn())
+            if (columnId == store_.SortColumn())
                 asc = !store_.SortAscending();
-            sink_.OnSortByColumn(click->iSubItem, asc);
+            sink_.OnSortByColumn(columnId, asc);
             return 0;
         }
         case NM_DBLCLK:
@@ -285,7 +287,7 @@ LRESULT ConnectionsList::OnCustomDraw(NMLVCUSTOMDRAW* cd) {
             // row across a wide table without selection. Change highlights
             // above win - a flashing row must not be banded over - and the
             // shades are faint enough to stay out of the text's way in
-            // both themes. (Hover itself is LVS_EX_TRACKSELECT on the list.)
+            // both themes.
             if ((static_cast<size_t>(cd->nmcd.dwItemSpec) % 2) == 1) {
                 cd->clrTextBk = BandColour(dark);
                 return CDRF_NEWFONT;
