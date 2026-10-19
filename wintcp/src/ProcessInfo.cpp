@@ -253,7 +253,7 @@ void ProcessResolver::BuildSnapshotIfNeeded() {
     ::CloseHandle(snap);
 }
 
-std::vector<ProcessRecord> EnumerateProcesses() {
+std::vector<ProcessRecord> EnumerateProcesses(bool captureLifetime) {
     std::vector<ProcessRecord> out;
     HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return out;   // caller reports
@@ -266,6 +266,16 @@ std::vector<ProcessRecord> EnumerateProcesses() {
             r.pid = pe.th32ProcessID;
             r.ppid = pe.th32ParentProcessID;
             r.name = pe.szExeFile;
+            if (captureLifetime) {
+                HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                               FALSE, r.pid);
+                if (process != nullptr) {
+                    FILETIME exited = {}, kernel = {}, user = {};
+                    r.processCreateKnown = ::GetProcessTimes(
+                        process, &r.processCreate, &exited, &kernel, &user) != FALSE;
+                    ::CloseHandle(process);
+                }
+            }
             out.push_back(std::move(r));
         } while (::Process32NextW(snap, &pe));
     }
@@ -531,26 +541,54 @@ bool ProcessResolver::VerifyProcess(DWORD pid, const FILETIME& expectedCreate,
         errorMessage = L"That row does not belong to a killable user process.";
         return false;
     }
-    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!expectKnown) {
+        errorMessage = L"The process lifetime was not captured; refresh before acting.";
+        return false;
+    }
+    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                             FALSE, pid);
     if (h == nullptr) {
         errorMessage = L"Could not open process: " + FormatSystemError(::GetLastError());
         return false;
     }
-    bool ok = true;
-    if (expectKnown) {
+    const bool ok = VerifyProcessHandle(h, expectedCreate, errorMessage);
+    ::CloseHandle(h);
+    if (ok) errorMessage.clear();
+    return ok;
+}
+
+bool ProcessResolver::VerifyProcessHandle(HANDLE process,
+                                          const FILETIME& expectedCreate,
+                                          std::wstring& errorMessage) {
+    if (process == nullptr || process == INVALID_HANDLE_VALUE) {
+        errorMessage = L"The process handle is invalid.";
+        return false;
+    }
+    bool ok = false;
+    const DWORD processState = ::WaitForSingleObject(process, 0);
+    if (processState == WAIT_OBJECT_0) {
+        errorMessage = L"The process has exited since it was captured.";
+    } else if (processState == WAIT_FAILED) {
+        errorMessage = L"Could not verify whether the process is still running: " +
+                       FormatSystemError(::GetLastError());
+    } else if (processState != WAIT_TIMEOUT) {
+        errorMessage = L"Could not verify whether the process is still running.";
+    } else {
         FILETIME cr {}, ex {}, kr {}, ui {};
-        if (::GetProcessTimes(h, &cr, &ex, &kr, &ui)) {
-            if (::CompareFileTime(&cr, &expectedCreate) != 0) {
+        if (::GetProcessTimes(process, &cr, &ex, &kr, &ui)) {
+            if (::CompareFileTime(&cr, &expectedCreate) == 0) {
+                ok = true;
+            } else {
                 errorMessage =
                     L"PID reuse detected: this PID now belongs to a different "
                     L"process than when the row was captured.\n"
                     L"Press F5 to refresh and try again.";
-                ok = false;
             }
+        } else {
+            errorMessage = L"Could not verify the process creation time: " +
+                           FormatSystemError(::GetLastError());
         }
-        // If GetProcessTimes fails we cannot verify - proceed cautiously.
     }
-    ::CloseHandle(h);
     if (ok) errorMessage.clear();
     return ok;
 }
