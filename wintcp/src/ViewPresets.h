@@ -49,26 +49,8 @@ public:
     void Load();
     void Delete();
 
-    // The numbered-list prompt body, shared by Load and Delete. A numbered
-    // list rather than a combo: with more than a handful of presets a list box
-    // scrolls, and the numbers double as a way to refer to one in the message
-    // box. The list is the prompt's LABEL rather than a discarded local - the
-    // prompt used to build this text and then ask with an empty label, so the
-    // numbers meant nothing. Capped with a count so a long library cannot
-    // blow the dialog's caption bound: a truncated list still reads, a missing
-    // one does not.
-    static std::wstring NumberedList(const std::vector<std::wstring>& names,
-                                     const wchar_t* question);
-
-    // Strict index parse: 1..names.size(), or 0 for anything that is not a
-    // plain number. "2abc" and "-1" must not resolve to 2, and an index past
-    // the end must not wrap.
-    static size_t ParseIndex(const std::wstring& answer, size_t count);
-
 private:
-    // The shared "choose a preset by number" front half of Load and Delete.
-    // Returns the chosen name, or empty when the user cancelled. Reports its
-    // own errors.
+    // The shared named-choice dialog for Load and Delete.
     std::wstring Choose(const wchar_t* title, const wchar_t* question);
 
     HWND owner_;
