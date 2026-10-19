@@ -41,6 +41,34 @@
 
 namespace wintcp {
 
+enum class ClipboardWriteStatus {
+    Copied,
+    EmptyText,
+    InvalidApi,
+    AllocationFailed,
+    LockFailed,
+    OpenFailed,
+    EmptyFailed,
+    SetDataFailed,
+};
+
+struct ClipboardApi {
+    void* context = nullptr;
+    HGLOBAL (*globalAlloc)(void*, UINT, SIZE_T) = nullptr;
+    void* (*globalLock)(void*, HGLOBAL) = nullptr;
+    BOOL (*globalUnlock)(void*, HGLOBAL) = nullptr;
+    HGLOBAL (*globalFree)(void*, HGLOBAL) = nullptr;
+    BOOL (*openClipboard)(void*, HWND) = nullptr;
+    BOOL (*emptyClipboard)(void*) = nullptr;
+    HANDLE (*setClipboardData)(void*, UINT, HANDLE) = nullptr;
+    BOOL (*closeClipboard)(void*) = nullptr;
+};
+
+ClipboardApi NativeClipboardApi();
+ClipboardWriteStatus WriteClipboardText(HWND owner, const std::wstring& text,
+                                        const ClipboardApi& api);
+bool ClipboardNeedsManualFallback(ClipboardWriteStatus status);
+
 // What the list may ask its owner to do - and what it must be told. The
 // painting decisions belong to the window (its theme, its high-contrast
 // state, its empty-state hint); the list only reads them, once per paint,
@@ -72,6 +100,16 @@ public:
 
 class ConnectionsList {
 public:
+    enum class CopyField {
+        RemoteIp,
+        Hostname,
+        LocalEndpoint,
+        RemoteEndpoint,
+        LocalPort,
+        RemotePort,
+        ProcessPath,
+        ProcessId,
+    };
     // The column geometry is a separate object on purpose (ListViewColumns),
     // and the list needs it because a cell's text is chosen BY COLUMN: the
     // control notifies with a visible index, and the mapping to a ColumnId
@@ -111,6 +149,7 @@ public:
                           std::uint64_t focusedId, int topIdx);
 
     bool SelectedRowIndices(std::vector<int>& out) const;
+    std::vector<Connection> SelectedRowsCopy() const;
     const Connection* FirstSelectedRow() const;
     std::optional<Connection> SelectedCopy() const;
     size_t SelectedCount() const;
@@ -130,6 +169,10 @@ public:
     // The tab-separated text for an explicit row set (the export verb).
     static std::wstring RowsToText(const std::vector<Connection>& rows,
                                    const ListViewColumns& cols);
+    static std::wstring RowsToText(const std::vector<Connection>& rows,
+                                   const std::vector<int>& visibleColumns);
+    static std::wstring CopyFieldText(const std::vector<Connection>& rows,
+                                      CopyField field);
 
 private:
     void OnGetDispInfo(NMLVDISPINFO* di);
