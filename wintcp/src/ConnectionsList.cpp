@@ -303,18 +303,7 @@ void ConnectionsList::OnGetInfoTip(NMLVGETINFOTIPW* info) {
     // the reader cannot expand. The tooltip shows the value in full,
     // one item per line, for the columns where truncation actually
     // loses information.
-    int subItem = info->iSubItem;
-    if (subItem == 0) {
-        POINT point = {};
-        if (::GetCursorPos(&point) && ::ScreenToClient(hwnd_, &point)) {
-            LVHITTESTINFO hit = {};
-            hit.pt = point;
-            ::SendMessageW(hwnd_, LVM_SUBITEMHITTEST, 0,
-                           reinterpret_cast<LPARAM>(&hit));
-            if (hit.iItem == info->iItem && hit.iSubItem >= 0)
-                subItem = hit.iSubItem;
-        }
-    }
+    const int subItem = info->iSubItem;
     const int col = cols_.VisibleToCol(subItem);
     const Connection* c = store_.ViewRow(static_cast<size_t>(info->iItem));
     if (col < 0 || c == nullptr) return;
