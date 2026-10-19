@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -471,6 +472,11 @@ public:
     }
 
     INetFwRules* rules() const { return rules_.get(); }
+    HRESULT CurrentProfileTypes(long* types) const {
+        return policy_.get() != nullptr && types != nullptr
+            ? policy_.get()->get_CurrentProfileTypes(types)
+            : E_POINTER;
+    }
 
     FwSession(const FwSession&) = delete;
     FwSession& operator=(const FwSession&) = delete;
@@ -493,6 +499,9 @@ public:
 // --- rule operations --------------------------------------------------------
 
 constexpr long kAllProfiles = NET_FW_PROFILE2_ALL;
+constexpr long kSelectableProfiles = NET_FW_PROFILE2_DOMAIN |
+                                     NET_FW_PROFILE2_PRIVATE |
+                                     NET_FW_PROFILE2_PUBLIC;
 
 // Look up one rule. 'found' separates "no such rule" from "present but
 // disabled", because a rule the user switched off is not blocking anything and
@@ -764,6 +773,17 @@ bool ValidateFwRule(const FwRule& rule, std::wstring* error) {
                  L"CIDR range; an empty field is not the same as any");
         return false;
     }
+    if (rule.localAddress.empty()) {
+        SetError(error,
+                 L"the local address must be \"*\" or an address, list, or CIDR range");
+        return false;
+    }
+    if (rule.profiles <= 0 ||
+        (rule.profiles != kAllProfiles &&
+         (rule.profiles & ~kSelectableProfiles) != 0)) {
+        SetError(error, L"profiles must include Domain, Private, or Public");
+        return false;
+    }
 
     // An empty port field is not "*" for the same reason.
     if (rule.localPorts.empty() || rule.remotePorts.empty()) {
@@ -817,6 +837,10 @@ std::wstring BuildFwRuleName(const FwRule& rule) {
                                     : L"udp";
     name += L"-";
     name += FwRuleNameToken(rule.remoteAddress);
+    if (rule.localAddress != L"*") {
+        name += L"-local-";
+        name += FwRuleNameToken(rule.localAddress);
+    }
     name += L"-";
     name += FwRuleNameToken(rule.localPorts);
     name += L"-";
@@ -826,6 +850,10 @@ std::wstring BuildFwRuleName(const FwRule& rule) {
     if (!rule.service.empty()) {
         name += L"-";
         name += FwRuleNameToken(rule.service);
+    }
+    if (rule.profiles != kAllProfiles) {
+        name += L"-profile-";
+        name += std::to_wstring(rule.profiles);
     }
     if (name.size() >= kMaxRuleNameChars) {
         return name;   // identity preserved; the label is what is dropped
@@ -880,6 +908,7 @@ FwRuleOutcome AddFwRule(const FwRule& rule, std::wstring* name,
 
     BStr bname(ruleName);
     BStr baddr(rule.remoteAddress);
+    BStr blocaddr(rule.localAddress);
     BStr blp(rule.localPorts);
     BStr brp(rule.remotePorts);
     if (!rule.processPath.empty()) {
@@ -896,7 +925,8 @@ FwRuleOutcome AddFwRule(const FwRule& rule, std::wstring* name,
             return FwRuleOutcome::kFailed;
         }
     }
-    if (!bname.valid() || !baddr.valid() || !blp.valid() || !brp.valid()) {
+    if (!bname.valid() || !baddr.valid() || !blocaddr.valid() ||
+        !blp.valid() || !brp.valid()) {
         SetError(error, L"out of memory allocating rule strings");
         return FwRuleOutcome::kFailed;
     }
@@ -944,9 +974,10 @@ FwRuleOutcome AddFwRule(const FwRule& rule, std::wstring* name,
         { L"LocalPorts", fwRule.get()->put_LocalPorts(blp) },
         { L"RemotePorts", fwRule.get()->put_RemotePorts(brp) },
         { L"RemoteAddresses", fwRule.get()->put_RemoteAddresses(baddr) },
+        { L"LocalAddresses", fwRule.get()->put_LocalAddresses(blocaddr) },
         { L"Direction", fwRule.get()->put_Direction(dir) },
         { L"Action", fwRule.get()->put_Action(action) },
-        { L"Profiles", fwRule.get()->put_Profiles(kAllProfiles) },
+        { L"Profiles", fwRule.get()->put_Profiles(rule.profiles) },
         { L"Enabled", fwRule.get()->put_Enabled(VARIANT_TRUE) },
         { L"EdgeTraversal", fwRule.get()->put_EdgeTraversal(VARIANT_FALSE) },
         // An empty ApplicationName would mean "any program"; a null BSTR is
@@ -1626,13 +1657,22 @@ int CountWinTcpRules(std::wstring* error) {
         return 0;
     }
     for (const std::wstring& pair : pairs) {
-        const size_t tab = pair.find(L'\t');
-        if (tab == std::wstring::npos) continue;
-        const std::wstring name = pair.substr(0, tab);
+        const std::wstring name = LedgerPeerName(pair);
+        if (name.empty()) continue;
         ComPtr<INetFwRule> found;
         BStr bname(name);
-        if (bname.valid() && SUCCEEDED(rules->Item(bname, found.receive())))
+        if (!bname.valid()) {
+            SetError(error, L"out of memory allocating firewall rule name");
+            return 0;
+        }
+        const HRESULT lookup = rules->Item(bname, found.receive());
+        if (SUCCEEDED(lookup) && found.get() != nullptr) {
             ++count;   // only rules the firewall still reports
+        } else if (!IsMissingFirewallRuleResult(lookup)) {
+            SetError(error, L"could not inspect firewall rule \"" + name +
+                                 L"\": " + FormatHresult(lookup));
+            return 0;
+        }
     }
     return count;
 }
@@ -1662,27 +1702,54 @@ bool RemoveAllWinTcpRules(std::wstring* error) {
 
     bool ok = true;
     std::wstring firstError;
-    for (const std::wstring& pair : pairs) {
-        const size_t tab = pair.find(L'\t');
-        if (tab == std::wstring::npos) continue;
-        const std::wstring name = pair.substr(0, tab);
+    for (const std::wstring& name : CollectLedgerRuleNames(pairs)) {
         BStr bname(name);
-        if (!bname.valid()) continue;
+        if (!bname.valid()) {
+            if (ok) {
+                ok = false;
+                firstError = L"out of memory allocating firewall rule name";
+            }
+            continue;
+        }
         ComPtr<INetFwRule> found;
-        if (FAILED(rules->Item(bname, found.receive()))) {
+        const HRESULT lookup = rules->Item(bname, found.receive());
+        if (IsMissingFirewallRuleResult(lookup)) {
             continue;   // already gone: nothing to do, and not an error
+        }
+        if (FAILED(lookup) || found.get() == nullptr) {
+            if (ok) {
+                ok = false;
+                firstError = L"could not inspect \"" + name + L"\": " +
+                             FormatHresult(lookup);
+            }
+            continue;
         }
         const HRESULT del = rules->Remove(bname);
         if (FAILED(del) && ok) {
             ok = false;
             firstError = L"could not remove \"" + name + L"\": " +
                          FormatHresult(del);
+            continue;
+        }
+        if (SUCCEEDED(del)) {
+            ComPtr<INetFwRule> remaining;
+            const HRESULT verify = rules->Item(bname, remaining.receive());
+            if (!IsMissingFirewallRuleResult(verify) && ok) {
+                ok = false;
+                firstError = SUCCEEDED(verify) && remaining.get() != nullptr
+                    ? L"Windows Firewall still reports \"" + name + L"\" after removal"
+                    : L"could not verify removal of \"" + name +
+                          L"\": " + FormatHresult(verify);
+            }
         }
     }
     // The ledger is rewritten unconditionally on success so a rule the user
     // deleted by hand does not linger in it and block a future re-add.
     if (ok) {
-        WriteLedger({});
+        if (!WriteLedger({})) {
+            SetError(error, L"the firewall rules were removed, but the WinTCP rule ledger could not be cleared");
+            return false;
+        }
     } else {
         SetError(error, firstError);
     }
@@ -1704,6 +1771,26 @@ std::vector<std::wstring> SplitLedgerNames(const std::wstring& line) {
         start = tab + 1;
     }
     return names;
+}
+
+std::vector<std::wstring> CollectLedgerRuleNames(
+    const std::vector<std::wstring>& lines) {
+    std::vector<std::wstring> names;
+    for (const std::wstring& line : lines) {
+        std::vector<std::wstring> fields = SplitLedgerNames(line);
+        names.insert(names.end(), fields.begin(), fields.end());
+    }
+    return names;
+}
+
+std::wstring LedgerPeerName(const std::wstring& line) {
+    const size_t tab = line.find(L'\t');
+    return line.substr(0, tab);
+}
+
+bool IsMissingFirewallRuleResult(HRESULT result) {
+    return result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ||
+           result == HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
 }
 
 bool BlankLedgerName(const std::wstring& line, const std::wstring& name,
@@ -1752,6 +1839,79 @@ std::wstring ReadBstrProp(HRESULT (STDMETHODCALLTYPE INetFwRule::*get)(BSTR*),
     return out;
 }
 
+bool ReadBstrProp(HRESULT (STDMETHODCALLTYPE INetFwRule::*get)(BSTR*),
+                  INetFwRule* rule, std::wstring* out) {
+    if (rule == nullptr || out == nullptr) return false;
+    BSTR raw = nullptr;
+    const HRESULT hr = (rule->*get)(&raw);
+    if (FAILED(hr)) {
+        if (raw != nullptr) ::SysFreeString(raw);
+        return false;
+    }
+    if (raw == nullptr) {
+        *out = L"*";
+        return true;
+    }
+    out->assign(raw, ::SysStringLen(raw));
+    ::SysFreeString(raw);
+    return true;
+}
+
+bool ReadLongProp(HRESULT (STDMETHODCALLTYPE INetFwRule::*get)(LONG*),
+                  INetFwRule* rule, LONG* out) {
+    return rule != nullptr && out != nullptr && SUCCEEDED((rule->*get)(out));
+}
+
+bool ReadFirewallRule(INetFwRule* rule, bool owned, BlockedRule* entry) {
+    if (rule == nullptr || entry == nullptr) return false;
+    entry->wintcpOwned = owned;
+    BSTR rawName = nullptr;
+    if (FAILED(rule->get_Name(&rawName)) || rawName == nullptr) {
+        if (rawName != nullptr) ::SysFreeString(rawName);
+        return false;
+    }
+    entry->name.assign(rawName, ::SysStringLen(rawName));
+    ::SysFreeString(rawName);
+
+    VARIANT_BOOL enabled = VARIANT_FALSE;
+    if (SUCCEEDED(rule->get_Enabled(&enabled))) {
+        entry->enabled = enabled != VARIANT_FALSE;
+        entry->enabledKnown = true;
+    }
+    NET_FW_RULE_DIRECTION direction = NET_FW_RULE_DIR_IN;
+    if (SUCCEEDED(rule->get_Direction(&direction))) {
+        entry->direction = static_cast<LONG>(direction);
+        entry->directionKnown = true;
+    }
+    NET_FW_ACTION action = NET_FW_ACTION_ALLOW;
+    if (SUCCEEDED(rule->get_Action(&action))) {
+        entry->action = static_cast<LONG>(action);
+        entry->actionKnown = true;
+    }
+    entry->protocolKnown = ReadLongProp(&INetFwRule::get_Protocol, rule,
+                                        &entry->protocol);
+    entry->profilesKnown = ReadLongProp(&INetFwRule::get_Profiles, rule,
+                                        &entry->profiles);
+    entry->blockingKnown = entry->directionKnown && entry->actionKnown;
+    if (entry->blockingKnown) {
+        entry->isBlocking = entry->direction == NET_FW_RULE_DIR_OUT &&
+                            entry->action == NET_FW_ACTION_BLOCK;
+    }
+    entry->remoteAddrsKnown = ReadBstrProp(
+        &INetFwRule::get_RemoteAddresses, rule, &entry->remoteAddrs);
+    entry->localAddrsKnown = ReadBstrProp(
+        &INetFwRule::get_LocalAddresses, rule, &entry->localAddrs);
+    entry->localPortsKnown = ReadBstrProp(
+        &INetFwRule::get_LocalPorts, rule, &entry->localPorts);
+    entry->remotePortsKnown = ReadBstrProp(
+        &INetFwRule::get_RemotePorts, rule, &entry->remotePorts);
+    entry->applicationKnown = ReadBstrProp(
+        &INetFwRule::get_ApplicationName, rule, &entry->application);
+    entry->serviceKnown = ReadBstrProp(
+        &INetFwRule::get_ServiceName, rule, &entry->service);
+    return true;
+}
+
 bool ListBlockedRules(std::vector<BlockedRule>* out, std::wstring* error) {
     if (out == nullptr) {
         SetError(error, L"internal error: no output for ListBlockedRules");
@@ -1783,27 +1943,180 @@ bool ListBlockedRules(std::vector<BlockedRule>* out, std::wstring* error) {
             BlockedRule entry;
             entry.name = name;
             BStr bname(name);
+            if (!bname.valid()) {
+                out->clear();
+                SetError(error, L"out of memory allocating firewall rule name");
+                return false;
+            }
             ComPtr<INetFwRule> rule;
-            if (bname.valid() && SUCCEEDED(rules->Item(bname, rule.receive())) &&
-                rule.get() != nullptr) {
+            const HRESULT lookup = rules->Item(bname, rule.receive());
+            if (IsMissingFirewallRuleResult(lookup)) continue;
+            if (FAILED(lookup) || rule.get() == nullptr) {
+                out->clear();
+                SetError(error, L"could not inspect firewall rule \"" + name +
+                                    L"\": " + FormatHresult(lookup));
+                return false;
+            }
+            {
                 VARIANT_BOOL vb = VARIANT_FALSE;
                 if (SUCCEEDED(rule.get()->get_Enabled(&vb))) {
                     entry.enabled = (vb != VARIANT_FALSE);
+                    entry.enabledKnown = true;
                 }
                 NET_FW_RULE_DIRECTION dir = NET_FW_RULE_DIR_IN;
-                (void)rule.get()->get_Direction(&dir);
+                const HRESULT directionResult = rule.get()->get_Direction(&dir);
                 NET_FW_ACTION action = NET_FW_ACTION_ALLOW;
-                (void)rule.get()->get_Action(&action);
-                entry.isBlocking = (dir == NET_FW_RULE_DIR_OUT) &&
-                                   (action == NET_FW_ACTION_BLOCK);
-                entry.remoteAddrs =
-                    ReadBstrProp(&INetFwRule::get_RemoteAddresses, rule.get());
-                entry.localPorts =
-                    ReadBstrProp(&INetFwRule::get_LocalPorts, rule.get());
-                entry.remotePorts =
-                    ReadBstrProp(&INetFwRule::get_RemotePorts, rule.get());
+                const HRESULT actionResult = rule.get()->get_Action(&action);
+                entry.blockingKnown = SUCCEEDED(directionResult) &&
+                                      SUCCEEDED(actionResult);
+                if (entry.blockingKnown) {
+                    entry.isBlocking = (dir == NET_FW_RULE_DIR_OUT) &&
+                                       (action == NET_FW_ACTION_BLOCK);
+                }
+                entry.remoteAddrsKnown = ReadBstrProp(
+                    &INetFwRule::get_RemoteAddresses, rule.get(),
+                    &entry.remoteAddrs);
+                entry.localPortsKnown = ReadBstrProp(
+                    &INetFwRule::get_LocalPorts, rule.get(), &entry.localPorts);
+                entry.remotePortsKnown = ReadBstrProp(
+                    &INetFwRule::get_RemotePorts, rule.get(),
+                    &entry.remotePorts);
                 out->push_back(std::move(entry));
             }
+        }
+    }
+    return true;
+}
+
+bool ListFirewallInventory(std::vector<BlockedRule>* out, std::wstring* error,
+                           std::wstring* warning, long* activeProfileTypes,
+                           bool* activeProfileKnown) {
+    if (out == nullptr) {
+        SetError(error, L"internal error: no output for ListFirewallInventory");
+        return false;
+    }
+    out->clear();
+    if (error != nullptr) error->clear();
+    if (warning != nullptr) warning->clear();
+    if (activeProfileTypes != nullptr) *activeProfileTypes = 0;
+    if (activeProfileKnown != nullptr) *activeProfileKnown = false;
+    FwSession session;
+    if (!session.Open(error)) return false;
+
+    std::vector<std::wstring> ledgerNames;
+    {
+        std::lock_guard<std::mutex> lock(g_ledgerLock);
+        std::wstring ledgerError;
+        const std::vector<std::wstring> pairs = ReadLedger(&ledgerError);
+        if (!ledgerError.empty()) {
+            if (warning != nullptr) *warning = ledgerError;
+        } else {
+            for (const std::wstring& pair : pairs) {
+                for (const std::wstring& name : SplitLedgerNames(pair))
+                    if (!name.empty()) ledgerNames.push_back(name);
+            }
+        }
+    }
+    auto sameName = [](const std::wstring& left, const std::wstring& right) {
+        return ::CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()),
+                                      right.c_str(), static_cast<int>(right.size()),
+                                      TRUE) == CSTR_EQUAL;
+    };
+    auto appendWarning = [&](const std::wstring& message) {
+        if (warning == nullptr || message.empty()) return;
+        if (!warning->empty()) *warning += L" ";
+        *warning += message;
+    };
+    if (activeProfileTypes != nullptr || activeProfileKnown != nullptr) {
+        long profileTypes = 0;
+        const HRESULT profileResult = session.CurrentProfileTypes(&profileTypes);
+        if (SUCCEEDED(profileResult)) {
+            if (activeProfileTypes != nullptr) *activeProfileTypes = profileTypes;
+            if (activeProfileKnown != nullptr) *activeProfileKnown = true;
+        } else {
+            appendWarning(L"The active Windows Firewall profile is unavailable: " +
+                          FormatHresult(profileResult));
+        }
+    }
+    std::vector<std::wstring> enumeratedNames;
+    IUnknown* rawEnumerator = nullptr;
+    HRESULT hr = session.rules()->get__NewEnum(&rawEnumerator);
+    if (FAILED(hr) || rawEnumerator == nullptr) {
+        appendWarning(L"Windows Firewall rule enumeration is unavailable: " +
+                      FormatHresult(hr));
+    } else {
+        ComPtr<IUnknown> enumeratorOwner;
+        enumeratorOwner.p = rawEnumerator;
+        ComPtr<IEnumVARIANT> enumerator;
+        hr = enumeratorOwner->QueryInterface(IID_IEnumVARIANT,
+                                             reinterpret_cast<void**>(enumerator.receive()));
+        if (FAILED(hr) || !enumerator) {
+            appendWarning(L"Windows Firewall rule enumerator is unavailable: " +
+                          FormatHresult(hr));
+        } else {
+            for (;;) {
+                VARIANT item;
+                ::VariantInit(&item);
+                ULONG fetched = 0;
+                hr = enumerator->Next(1, &item, &fetched);
+                if (hr == S_FALSE || fetched == 0) {
+                    ::VariantClear(&item);
+                    break;
+                }
+                if (FAILED(hr)) {
+                    ::VariantClear(&item);
+                    appendWarning(L"Windows Firewall rule enumeration stopped early: " +
+                                  FormatHresult(hr));
+                    break;
+                }
+                IUnknown* unknown = nullptr;
+                if (item.vt == VT_DISPATCH && item.pdispVal != nullptr)
+                    unknown = item.pdispVal;
+                else if (item.vt == VT_UNKNOWN)
+                    unknown = item.punkVal;
+                ComPtr<INetFwRule> rule;
+                if (unknown != nullptr)
+                    (void)unknown->QueryInterface(kIidRule,
+                                                  reinterpret_cast<void**>(rule.receive()));
+                BlockedRule entry;
+                if (rule && ReadFirewallRule(rule.get(), false, &entry)) {
+                    const bool owned = std::any_of(ledgerNames.begin(), ledgerNames.end(),
+                        [&](const std::wstring& name) { return sameName(name, entry.name); });
+                    entry.wintcpOwned = entry.wintcpOwned || owned;
+                    enumeratedNames.push_back(entry.name);
+                    out->push_back(std::move(entry));
+                }
+                ::VariantClear(&item);
+            }
+        }
+    }
+
+    for (const std::wstring& name : ledgerNames) {
+        const bool alreadyEnumerated = std::any_of(
+            enumeratedNames.begin(), enumeratedNames.end(),
+            [&](const std::wstring& candidate) { return sameName(name, candidate); });
+        if (alreadyEnumerated) continue;
+        BStr bname(name);
+        if (!bname.valid()) {
+            appendWarning(L"A WinTCP-owned firewall rule could not be retrieved because its name could not be allocated.");
+            continue;
+        }
+        ComPtr<INetFwRule> rule;
+        const HRESULT lookup = session.rules()->Item(bname, rule.receive());
+        if (IsMissingFirewallRuleResult(lookup))
+            continue;
+        if (FAILED(lookup) || !rule) {
+            appendWarning(L"The WinTCP-owned firewall rule \"" + name +
+                          L"\" could not be read: " + FormatHresult(lookup));
+            continue;
+        }
+        BlockedRule entry;
+        if (ReadFirewallRule(rule.get(), true, &entry)) {
+            enumeratedNames.push_back(entry.name);
+            out->push_back(std::move(entry));
+        } else {
+            appendWarning(L"The WinTCP-owned firewall rule \"" + name +
+                          L"\" could not be decoded.");
         }
     }
     return true;
@@ -1829,17 +2142,36 @@ bool RemoveBlockedRule(const std::wstring& name, std::wstring* error) {
         return false;
     }
     ComPtr<INetFwRule> found;
-    if (FAILED(rules->Item(bname, found.receive()))) {
+    const HRESULT lookup = rules->Item(bname, found.receive());
+    if (FAILED(lookup)) {
+        if (!IsMissingFirewallRuleResult(lookup)) {
+            SetError(error, L"could not inspect \"" + name + L"\": " +
+                                FormatHresult(lookup));
+            return false;
+        }
         // Already gone. The ledger still needs repairing below, so this is
         // success rather than an error - same shape as
         // RemoveAllWinTcpRules, which skips an absent rule silently.
         found = ComPtr<INetFwRule>();
+    } else if (found.get() == nullptr) {
+        SetError(error, L"Windows Firewall returned no rule object for \"" +
+                            name + L"\"");
+        return false;
     }
     if (found.get() != nullptr) {
         const HRESULT del = rules->Remove(bname);
         if (FAILED(del)) {
             SetError(error, L"could not remove \"" + name + L"\": " +
                                 FormatHresult(del));
+            return false;
+        }
+        ComPtr<INetFwRule> remaining;
+        const HRESULT verify = rules->Item(bname, remaining.receive());
+        if (!IsMissingFirewallRuleResult(verify)) {
+            SetError(error, SUCCEEDED(verify) && remaining.get() != nullptr
+                                ? L"Windows Firewall still reports \"" + name + L"\" after removal"
+                                : L"could not verify removal of \"" + name +
+                                      L"\": " + FormatHresult(verify));
             return false;
         }
     }
@@ -1870,7 +2202,10 @@ bool RemoveBlockedRule(const std::wstring& name, std::wstring* error) {
             if (p.empty()) continue;   // both halves gone
             kept.push_back(p);
         }
-        WriteLedger(kept);
+        if (!WriteLedger(kept)) {
+            SetError(error, L"the firewall rule was removed, but the WinTCP rule ledger could not be updated");
+            return false;
+        }
     }
     return true;
 }
@@ -1901,8 +2236,7 @@ bool SetBlockedRuleEnabled(const std::wstring& name, bool enabled,
         // 0x80070490 is how a missing rule surfaces. Disabling something that
         // is already gone is not an error - the state the caller wants is the
         // state the firewall is in.
-        if (found == HRESULT_FROM_WIN32(ERROR_NOT_FOUND) ||
-            found == REGDB_E_CLASSNOTREG) {
+        if (IsMissingFirewallRuleResult(found)) {
             return true;
         }
         SetError(error, L"could not read the rule \"" + name + L"\": " +
