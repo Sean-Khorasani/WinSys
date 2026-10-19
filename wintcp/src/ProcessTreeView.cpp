@@ -6,7 +6,10 @@
 
 #include <commctrl.h>
 
+#include <unordered_map>
+
 #include "ProcessTree.h"
+#include "Connection.h"
 
 namespace wintcp {
 namespace {
@@ -16,7 +19,218 @@ namespace {
 // truncates rather than overruns in any case.
 constexpr size_t kLabelChars = 320;
 
+struct ProcessLifetimeKey {
+    DWORD pid;
+    DWORD low;
+    DWORD high;
+
+    bool operator==(const ProcessLifetimeKey& other) const {
+        return pid == other.pid && low == other.low && high == other.high;
+    }
+};
+
+struct ProcessLifetimeKeyHash {
+    size_t operator()(const ProcessLifetimeKey& key) const {
+        size_t value = static_cast<size_t>(key.pid);
+        value ^= static_cast<size_t>(key.low) + 0x9e3779b9u + (value << 6) +
+                 (value >> 2);
+        value ^= static_cast<size_t>(key.high) + 0x9e3779b9u + (value << 6) +
+                 (value >> 2);
+        return value;
+    }
+};
+
+bool ProcessLifetimeOf(const ProcessTreeNode& process,
+                       ProcessLifetimeKey* key) {
+    if (!process.processCreateKnown || key == nullptr) return false;
+    key->pid = process.pid;
+    key->low = process.processCreate.dwLowDateTime;
+    key->high = process.processCreate.dwHighDateTime;
+    return true;
+}
+
+template <typename Callback>
+void ForEachTreeItem(HWND tree, Callback callback) {
+    if (tree == nullptr) return;
+    std::vector<HTREEITEM> pending;
+    for (HTREEITEM root = reinterpret_cast<HTREEITEM>(::SendMessageW(
+             tree, TVM_GETNEXTITEM, TVGN_ROOT, 0));
+         root != nullptr;
+         root = reinterpret_cast<HTREEITEM>(::SendMessageW(
+             tree, TVM_GETNEXTITEM, TVGN_NEXT,
+             reinterpret_cast<LPARAM>(root)))) {
+        pending.push_back(root);
+        while (!pending.empty()) {
+            const HTREEITEM item = pending.back();
+            pending.pop_back();
+            callback(item);
+            for (HTREEITEM child = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                     tree, TVM_GETNEXTITEM, TVGN_CHILD,
+                     reinterpret_cast<LPARAM>(item)));
+                 child != nullptr;
+                 child = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                     tree, TVM_GETNEXTITEM, TVGN_NEXT,
+                     reinterpret_cast<LPARAM>(child)))) {
+                pending.push_back(child);
+            }
+        }
+    }
+}
+
 }  // namespace
+
+bool ProcessInstanceMatches(DWORD pid, const FILETIME& processCreate,
+                            bool processCreateKnown,
+                            const Connection& process) {
+    return pid == process.identity.pid && processCreateKnown &&
+           process.procMeta.processCreateKnown &&
+           ::CompareFileTime(&processCreate,
+                             &process.procMeta.processCreate) == 0;
+}
+
+const Connection* FindProcessInstance(const std::vector<Connection>& rows,
+                                      DWORD pid, const FILETIME& processCreate,
+                                      bool processCreateKnown) {
+    for (const Connection& row : rows) {
+        if ((row.flags & kRowRemoved) == 0 &&
+            ProcessInstanceMatches(pid, processCreate, processCreateKnown,
+                                   row)) {
+            return &row;
+        }
+    }
+    return nullptr;
+}
+
+std::optional<size_t> FindProcessTreeViewRow(
+    const std::vector<Connection>& rows, const std::vector<size_t>& view,
+    const ProcessTreeNode& process) {
+    for (size_t viewIndex = 0; viewIndex < view.size(); ++viewIndex) {
+        const size_t rowIndex = view[viewIndex];
+        if (rowIndex >= rows.size()) continue;
+        const Connection& row = rows[rowIndex];
+        if ((row.flags & kRowRemoved) == 0 &&
+            ProcessTreeMatchesProcess(process, row)) {
+            return viewIndex;
+        }
+    }
+    return std::nullopt;
+}
+
+bool ProcessTreeMatchesProcess(const ProcessTreeNode& node,
+                               const Connection& process) {
+    return ProcessInstanceMatches(node.pid, node.processCreate,
+                                  node.processCreateKnown, process);
+}
+
+bool MakeProcessTreeActionCopy(const ProcessTreeNode& process,
+                               const std::vector<Connection>& rows,
+                               const Connection* resolvedProcess,
+                               Connection& output) {
+    if (process.pid == 0 || !process.processCreateKnown) return false;
+    for (const Connection& row : rows) {
+        if ((row.flags & kRowRemoved) == 0 &&
+            ProcessTreeMatchesProcess(process, row)) {
+            output = row;
+            return true;
+        }
+    }
+    if (resolvedProcess == nullptr ||
+        (resolvedProcess->flags & kRowRemoved) != 0 ||
+        !ProcessTreeMatchesProcess(process, *resolvedProcess))
+        return false;
+    output = *resolvedProcess;
+    return true;
+}
+
+const ProcessTreeNode* ProcessTreeNodeForItemData(
+    const std::vector<ProcessTreeNode>& procs, LPARAM itemData) {
+    if (itemData < 0) return nullptr;
+    const size_t index = static_cast<size_t>(itemData);
+    return index < procs.size() ? &procs[index] : nullptr;
+}
+
+const ProcessTreeNode* FindProcessTreeInstance(
+    const std::vector<ProcessTreeNode>& procs,
+    const ProcessTreeNode& captured) {
+    if (captured.pid == 0 || !captured.processCreateKnown) return nullptr;
+    for (const ProcessTreeNode& process : procs) {
+        if (process.pid == captured.pid && process.processCreateKnown &&
+            ::CompareFileTime(&process.processCreate,
+                              &captured.processCreate) == 0) {
+            return &process;
+        }
+    }
+    return nullptr;
+}
+
+ProcessTreeViewState CaptureProcessTreeViewState(
+    HWND tree, const std::vector<ProcessTreeNode>& procs) {
+    ProcessTreeViewState state;
+    if (tree == nullptr) return state;
+    const HTREEITEM caret = reinterpret_cast<HTREEITEM>(::SendMessageW(
+        tree, TVM_GETNEXTITEM, TVGN_CARET, 0));
+    ForEachTreeItem(tree, [&](HTREEITEM item) {
+        TVITEMW value = {};
+        value.mask = TVIF_PARAM | TVIF_STATE | TVIF_HANDLE;
+        value.stateMask = TVIS_EXPANDED;
+        value.hItem = item;
+        if (::SendMessageW(tree, TVM_GETITEMW, 0,
+                           reinterpret_cast<LPARAM>(&value)) == 0) {
+            return;
+        }
+        const ProcessTreeNode* process =
+            ProcessTreeNodeForItemData(procs, value.lParam);
+        if (process == nullptr) return;
+        if (item == caret) state.caret = *process;
+        ProcessLifetimeKey key = {};
+        if (!ProcessLifetimeOf(*process, &key)) return;
+        state.expansions.push_back(ProcessTreeExpansionState{
+            *process, (value.state & TVIS_EXPANDED) != 0});
+    });
+    return state;
+}
+
+void RestoreProcessTreeViewState(
+    HWND tree, const std::vector<ProcessTreeNode>& procs,
+    const ProcessTreeViewState& state) {
+    if (tree == nullptr) return;
+    std::unordered_map<ProcessLifetimeKey, HTREEITEM, ProcessLifetimeKeyHash>
+        items;
+    items.reserve(procs.size());
+    ForEachTreeItem(tree, [&](HTREEITEM item) {
+        TVITEMW value = {};
+        value.mask = TVIF_PARAM | TVIF_HANDLE;
+        value.hItem = item;
+        if (::SendMessageW(tree, TVM_GETITEMW, 0,
+                           reinterpret_cast<LPARAM>(&value)) == 0) {
+            return;
+        }
+        const ProcessTreeNode* process =
+            ProcessTreeNodeForItemData(procs, value.lParam);
+        ProcessLifetimeKey key = {};
+        if (process != nullptr && ProcessLifetimeOf(*process, &key))
+            items.emplace(key, item);
+    });
+    for (const ProcessTreeExpansionState& expansion : state.expansions) {
+        ProcessLifetimeKey key = {};
+        if (!ProcessLifetimeOf(expansion.process, &key)) continue;
+        const auto found = items.find(key);
+        if (found == items.end()) continue;
+        ::SendMessageW(tree, TVM_EXPAND,
+                       expansion.expanded ? TVE_EXPAND : TVE_COLLAPSE,
+                       reinterpret_cast<LPARAM>(found->second));
+    }
+    if (state.caret.has_value()) {
+        ProcessLifetimeKey key = {};
+        if (ProcessLifetimeOf(*state.caret, &key)) {
+            const auto found = items.find(key);
+            if (found != items.end()) {
+                ::SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET,
+                               reinterpret_cast<LPARAM>(found->second));
+            }
+        }
+    }
+}
 
 size_t ProcessTreeFill(HWND tree, const std::vector<ProcessTreeNode>& procs,
                        bool* depthExceeded) {
@@ -93,7 +307,7 @@ size_t ProcessTreeFill(HWND tree, const std::vector<ProcessTreeNode>& procs,
                 ins.hInsertAfter = TVI_LAST;
                 ins.item.mask = TVIF_TEXT | TVIF_PARAM;
                 ins.item.pszText = label;
-                ins.item.lParam = static_cast<LPARAM>(p.pid);
+                ins.item.lParam = static_cast<LPARAM>(n.rowIndex);
                 f.self = reinterpret_cast<HTREEITEM>(::SendMessageW(
                     tree, TVM_INSERTITEMW, 0,
                     reinterpret_cast<LPARAM>(&ins)));
