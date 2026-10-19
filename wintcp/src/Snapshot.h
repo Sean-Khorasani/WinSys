@@ -109,6 +109,7 @@ public:
     // separated from building a pass so a load failure can be reported with its
     // own message instead of being reported as "enumeration failed".
     bool LoadGeoIp(const wchar_t* path, std::wstring* error);
+    void UnloadGeoIp();
     bool GeoIpLoaded() const;
     // Look up a country code for a host-order IPv4 address.
     // Returns empty when no database is loaded or the address is not global.
