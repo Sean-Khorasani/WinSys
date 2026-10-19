@@ -45,7 +45,7 @@ Some conventions you will see in the list:
 
 All heavy work (enumeration, process resolution, reverse DNS) runs on worker threads and is posted to the UI thread when ready. The list itself is a **virtual ListView** (`LVS_OWNERDATA`), so it stays responsive with tens of thousands of rows and preserves selection, focus and scroll position across refreshes.
 
-Every row also carries an **accessible name and description** for screen readers: the name is `chrome.exe, TCPv4, ESTABLISHED` and the description is `PID 1234, 8 connections`, and a grouped row names the aggregate (`svchost.exe, TCP+UDP`, `PID 4321, 14 connections`). Roles, states, navigation and hit-testing remain what the list control itself reports — only the two text properties are added — so assistive technology hears the same truth the pixels show.
+Every row has an accessible name and description for screen readers. For example, a connection may be announced as `Browser.exe, TCPv4, ESTABLISHED`, followed by its PID and connection count. Grouped rows announce the aggregate process and protocol information.
 
 ## Refreshing and row highlighting
 
@@ -118,7 +118,7 @@ Presets saved with `wintcp.exe preset save` appear in the **File** menu, so a vi
 
 **View → Process tree** swaps the connection list for a **tree of every process on the machine**, the way Task Manager's Processes tab shows them: one node per process, labelled `name (PID n, k connections)` where `k` is how many connections that process owns (0 for most), under its parent when the parent is also running and as a root otherwise. The command is a checked **mode** (its tick on the menu, and `[Tree]` in the caption), not a window of its own — the tree occupies exactly the rectangle the list uses, and switching back restores the selection and scroll position you had. The filter box does not narrow the tree: a tree built from a filtered view is a broken tree, because the parents are missing.
 
-Why all processes and not the connected ones: the tree is read as a hierarchy, and a hierarchy built from the connection table is missing most of itself. chrome.exe runs 32 renderers and almost none of them holds a socket at any instant, so a connection-only tree showed a browser as one node and nothing else — that was the reported defect. The process list comes from one Toolhelp snapshot and the connection counts from the table, merged in one place.
+Why all processes and not the connected ones: the tree is read as a hierarchy, and a hierarchy built from the connection table is missing most of itself. Browser.exe runs 32 renderers and almost none of them holds a socket at any instant, so a connection-only tree showed a browser as one node and nothing else — that was the reported defect. The process list comes from one Toolhelp snapshot and the connection counts from the table, merged in one place.
 
 Every row command works on the tree unchanged. The node you are on is mapped to that process's first row, so **Copy**, **Export**, **Block**, **Close**, **End process** and **Open file location** act on the process you can see. **Details** (double-click, or `Enter`) opens the process dossier even when the process owns **no** connection — which is most of the tree, since a renderer between requests has no socket: the window describes the process itself rather than doing nothing. The status bar shows `N processes, M connections` where the selection count would be. Roots are expanded one level on open, and the first node is selected, so the arrow keys work the moment the mode is switched on.
 
@@ -135,14 +135,13 @@ Right-click a row (or double-click to open Details):
 | **Open file location** | Opens Explorer on the row's executable, pre-selected — the same `explorer.exe /select,` call the Details window's button makes, so the two cannot disagree. |
 | **Block this connection** | Adds a firewall block rule. IPv4 only, and requires administrator rights. |
 
-Each of the three destructive confirms (**End process**, **Close connection**, **Block this connection**) ends with a **Scriptable:** line naming the CLI verb for the same row — `wintcp.exe kill --pid N --yes`, `wintcp.exe close --select "pid:N remote:A" --yes`, `wintcp.exe block --select "pid:N remote:A" --yes` — verified on the real machine to resolve to exactly the row the window had. A successful block reports on the status bar rather than a modal, so the list keeps updating; a partial failure still takes a modal because it must not be missed.
+Each destructive confirmation (**End process**, **Close connection**, or **Block this connection**) also shows the corresponding CLI command for review. A successful block is reported in the status bar; failures are shown separately.
 | **Export selection.** | Writes the selected rows to a file. See [Export](#export). |
 | **Refresh** | Same as F5. |
 
-Two commands were **removed on 2026-10-05** after being reported not to work. Neither was repaired in place, and the reasoning is worth stating because both look like features one could still want:
+### Other actions
 
-- ***Process properties*** is gone from both the Process menu and the context menu. `properties` is a shell **verb**, run through a shell item rather than by handing `ShellExecuteW` a bare path - which is exactly the case where it fails. The old handler reported one indistinguishable message box for that, for a missing path, and for PID 4's placeholder `System` path.
-- ***Follow TCP stream*** is gone from both menus. The capability is not lost: it is the [`capture`](cli.md#capture) verb on the command line, where the blocking it requires is the point rather than the defect. `capture --text` prints the reassembled stream to stdout the way `tcpflow -A` does, and `capture --out FILE` keeps the capture as pcapng for Wireshark or `tshark`.
+The GUI does not include a Process Properties shell command or a Follow TCP Stream window. Use **Open file location** or **Details** for process information. For packet capture and stream inspection, use the [`capture`](cli.md#capture) CLI command; `capture --text` prints the reassembled stream and `capture --out FILE` saves a pcapng file for Wireshark or `tshark`.
 
 ## Details window
 
@@ -152,8 +151,8 @@ A sectioned, modeless window with the process identity, command line, creation t
 - It opens centered over the main window and scales with DPI.
 - While open it **refreshes silently on every auto-refresh**. If the tracked process exits, a note appears once.
 - **Copy** and **Open file location** buttons are provided, in a row below the body.
-- **Every connection owned by that PID is listed** - all of them, not a preview. It used to stop at 25 rows and report *… and N more*, which hid the one section that answers "what is this process actually connected to"; the cap is gone rather than made expandable, because an expander would put the answer behind a click on a window whose whole model is "read, and collapse sections". A browser process with 70-odd sockets lists all of them.
-- Note that a multi-process browser puts each process in its **own PID**, so `PID 50092` never mixes in another `chrome.exe`'s sockets, and rows belonging to other PIDs are never listed at all. The list is scoped to the selected row's process, not to everything in the snapshot.
+- **Every connection owned by that PID is listed**, not just a sample. A process with many sockets can make the Details window long; scroll within the section to review the full list.
+- Note that a multi-process browser puts each process in its **own PID**, so `PID 50092` never mixes in another `Browser.exe`'s sockets, and rows belonging to other PIDs are never listed at all. The list is scoped to the selected row's process, not to everything in the snapshot.
 
 ### Threads
 
@@ -168,7 +167,7 @@ A **Threads** section lists the process's own threads, ranked by CPU time with t
 
 **There is deliberately no per-connection thread column, because none exists.** Windows has no notion of a socket's owning thread: `MIB_TCPROW_OWNER_PID` - the row behind the `GetExtendedTcpTable` call this whole app is built on - carries no thread id, and an AFD endpoint is owned by the *process*. That is why TCPView, Process Explorer and Wireshark all stop at the PID too. The only thread association available comes from ETW event headers, and it is the thread that *performed an I/O*, not an owner: on a socket shared between threads it changes from packet to packet, and it is only observable while a trace session runs. A column headed *Thread* holding that would be a label the data does not support.
 
-For the same reason the section omits each thread's current state. `GetThreadInfo`/`THREADINFO` is a legacy kernel32 export that the Windows SDK no longer declares for user mode, and its state and wait-reason values are not published - so "Waiting"/"Running" would mean inventing a mapping. Better absent than wrong.
+The thread list does not show a running/waiting state because Windows does not provide a supported user-mode mapping for those values.
 
 
 ### Layout
@@ -184,10 +183,7 @@ Fields are laid out as a **two-column table**, one row per field:
 - Long values are elided rather than wrapped; a visibly shortened value beats a silent cut. Copy the value to the clipboard to get all of it.
 - The body scrolls on a **native scrollbar** (arrows, paging, thumb-drag, Home/End all work), and the keyboard scrolls too: `Up`/`Down` step a line, `PageUp`/`PageDown` a page, `Home`/`End` jump. Tabs switch with `Ctrl`+`Tab` / `Ctrl`+`Shift`+`Tab` (or the `Left`/`Right` arrows when the window itself has focus); section headers and tabs show a hand cursor. The window's accessible name is the plain-text model, so screen readers announce the same text **Copy** puts on the clipboard.
 
-Two layout faults were fixed on 2026-10-05, both of which surface as "the window doesn't split correctly":
-
-- Each field used to be **two** stacked rows - the label, then the value indented beneath it - so a section cost 34 px of captions and read as text rather than as a table. It is now one row per field.
-- The body painted down to the **full client height** rather than to the bottom of the content region, so the last visible fields were drawn behind *Copy* / *Open file location* / *Close*. The click and hover handlers had the same missing bound, so a click in the button row could toggle a section hidden behind it.
+Fields are arranged in a two-column table, with one row per field. Long values are shortened visually; use **Copy** to retrieve the full value. The body scrolls independently of the window controls.
 
 The same report is available from the command line with `wintcp.exe details`; see the [cookbook](cookbook.md#14-full-dossier-for-one-connection).
 
@@ -284,7 +280,7 @@ The **Change log window** (`File → Change log window...`) shows the same feed 
 
 Each panel is independent and has its own "collecting…" and `n/a` states; before the first samples land, one line over the plot area says traces are on their way. The two-line panels (Disk, Network) carry a **colour legend** (`R`/`W`, `down`/`up`) at the right of the caption row, so the two line colours are explained where they are drawn. The charts are double-buffered, follow the system theme (including high contrast, where the series borrow the system's contrast-picked highlight pair) and enforce a minimum window size. The window opens centered over the main window; closing it with **X** — or `Esc` — hides it and stops the one-second sampling timer, the menu entry shows it again (and its check mark re-syncs when the menu opens), and it is destroyed with the application.
 
-The window is display-only no longer: **&Export…** writes the full histories as CSV through the same exporter the tests pin (panel order, units and ceilings identical to the traces), and **&Copy values** puts the current-values table on the clipboard — the same table the window's accessible name announces, so keyboard and screen-reader users reach every number the traces show.
+**&Export…** writes the full histories as CSV, and **&Copy values** puts the current-values table on the clipboard. The accessible name also announces the table values for keyboard and screen-reader users.
 
 ## Traffic counters in the GUI
 
@@ -306,7 +302,7 @@ Full details, including limits, are in [Traffic counters](traffic.md).
 
 A file that will not load reports the parser's own reason under **GeoIP database not loaded**, because a missing file, a truncated one, a file that is not an MMDB, and a database declaring an unsupported record size are four different problems that need four different answers from you.
 
-Reloading works on a live session: picking another file replaces the previous one, and a peer that moves out of the new database's coverage has its country **cleared** rather than keeping a stale answer — the one way a swap could look like it worked while showing the wrong country. Nothing is downloaded either way. [GeoIP database](../README.md#geoip-database) explains why not, where a free `GeoLite2-Country.mmdb` comes from, and how `geoipupdate` keeps it current.
+Reloading works on a live session: picking another file replaces the previous one, and a peer that moves out of the new database's coverage has its country **cleared** rather than keeping a stale answer. Nothing is downloaded. See [GeoIP database](../README.md#geoip-database) for database requirements and licensing.
 
 **The choice survives a restart.** Window placement, columns, sort, filter, always-on-top, tray and the database path all persist in `HKCU\Software\WinTCP`. Pick a database once and the next launch silently reloads the stored path, so the `Country` column repopulates without a second trip through the picker. A moved or deleted file fails to load quietly — `Country` shows "—" as it would for no database at all, which is the honest outcome — and **View → GeoIP database** still reports the parser's reason under **GeoIP database not loaded** when it does fail.
 
