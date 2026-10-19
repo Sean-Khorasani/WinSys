@@ -27,9 +27,12 @@
 #include <windows.h>
 
 #include <string>
+#include <optional>
 #include <vector>
 
 namespace wintcp {
+
+struct Connection;
 
 // One process, already deduplicated. 'connections' is decoration for the
 // label ("name  (PID n, k connections)") and never affects the SHAPE: the
@@ -42,7 +45,51 @@ struct ProcessTreeNode {
     bool ppidKnown = true;
     std::wstring name;
     size_t connections = 0;
+    FILETIME processCreate = {};
+    bool processCreateKnown = false;
 };
+
+struct ProcessTreeExpansionState {
+    ProcessTreeNode process;
+    bool expanded = false;
+};
+
+struct ProcessTreeViewState {
+    std::vector<ProcessTreeExpansionState> expansions;
+    std::optional<ProcessTreeNode> caret;
+};
+
+bool ProcessInstanceMatches(DWORD pid, const FILETIME& processCreate,
+                            bool processCreateKnown,
+                            const Connection& process);
+
+const Connection* FindProcessInstance(const std::vector<Connection>& rows,
+                                     DWORD pid, const FILETIME& processCreate,
+                                     bool processCreateKnown);
+
+std::optional<size_t> FindProcessTreeViewRow(
+    const std::vector<Connection>& rows, const std::vector<size_t>& view,
+    const ProcessTreeNode& process);
+
+bool ProcessTreeMatchesProcess(const ProcessTreeNode& node,
+                               const Connection& process);
+
+bool MakeProcessTreeActionCopy(const ProcessTreeNode& process,
+                               const std::vector<Connection>& rows,
+                               const Connection* resolvedProcess,
+                               Connection& output);
+
+const ProcessTreeNode* ProcessTreeNodeForItemData(
+    const std::vector<ProcessTreeNode>& procs, LPARAM itemData);
+const ProcessTreeNode* FindProcessTreeInstance(
+    const std::vector<ProcessTreeNode>& procs,
+    const ProcessTreeNode& captured);
+
+ProcessTreeViewState CaptureProcessTreeViewState(
+    HWND tree, const std::vector<ProcessTreeNode>& procs);
+void RestoreProcessTreeViewState(
+    HWND tree, const std::vector<ProcessTreeNode>& procs,
+    const ProcessTreeViewState& state);
 
 // Empties 'tree' and refills it: one item per PROCESS in 'procs'
 // (exactly what is passed, so the caller decides which processes exist),
