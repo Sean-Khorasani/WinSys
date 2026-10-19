@@ -72,7 +72,7 @@ const ROUTES = [
   ["#/network", "Network"],
   ["#/map", "Map"],
   ["#/automations", "Automations"],
-  ["#/blocks", "Blocked Peers"],
+  ["#/blocks", "Firewall Rules"],
   ["#/system", "System"],
   ["#/settings", "Settings"],
   ["#/", "Overview"],
@@ -130,9 +130,9 @@ const TABBED_PAGES = [
   { hash: "#/processes", label: "Processes",
     tabs: ["Table", "Tree", "Treemap"] },
   { hash: "#/network", label: "Network",
-    tabs: ["Connections", "Listening", "Blocked", "Flows"] },
+    tabs: ["Connections", "Listening", "Closed history", "Firewall rules", "Flows"] },
   { hash: "#/automations", label: "Automations",
-    tabs: ["Templates", "Events", "Scripts"] },
+    tabs: ["Templates", "Scripts", "Events & audit"] },
 ];
 
 for (const spec of TABBED_PAGES) {
@@ -286,6 +286,19 @@ await page.getByRole("tab", { name: "Tree", exact: true }).click();
 await page.waitForTimeout(400);
 const treeItems = await page.locator('[role="treeitem"]').count();
 check("Processes tree renders a real hierarchy", treeItems > 5, `${treeItems} items`);
+const expandableTreeItem = page.locator('[role="treeitem"][aria-expanded="true"]').first();
+const treeKey = await expandableTreeItem.getAttribute("data-tree-key");
+let collapsedBeforePoll = null;
+let collapsedAfterPoll = null;
+if (treeKey) {
+  await expandableTreeItem.locator(":scope > .tree-row > .tree-disclosure").click();
+  collapsedBeforePoll = await page.locator(`[role="treeitem"][data-tree-key="${treeKey}"]`).getAttribute("aria-expanded");
+  await page.waitForTimeout(6000);
+  collapsedAfterPoll = await page.locator(`[role="treeitem"][data-tree-key="${treeKey}"]`).getAttribute("aria-expanded").catch(() => null);
+}
+check("Process-tree expansion state survives production polling", Boolean(treeKey) &&
+  collapsedBeforePoll === "false" && collapsedAfterPoll === "false",
+  `key=${treeKey}; before=${collapsedBeforePoll}; after=${collapsedAfterPoll}`);
 
 await page.getByRole("tab", { name: "Treemap", exact: true }).click();
 await page.waitForTimeout(600);
