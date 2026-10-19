@@ -349,6 +349,18 @@ struct Connection {
     unsigned flags = 0;               // RowFlags
 };
 
+inline bool SameProcessLifetime(const Connection& left,
+                                const Connection& right) {
+    return left.identity.pid != 0 &&
+           left.identity.pid == right.identity.pid &&
+           left.procMeta.processCreateKnown &&
+           right.procMeta.processCreateKnown &&
+           left.procMeta.processCreate.dwHighDateTime ==
+               right.procMeta.processCreate.dwHighDateTime &&
+           left.procMeta.processCreate.dwLowDateTime ==
+               right.procMeta.processCreate.dwLowDateTime;
+}
+
 // Cumulative per-PID byte totals - the unit exchanged between the traffic
 // sources (ETW kernel logger, per-socket SIO_TCP_INFO scan)
 // and ConnectionStore::SetTraffic(). Shared here so the refresh worker's
