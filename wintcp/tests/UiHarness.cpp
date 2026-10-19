@@ -1545,6 +1545,30 @@ if (processVisible < 0) {
     Check(processRowsSorted(expectedAscending == 0, &processOrderDetail),
           "SMOKE the second process sort direction reverses name order",
           processOrderDetail);
+    if (Num(w, "rowCount") > 12) {
+        HWND connectionList = ::GetDlgItem(hwnd, IDC_LIST);
+        const int lastRow = static_cast<int>(Num(w, "rowCount") - 1);
+        ::SendMessageW(connectionList, LVM_ENSUREVISIBLE,
+                       static_cast<WPARAM>(lastRow), FALSE);
+        const int bottomTop = static_cast<int>(::SendMessageW(
+            connectionList, LVM_GETTOPINDEX, 0, 0));
+        processOrderDetail.clear();
+        Check(bottomTop > 0 && processRowsSorted(expectedAscending == 0,
+                                                  &processOrderDetail),
+              "SMOKE name sort order remains correct after scrolling to later rows",
+              processOrderDetail + " top=" + std::to_string(bottomTop));
+        ::SendMessageW(connectionList, LVM_ENSUREVISIBLE, 0, FALSE);
+        const int topTop = static_cast<int>(::SendMessageW(
+            connectionList, LVM_GETTOPINDEX, 0, 0));
+        processOrderDetail.clear();
+        Check(topTop == 0 && processRowsSorted(expectedAscending == 0,
+                                                &processOrderDetail),
+              "SMOKE name sort order remains correct after scrolling back to the first row",
+              processOrderDetail + " top=" + std::to_string(topTop));
+    } else {
+        Skip("SMOKE name sort order after list scrolling",
+             "the live connection snapshot has too few rows to scroll");
+    }
 }
 Check(Num(w, "trackSelectEnabled") == 0,
       "SMOKE moving the pointer does not enable row selection");
