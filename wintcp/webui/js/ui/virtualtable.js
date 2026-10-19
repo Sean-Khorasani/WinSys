@@ -19,8 +19,16 @@ export function createVirtualTable(container, opts = {}) {
     sortKey = null,
     sortDir = null,
     label = "Data table",
-    emptyMessage = "No rows",
+    emptyMessage: initialEmptyMessage = "No rows",
+    minWidth = null,
+    scrollTop = 0,
+    onScroll = null,
+    rowKey = null,
   } = opts;
+  let emptyMessage = initialEmptyMessage;
+  let currentSortKey = sortKey;
+  let currentSortDir = sortDir;
+  let currentScrollTop = scrollTop;
 
   const state = {
     rows: [],
@@ -39,7 +47,7 @@ export function createVirtualTable(container, opts = {}) {
     tabindex: "0",
     "aria-label": label,
     "aria-rowcount": "0",
-    style: `height: ${height}px; overflow-y: auto; position: relative;`,
+    style: minWidth ? `--virtual-table-min-width: ${minWidth}; position: relative;` : "position: relative;",
   });
 
   // The header MUST live inside the role=grid element. It used to be a sibling
@@ -53,12 +61,13 @@ export function createVirtualTable(container, opts = {}) {
     "aria-rowindex": "1",
     style:
       "display: flex; border-bottom: 1px solid var(--border); background: var(--muted); " +
-      "position: sticky; top: 0; z-index: 1;",
+      `position: sticky; top: 0; z-index: 1; min-width: var(--virtual-table-min-width, 0);`,
   });
+  const headerCells = new Map();
   columns.forEach((col, index) => {
-    const isSorted = col.sortable && sortKey === col.key;
+    const isSorted = col.sortable && currentSortKey === col.key;
     const indicator = col.sortable
-      ? (isSorted ? (sortDir === "asc" ? " \u25B2" : " \u25BC") : "")
+      ? (isSorted ? (currentSortDir === "asc" ? " \u25B2" : " \u25BC") : "")
       : "";
     const headerStyle = isSorted
       ? `flex: ${col.width || 1}; padding: 0.5rem 0.75rem; font-size: 0.75rem; ` +
@@ -68,24 +77,40 @@ export function createVirtualTable(container, opts = {}) {
         "font-weight: 500; color: var(--muted-foreground); text-transform: uppercase; " +
         "letter-spacing: 0.05em; white-space: nowrap;" +
         (col.sortable ? " cursor: pointer;" : "");
-    header.append(
-      h("div", {
+    const cell = h("div", {
         role: "columnheader",
         "aria-colindex": String(index + 1),
         "aria-sort": isSorted
-          ? (sortDir === "asc" ? "ascending" : "descending")
+          ? (currentSortDir === "asc" ? "ascending" : "descending")
           : (col.sortable ? "none" : undefined),
         style: headerStyle,
         tabindex: col.sortable ? "0" : undefined,
         onclick: col.sortable && onSort
-          ? () => onSort(col.key, sortDir === "asc" ? "desc" : "asc")
+          ? () => onSort(col.key, currentSortDir === "asc" ? "desc" : "asc")
           : null,
         onkeydown: (col.sortable && onSort)
-          ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSort(col.key, sortDir === "asc" ? "desc" : "asc"); } }
+          ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSort(col.key, currentSortDir === "asc" ? "desc" : "asc"); } }
           : null,
-      }, col.label + indicator),
-    );
+      }, col.label + indicator);
+    headerCells.set(col.key, { col, cell });
+    header.append(cell);
   });
+  function updateSort(nextKey, nextDir) {
+    currentSortKey = nextKey;
+    currentSortDir = nextDir;
+    for (const { col, cell } of headerCells.values()) {
+      if (!col.sortable) continue;
+      const isSorted = currentSortKey === col.key;
+      cell.textContent = col.label + (isSorted
+        ? (currentSortDir === "asc" ? " \u25B2" : " \u25BC")
+        : "");
+      cell.setAttribute("aria-sort", isSorted
+        ? (currentSortDir === "asc" ? "ascending" : "descending")
+        : "none");
+      cell.style.color = isSorted ? "var(--primary)" : "var(--muted-foreground)";
+      cell.style.fontWeight = isSorted ? "600" : "500";
+    }
+  }
   headerGroup.append(header);
 
   const inner = h("div", { class: "virtual-table-inner", role: "rowgroup" });
@@ -94,6 +119,7 @@ export function createVirtualTable(container, opts = {}) {
 
   inner.append(spacerTop, spacerBottom);
   wrapper.append(headerGroup, inner);
+  if (currentScrollTop > 0) wrapper.scrollTop = currentScrollTop;
 
   // The empty state is a role="row" like any other, so it needs a role="gridcell"
   // child: a row containing bare text violates aria-required-children, which axe
@@ -102,12 +128,13 @@ export function createVirtualTable(container, opts = {}) {
   //
   // A gridcell is a required child, but a bare role="gridcell" with no role="row"
   // above it would fail the same rule in reverse, so the pairing matters.
+  const emptyCell = h("div", { role: "gridcell", "aria-colspan": String(columns.length) }, emptyMessage);
   const emptyRow = h("div", {
     class: "virtual-table-empty muted",
     role: "row",
     "aria-rowindex": "2",
     style: `height: ${rowHeight}px; display: flex; align-items: center; padding: 0 0.75rem;`,
-  }, h("div", { role: "gridcell", "aria-colspan": String(columns.length) }, emptyMessage));
+  }, emptyCell);
 
   container.append(wrapper);
 
@@ -130,9 +157,10 @@ function buildRow(index) {
     tabindex: "-1",
     "aria-rowindex": String(index + 2),   // +1 for the header row, 1-based
     "data-index": String(index),
+    "data-row-key": rowKey ? String(rowKey(row)) : undefined,
     style:
       `display: flex; height: ${rowHeight}px; border-bottom: 1px solid var(--border); ` +
-      "align-items: center; cursor: pointer;",
+      "align-items: center; cursor: pointer; min-width: var(--virtual-table-min-width, 0);",
     onclick: () => {
       setActive(index);
       if (onRowClick) onRowClick(row, index);
@@ -201,21 +229,50 @@ function buildRow(index) {
     if (node) node.focus();
   }
 
-  function updateRows(newRows) {
+  function updateRows(newRows, nextEmptyMessage = undefined) {
+    const previousRows = state.rows;
+    const activeKey = rowKey && state.activeIndex >= 0
+      ? rowKey(previousRows[state.activeIndex])
+      : null;
+    const keepFocus = document.activeElement;
+    const focusedIndex = keepFocus && keepFocus.dataset && keepFocus.dataset.index !== undefined
+      ? Number(keepFocus.dataset.index)
+      : -1;
+    const focusedKey = rowKey && focusedIndex >= 0 && previousRows[focusedIndex]
+      ? rowKey(previousRows[focusedIndex])
+      : null;
     state.rows = Array.isArray(newRows) ? newRows : [];
+    if (typeof nextEmptyMessage === "string") emptyMessage = nextEmptyMessage;
     wrapper.setAttribute("aria-rowcount", String(state.rows.length + 1));
-    if (state.activeIndex >= state.rows.length) state.activeIndex = -1;
+    let restoreTo = focusedIndex >= 0 ? String(focusedIndex) : null;
+    if (rowKey) {
+      state.activeIndex = activeKey == null
+        ? -1
+        : state.rows.findIndex((row) => rowKey(row) === activeKey);
+      const focusedRowIndex = focusedKey == null
+        ? -1
+        : state.rows.findIndex((row) => rowKey(row) === focusedKey);
+      restoreTo = focusedRowIndex >= 0 ? String(focusedRowIndex) : null;
+    } else if (state.activeIndex >= state.rows.length) {
+      state.activeIndex = -1;
+    }
     // The rows themselves changed, so the cached nodes are stale - their text
     // still shows the previous data. Drop them, but remember where focus was so
     // it can be handed back after the rebuild.
-    const keepFocus = document.activeElement;
-    const wasRow = keepFocus && keepFocus.dataset && keepFocus.dataset.index !== undefined;
-    const restoreTo = wasRow ? keepFocus.dataset.index : null;
     for (const node of rowNodes.values()) node.remove();
     rowNodes.clear();
     render();
-    if (restoreTo !== null && rowNodes.has(Number(restoreTo))) {
-      rowNodes.get(Number(restoreTo)).focus();
+    if (currentScrollTop > 0) {
+      requestAnimationFrame(() => {
+        wrapper.scrollTop = currentScrollTop;
+        render();
+        if (onScroll) onScroll(wrapper.scrollTop);
+      });
+    }
+    if (restoreTo !== null) {
+      const focusIndex = Number(restoreTo);
+      if (!rowNodes.has(focusIndex)) ensureRendered(focusIndex);
+      if (rowNodes.has(focusIndex)) rowNodes.get(focusIndex).focus();
     }
   }
 
@@ -238,6 +295,7 @@ function buildRow(index) {
     if (total === 0) {
       for (const node of rowNodes.values()) node.remove();
       rowNodes.clear();
+      emptyCell.textContent = emptyMessage;
       if (!emptyRow.isConnected) inner.insertBefore(emptyRow, spacerBottom);
       return;
     }
@@ -285,6 +343,8 @@ function buildRow(index) {
   });
 
   wrapper.addEventListener("scroll", () => {
+    currentScrollTop = wrapper.scrollTop;
+    if (onScroll) onScroll(wrapper.scrollTop);
     requestAnimationFrame(render);
   });
 
@@ -300,5 +360,5 @@ function buildRow(index) {
 
   render();
 
-  return { updateRows, render, wrapper, destroy, setActive };
+  return { updateRows, updateSort, render, wrapper, destroy, setActive };
 }
