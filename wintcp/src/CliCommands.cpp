@@ -689,18 +689,19 @@ const CommandHelp kCommandHelps[] = {
       "  wintcp.exe doctor\r\n"
       "  wintcp.exe doctor --format json\r\n"
       "  wintcp.exe doctor --verbose --db GeoLite2-Country.mmdb\r\n"},
-    {"webui",
-     "webui - run the loopback-only local browser dashboard\r\n"
-     "\r\n"
-     "Usage: wintcp.exe webui serve\r\n"
-     "\r\n"
-     "Binds only to 127.0.0.1 on a temporary port and opens the default\r\n"
-     "browser. Configuration and audit events stay under %LOCALAPPDATA%\\WinTCP\\WebUi.\r\n"
-     "The server stops with Ctrl+C. Firewall changes require a separate\r\n"
-     "preview and an explicit confirmation in the page.\r\n"
-     "\r\n"
-     "Example:\r\n"
-     "  wintcp.exe webui serve\r\n"},
+     {"webui",
+      "webui - run the loopback-only local browser dashboard\r\n"
+      "\r\n"
+      "Usage: wintcp.exe webui serve [--port N]\r\n"
+      "\r\n"
+      "Binds only to 127.0.0.1 on a temporary port (or --port N) and opens the\r\n"
+      "default browser. Configuration and audit events stay under %LOCALAPPDATA%\\WinTCP\\WebUi.\r\n"
+      "The server stops with Ctrl+C. Firewall changes require a separate\r\n"
+      "preview and an explicit confirmation in the page.\r\n"
+      "\r\n"
+      "Example:\r\n"
+      "  wintcp.exe webui serve\r\n"
+      "  wintcp.exe webui serve --port 45455\r\n"},
     {"monitor",
      "monitor - run a detached background instance that logs what it sees\r\n"
      "\r\n"
@@ -1690,7 +1691,7 @@ const VerbSwitches kVerbSwitches[] = {
     // it silently refused. An asn: filter that matches nothing had no way to ask
     // whether the file it was given was even an ASN database.
     {L"doctor", L"--verbose --format --db --asn-db"},
-    {L"webui", L""},
+     {L"webui", L"--port"},
     // webhook: no switches of its own. `send <url>` POSTs the current state,
     // `test <url>` POSTs a test event; both take the URL as a positional arg.
     {L"webhook", L""},
@@ -2666,10 +2667,10 @@ int RunCliCommand(int argc, wchar_t** argv) {
     }
     if (cmd == L"webui") {
         if (ToLowerW(a.sub) != L"serve" || !a.ip.empty()) {
-            WriteErr("webui: usage: wintcp.exe webui serve\r\n");
+            WriteErr("webui: usage: wintcp.exe webui serve [--port N]\r\n");
             return 2;
         }
-        return RunWebUiServer();
+        return RunWebUiServer(a.port);
     }
     if (cmd == L"monitor") {
         return RunMonitor(a);
