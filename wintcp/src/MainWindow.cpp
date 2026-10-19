@@ -3505,8 +3505,7 @@ void MainWindow::RemoveAllWinTcpBlocks() {
 }
 
 DetailModel MainWindow::BuildDetails(const Connection& c) const {
-    // Delegates to the abstract layer so the GUI and the `details` CLI verb
-    // render the same model. The DetailsDialog renderer is unchanged.
+    // The GUI and the `details` CLI verb share this model.
     return BuildDetailModel(c, store_);
 }
 
