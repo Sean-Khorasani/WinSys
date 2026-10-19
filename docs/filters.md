@@ -2,7 +2,10 @@
 
 ← [Back to the README](../README.md)
 
-One grammar is used everywhere WinTCP selects rows:
+The native GUI and CLI use the filter language documented here. The Web UI
+supports the common connection fields documented in its [Network guide](webui.md#inspect-and-copy-connections),
+and visibly rejects fields it cannot evaluate from its connection data; it does
+not silently reinterpret unsupported fields as text.
 
 | Where | Example |
 |---|---|
@@ -141,6 +144,7 @@ The units are not uniform across fields: a bare `duration:3600` is 3600 **second
 ## Quoting and negation
 
 - `note:"vendor api"` and `path:"program files"` each remain a single term.
+- Quoted values must have a matching closing quote. The Web UI rejects an unclosed quote with a visible syntax error. The GUI shows `Filter syntax: unclosed quote` in the status bar and keeps the entered text as a literal fallback; native parser callers also retain that fallback rather than dropping the filter and matching every row.
 - `exclude:chrome` removes rows matching `chrome`. It applies to the next term only, so `exclude:127.` removes rows containing `127.`.
 - Inside a quoted `--filter` argument on the command line, an embedded quote is doubled. The documented form is:
 
