@@ -181,6 +181,49 @@
   left: 50%;
   transform: translate(-50%, -50%);
 }
+.virtual-table {
+  width: 100%;
+  min-width: 0;
+  height: clamp(18rem, calc(100dvh - 18rem), 52rem);
+  max-height: calc(100dvh - 9rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+.virtual-table-inner { min-width: var(--virtual-table-min-width, 0); }
+.details-dialog {
+  width: min(44rem, calc(100vw - 2rem));
+  max-width: 44rem;
+  max-height: min(86dvh, 56rem);
+  padding: 0;
+  overflow: hidden;
+}
+.details-dialog[open] {
+  position: fixed;
+  inset: auto;
+  top: 50%;
+  left: 50%;
+  margin: 0;
+  transform: translate(-50%, -50%);
+}
+.details-dialog .dialog-header {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.details-dialog .dialog-title { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.details-dialog .dialog-content { max-height: calc(86dvh - 8rem); overflow: auto; }
+.detail-list {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.75fr) minmax(0, 1.5fr);
+  gap: 0.75rem 1rem;
+  margin: 0;
+}
+.detail-list dt { color: var(--muted-foreground); }
+.detail-list dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .dialog-header {
   display: flex;
   flex-direction: column;
@@ -200,6 +243,13 @@
 /* Native <dialog> elements: style the backdrop and ensure centering works. */
 dialog::backdrop {
   background: rgb(0 0 0 / 0.5);
+}
+@media (max-width: 640px) {
+  .virtual-table { height: clamp(16rem, calc(100dvh - 16rem), 42rem); }
+  .details-dialog { width: calc(100vw - 1rem); max-height: 92dvh; }
+  .details-dialog .dialog-header, .details-dialog .dialog-content { padding: 0.875rem; }
+  .details-dialog .dialog-content { max-height: calc(92dvh - 6rem); }
+  .detail-list { grid-template-columns: minmax(6rem, 0.65fr) minmax(0, 1.35fr); gap: 0.6rem 0.75rem; }
 }
 
 /* Dialog buttons need a visible background, not the transparent btn-ghost,
