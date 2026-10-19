@@ -217,10 +217,11 @@ function renderTopbar(container, handlers = {}) {
       h("div", { class: "topbar-right" },
         h("span", { class: "topbar-status", id: "topbar-status" }, ""),
         h("button", {
-          class: "btn btn-ghost btn-sm",
+          class: "btn btn-ghost btn-icon btn-sm topbar-palette",
           type: "button",
+          "aria-label": "Open command palette",
           onclick: () => handlers.onPalette && handlers.onPalette(),
-        }, icon("search", 14), "Ctrl+K"),
+        }, icon("search", 14), h("span", { class: "sr-only" }, "Open command palette")),
         h("button", {
           class: "btn btn-ghost btn-icon btn-sm",
           type: "button",
@@ -229,13 +230,13 @@ function renderTopbar(container, handlers = {}) {
           title: "Refresh now",
         }, icon("refresh", 16)),
         h("button", {
-          class: "btn btn-ghost btn-sm",
+          class: "btn btn-ghost btn-icon btn-sm",
           id: "topbar-pause",
           type: "button",
           onclick: () => handlers.onTogglePause && handlers.onTogglePause(),
           "aria-label": store.get().paused ? "Resume live updates" : "Pause live updates",
           title: store.get().paused ? "Resume live updates" : "Pause live updates",
-        }, store.get().paused ? "Resume" : "Pause"),
+        }, icon(store.get().paused ? "play" : "pause", 16)),
         h("button", {
           class: "btn btn-ghost btn-icon btn-sm",
           type: "button",
@@ -433,6 +434,19 @@ function init() {
     if (window.location.hash === "#/network") resolveRoute();
     else navigate("/network");
   });
+  document.addEventListener("wintcp:inspect-connection", (event) => {
+    const key = event.detail?.key;
+    if (typeof key !== "string" || !key.startsWith("connection:") || key.length > 512) return;
+    store.set({ pendingConnectionInspectorKey: key, networkView: "connections" });
+    if (window.location.hash === "#/network") resolveRoute();
+    else navigate("/network");
+  });
+  document.addEventListener("wintcp:refresh-now", () => {
+    refresh({ manual: true }).catch(() => {});
+  });
+  document.addEventListener("wintcp:retry-map", () => {
+    if (window.location.hash === "#/map") rerenderCurrentPage();
+  });
   const app = document.getElementById("app-shell");
   clear(app);
   renderSidebar(app);
@@ -576,7 +590,7 @@ function updateTopbarStatus() {
   }
   const pauseButton = document.getElementById("topbar-pause");
   if (pauseButton) {
-    pauseButton.textContent = store.get().paused ? "Resume" : "Pause";
+    pauseButton.replaceChildren(icon(store.get().paused ? "play" : "pause", 16));
     pauseButton.setAttribute("aria-label", store.get().paused ? "Resume live updates" : "Pause live updates");
     pauseButton.title = store.get().paused ? "Resume live updates" : "Pause live updates";
   }
