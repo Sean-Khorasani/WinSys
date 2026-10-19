@@ -142,9 +142,12 @@ struct FilterKeyword {
 const FilterKeyword* FilterKeywordTable();
 size_t FilterKeywordCount();
 
-// Parse a filter box string into clauses. Never fails; unparsable values
-// degrade to plain text matching. Exposed for --selftest.
-bool ParseFilter(const std::wstring& text, std::vector<FilterClause>& out);
+// Parse a filter box string into clauses. An unclosed quote returns false and
+// leaves a literal fallback clause so legacy callers that ignore the status
+// still fail closed instead of turning the filter into an empty match-all.
+// Exposed for --selftest.
+bool ParseFilter(const std::wstring& text, std::vector<FilterClause>& out,
+                 std::wstring* error = nullptr);
 bool MatchClause(const Connection& c, const FilterClause& cl);
 bool MatchFilter(const Connection& c, const std::vector<FilterClause>& prog);
 
@@ -243,8 +246,8 @@ struct RowStats {
 // layouts (two v4 rows differing only in unused v6 bytes must still be the
 // SAME row, which is why those bytes are simply never written).
 struct ConnectionKey {
-    // 1 + 1 (flags) + 16 + 4 + 16 (IPv6 addrs + port) + 4 + 4 (port + pid).
-    static constexpr size_t kMaxBytes = 46;
+    // Widest IPv6 tuple plus PID, lifetime-known flag and process FILETIME.
+    static constexpr size_t kMaxBytes = 55;
 
     size_t len = 0;
     unsigned char bytes[kMaxBytes] = {};
