@@ -15,6 +15,9 @@ export function createVirtualTable(container, opts = {}) {
     rowHeight = 40,
     height = 400,
     onRowClick = null,
+    onSort = null,
+    sortKey = null,
+    sortDir = null,
     label = "Data table",
     emptyMessage = "No rows",
   } = opts;
@@ -53,15 +56,34 @@ export function createVirtualTable(container, opts = {}) {
       "position: sticky; top: 0; z-index: 1;",
   });
   columns.forEach((col, index) => {
+    const isSorted = col.sortable && sortKey === col.key;
+    const indicator = col.sortable
+      ? (isSorted ? (sortDir === "asc" ? " \u25B2" : " \u25BC") : "")
+      : "";
+    const headerStyle = isSorted
+      ? `flex: ${col.width || 1}; padding: 0.5rem 0.75rem; font-size: 0.75rem; ` +
+        "font-weight: 600; color: var(--primary); text-transform: uppercase; " +
+        "letter-spacing: 0.05em; white-space: nowrap; cursor: pointer;"
+      : `flex: ${col.width || 1}; padding: 0.5rem 0.75rem; font-size: 0.75rem; ` +
+        "font-weight: 500; color: var(--muted-foreground); text-transform: uppercase; " +
+        "letter-spacing: 0.05em; white-space: nowrap;" +
+        (col.sortable ? " cursor: pointer;" : "");
     header.append(
       h("div", {
         role: "columnheader",
         "aria-colindex": String(index + 1),
-        style:
-          `flex: ${col.width || 1}; padding: 0.5rem 0.75rem; font-size: 0.75rem; ` +
-          "font-weight: 500; color: var(--muted-foreground); text-transform: uppercase; " +
-          "letter-spacing: 0.05em; white-space: nowrap;",
-      }, col.label),
+        "aria-sort": isSorted
+          ? (sortDir === "asc" ? "ascending" : "descending")
+          : (col.sortable ? "none" : undefined),
+        style: headerStyle,
+        tabindex: col.sortable ? "0" : undefined,
+        onclick: col.sortable && onSort
+          ? () => onSort(col.key, sortDir === "asc" ? "desc" : "asc")
+          : null,
+        onkeydown: (col.sortable && onSort)
+          ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSort(col.key, sortDir === "asc" ? "desc" : "asc"); } }
+          : null,
+      }, col.label + indicator),
     );
   });
   headerGroup.append(header);
@@ -124,17 +146,29 @@ function buildRow(index) {
     },
   });
   columns.forEach((col, colIndex) => {
+    const cellStyle = col.actions
+      ? `flex: ${col.width || 0.8}; padding: 0 0.375rem; display: flex; gap: 0.25rem; align-items: center; justify-content: flex-end;`
+      : `flex: ${col.width || 1}; padding: 0 0.75rem; font-size: 0.875rem; ` +
+        "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;";
+    if (col.renderCell && col.renderCell(row) !== undefined) {
+      const cell = h("div", {
+        role: "gridcell",
+        "aria-colindex": String(colIndex + 1),
+        style: cellStyle,
+      });
+      cell.append(col.renderCell(row, rowEl));
+      rowEl.append(cell);
+    } else {
     const val = row[col.key] != null ? String(row[col.key]) : "-";
     rowEl.append(
       h("div", {
         role: "gridcell",
         "aria-colindex": String(colIndex + 1),
         title: val,
-        style:
-          `flex: ${col.width || 1}; padding: 0 0.75rem; font-size: 0.875rem; ` +
-          "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;",
+        style: cellStyle,
       }, val),
     );
+    }
   });
   return rowEl;
 }
