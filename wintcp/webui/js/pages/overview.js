@@ -186,6 +186,16 @@ export async function renderOverview(page, store) {
     ),
   );
 
+  // State holders for incremental updates: store references to chart instances
+  // and KPI card value nodes so updateOverview can patch them without a full
+  // DOM teardown. The page object carries these so main.js can reach them.
+  page._overviewState = {
+    charts: new Map(),
+    kpiCards: new Map(),
+    lastMetricsTs: null,
+    lastHistoryTs: null,
+  };
+
   const state = store.get();
   const stamp = page.querySelector("#overview-updated");
   if (state.lastUpdate) {
@@ -194,9 +204,6 @@ export async function renderOverview(page, store) {
     stamp.textContent = "Waiting for the first poll";
   }
 
-  // The poller already has /api/metrics/now and /api/network/summary in the
-  // store, so the KPI cards and the breakdowns render on the first frame; the
-  // history fetch only adds trends.
   renderKpis(page, state);
   renderBreakdowns(page, state);
 
@@ -204,6 +211,428 @@ export async function renderOverview(page, store) {
     mountCharts(page),
     mountProcesses(page),
   ]);
+
+  // Render connections by state on first mount.
+  renderConnectionStates(page, state);
+}
+
+// Incremental update: patches KPI values, sparklines, chart data, and breakdowns
+// in place without destroying the DOM tree. Preserves scroll position, focus,
+// and avoids the flicker/jump of a full re-render.
+export async function updateOverview(page, store) {
+  const state = store.get();
+  const ov = page._overviewState;
+  if (!ov) {
+    // Not yet initialized; defer to the next poll after the first render.
+    return;
+  }
+
+  // 1. Update timestamp.
+  const stamp = page.querySelector("#overview-updated");
+  if (stamp && state.lastUpdate) {
+    stamp.textContent = `Updated ${state.lastUpdate.toLocaleTimeString()}`;
+  }
+
+  // 2. Update KPI card values if metrics changed.
+  const metricsTs = state.metrics?._timestamp;
+  if (metricsTs !== ov.lastMetricsTs) {
+    ov.lastMetricsTs = metricsTs;
+    updateKpiValues(page, state, ov);
+  }
+
+  // 3. Fetch fresh history data and update sparklines + deltas.
+  // History is refetched on every poll so sparklines and KPI deltas track
+  // live data. The previous code gated on ov.sparkData, but sparkData is
+  // only set inside mountCharts when t.length >= 2 — so if the first fetch
+  // had < 2 samples, the condition was never re-evaluated and the charts
+  // never got data.
+  try {
+    const history = await api.get("/api/metrics/history?max=300");
+    if (history && history.t) {
+      ov.history = history;
+      const t = Array.isArray(history.t) ? history.t : [];
+      const raw = history.series || {};
+      const tail = (key, n) => (raw[key] || []).slice(-n);
+      ov.sparkData = {
+        cpu: tail("cpu.total", 60),
+        memory: tail("mem.usedBytes", 60),
+        disk: [tail("disk.readBps", 60), tail("disk.writeBps", 60)],
+        network: [tail("net.rxBps", 60), tail("net.txBps", 60)],
+        connections: [],
+        processes: [],
+      };
+      paintTrends(page, ov.sparkData, t, raw);
+
+      // 4. Mount or update charts via setData (no destroy/recreate).
+      if (t.length >= 2) {
+        if (ov.charts.size === 0) {
+          // Charts not yet created; mount them now.
+          await mountCharts(page);
+        } else {
+          updateCharts(page, ov);
+        }
+      }
+    }
+  } catch (err) {
+    // Network error fetching history; keep the existing sparkData.
+  }
+
+  // 5. Update breakdowns if network summary or process data changed.
+  updateBreakdowns(page, state, ov);
+
+  // 6. Update top processes list.
+  updateProcesses(page, state);
+
+  // 7. Update connections by state.
+  updateConnectionStates(page, state);
+}
+
+// Update KPIs by patching existing card nodes in place.
+function updateKpiValues(page, state, ov) {
+  const metrics = state.metrics || {};
+  const conns = state.connections || [];
+  const summary = state.networkSummary || {};
+  const total = typeof summary.total === "number" ? summary.total : conns.length;
+  const byState = summary.byState || {};
+  const established = byState.ESTABLISHED ?? null;
+  const listening = byState.LISTENING ?? null;
+
+  const read = (key) => ({
+    known: metrics[key] !== null && metrics[key] !== undefined && !Number.isNaN(metrics[key]),
+    value: metrics[key],
+    reason: metrics[`${key}.reason`] || "the sampler has not reported this series yet",
+  });
+
+  // CPU
+  updateKpiCard(page, "cpu", (card) => {
+    const r = read("cpu.total");
+    const valueNode = card.querySelector(".kpi-value");
+    if (!valueNode) return;
+    if (r.known) {
+      valueNode.innerHTML = "";
+      valueNode.textContent = fmtPct(r.value);
+    } else {
+      valueNode.innerHTML = "";
+      valueNode.append(
+        h("span", { class: "kpi-value-unavailable", title: r.reason }, UNAVAILABLE),
+      );
+    }
+  });
+
+  // Memory
+  updateKpiCard(page, "memory", (card) => {
+    const r = read("mem.usedBytes");
+    const valueNode = card.querySelector(".kpi-value");
+    if (!valueNode) return;
+    if (r.known) {
+      valueNode.innerHTML = "";
+      valueNode.textContent = fmtBytes(r.value);
+    } else {
+      valueNode.innerHTML = "";
+      valueNode.append(
+        h("span", { class: "kpi-value-unavailable", title: r.reason }, UNAVAILABLE),
+      );
+    }
+    const foot = card.querySelector(".kpi-foot");
+    if (foot && metrics["mem.totalBytes"] != null) {
+      foot.textContent = `of ${fmtBytes(metrics["mem.totalBytes"])} installed`;
+    }
+  });
+
+  // Disk
+  updateKpiCard(page, "disk", (card) => {
+    const r = read("disk.readBps");
+    const w = read("disk.writeBps");
+    const valueNode = card.querySelector(".kpi-value");
+    if (!valueNode) return;
+    valueNode.innerHTML = "";
+    valueNode.classList.toggle("kpi-value-stack", true);
+    const lines = [r, w];
+    const hints = ["read", "written"];
+    lines.forEach((part, i) => {
+      const line = h("div", { class: "kpi-value-line" });
+      if (part == null || !part.known) {
+        line.append(h("span", { class: "kpi-value-unavailable", title: part?.reason || "unavailable" }, UNAVAILABLE));
+      } else {
+        line.textContent = fmtBps(part.value);
+      }
+      if (hints[i]) {
+        line.title = hints[i];
+        if (!card.querySelector(".kpi-spark")) line.append(h("span", { class: "kpi-line-hint muted" }, hints[i]));
+      }
+      valueNode.append(line);
+    });
+  });
+
+  // Network
+  updateKpiCard(page, "network", (card) => {
+    const d = read("net.rxBps");
+    const u = read("net.txBps");
+    const valueNode = card.querySelector(".kpi-value");
+    if (!valueNode) return;
+    valueNode.innerHTML = "";
+    valueNode.classList.toggle("kpi-value-stack", true);
+    const lines = [d, u];
+    const hints = ["received", "sent"];
+    lines.forEach((part, i) => {
+      const line = h("div", { class: "kpi-value-line" });
+      if (part == null || !part.known) {
+        line.append(h("span", { class: "kpi-value-unavailable", title: part?.reason || "unavailable" }, UNAVAILABLE));
+      } else {
+        line.textContent = fmtBps(part.value);
+      }
+      if (hints[i]) {
+        line.title = hints[i];
+        if (!card.querySelector(".kpi-spark")) line.append(h("span", { class: "kpi-line-hint muted" }, hints[i]));
+      }
+      valueNode.append(line);
+    });
+  });
+
+  // Connections
+  updateKpiCard(page, "connections", (card) => {
+    const valueNode = card.querySelector(".kpi-value");
+    if (!valueNode) return;
+    valueNode.innerHTML = "";
+    valueNode.textContent = fmtInt(total);
+    const foot = card.querySelector(".kpi-foot");
+    if (foot) {
+      foot.textContent = established != null
+        ? `${fmtInt(established)} established \u00b7 ${fmtInt(listening ?? 0)} listening`
+        : "state breakdown not sampled yet";
+    }
+  });
+
+  // Processes
+  updateKpiCard(page, "processes", (card) => {
+    const known = state.processCountKnown === true || (Array.isArray(state.processes) && state.processes.length > 0);
+    const count = state.processCount ?? (state.processes ? state.processes.length : 0);
+    const valueNode = card.querySelector(".kpi-value");
+    if (!valueNode) return;
+    valueNode.innerHTML = "";
+    if (known) {
+      valueNode.textContent = fmtInt(count);
+    } else {
+      valueNode.append(
+        h("span", { class: "kpi-value-unavailable", title: "the process table has not been sampled yet" }, UNAVAILABLE),
+      );
+    }
+    const foot = card.querySelector(".kpi-foot");
+    if (foot) {
+      foot.textContent = state.sysUptime != null
+        ? `up ${fmtUptime(state.sysUptime)}`
+        : "uptime not sampled yet";
+    }
+  });
+}
+
+function updateKpiCard(page, id, renderFn) {
+  const card = page.querySelector(`[data-kpi="${id}"]`);
+  if (!card) return;
+  try {
+    renderFn(card);
+  } catch (e) {
+    console.warn(`KPI update failed for ${id}`, e);
+  }
+}
+
+// Update the breakdown cards in place.
+function updateBreakdowns(page, state, ov) {
+  const host = page.querySelector("#overview-breakdown");
+  if (!host) return;
+
+  const summary = state.networkSummary || null;
+  const metrics = state.metrics || {};
+  const facts = metrics.facts || {};
+
+  // Listeners by exposure - update values in place.
+  const listeners = summary ? summary.listeners : null;
+  const exposureCard = host.querySelector(":scope > .card");
+  if (exposureCard) {
+    const existingGrid = exposureCard.querySelector(".exposure-grid");
+    if (existingGrid) {
+      const cells = existingGrid.querySelectorAll(".exposure-value");
+      const keys = ["wildcard", "lan", "loopback"];
+      keys.forEach((key, i) => {
+        if (cells[i]) {
+          cells[i].textContent = listeners ? fmtInt(listeners[key] ?? 0) : "—";
+        }
+      });
+    } else if (listeners) {
+      // Grid didn't exist yet (first time data arrived); build it.
+      const contentBox = exposureCard.querySelector(".card-content");
+      if (contentBox) {
+        clear(contentBox);
+        const list = h("div", { class: "exposure-grid" });
+        for (const [key, label, hint] of [
+          ["wildcard", "Wildcard", "binds every interface, reachable from the network"],
+          ["lan", "LAN", "binds one specific address"],
+          ["loopback", "Loopback", "reachable only from this machine"],
+        ]) {
+          list.append(h("div", { class: "exposure-cell", title: hint },
+            h("div", { class: "exposure-value num" }, fmtInt(listeners[key] ?? 0)),
+            h("div", { class: "exposure-label" }, label),
+          ));
+        }
+        contentBox.append(list);
+      }
+    }
+  }
+
+  // Volumes - only rebuild if the volume set changed.
+  const volCard = host.querySelectorAll(":scope > .card")[1];
+  if (volCard && Array.isArray(facts.volumes)) {
+    if (ov.prevVolumeCount !== facts.volumes.length) {
+      ov.prevVolumeCount = facts.volumes.length;
+      const contentBox = volCard.querySelector(".card-content");
+      if (contentBox) {
+        clear(contentBox);
+        const volumes = facts.volumes;
+        if (volumes.length === 0) {
+          contentBox.append(emptyState({}, "No volumes reported",
+            "GetDiskFreeSpaceEx returned nothing for any mounted drive."));
+        } else {
+          const list = h("div", { class: "volume-list" });
+          for (const vol of volumes) {
+            const total = Number(vol.totalBytes) || 0;
+            const free = Number(vol.freeBytes) || 0;
+            const pct = total > 0 ? Math.max(0, Math.min(100, ((total - free) / total) * 100)) : 0;
+            list.append(h("div", { class: "volume-row" },
+              h("span", { class: "volume-label" },
+                h("strong", {}, vol.label || "?"),
+                vol.volumeName ? h("span", { class: "muted" }, ` ${vol.volumeName}`) : null,
+                h("span", { class: "muted text-sm" }, ` ${vol.fileSystem || "?"}`),
+              ),
+              h("span", { class: "volume-track", "aria-hidden": "true" },
+                h("span", { class: `volume-fill${pct > 90 ? " volume-fill-warn" : ""}`, style: `width:${pct.toFixed(1)}%` }),
+              ),
+              h("span", { class: "volume-value num" },
+                `${fmtBytes(free)} free of ${fmtBytes(total)}`),
+            ));
+          }
+          contentBox.append(list);
+        }
+      }
+    }
+  }
+}
+
+// Update the top processes list in place.
+function updateProcesses(page, state) {
+  const host = page.querySelector("#overview-procs");
+  if (!host) return;
+  const processes = state.processes || [];
+  const known = state.processesKnown !== false;
+  if (!known || processes.length === 0) return;
+
+  let listEl = host.querySelector(".proc-mini");
+  if (!listEl) {
+    clear(host);
+    listEl = h("div", { class: "proc-mini" });
+    host.append(listEl);
+  }
+
+  const usable = processes
+    .filter((r) => r.cpuPct != null)
+    .sort((a, b) => (b.cpuPct || 0) - (a.cpuPct || 0))
+    .slice(0, 8);
+
+  // Diff against existing rows for a targeted update.
+  const existing = Array.from(listEl.querySelectorAll(".proc-mini-row"));
+  const maxLen = Math.max(existing.length, usable.length);
+
+  for (let i = 0; i < maxLen; i++) {
+    const rowData = usable[i];
+    if (i < existing.length && rowData) {
+      // Update existing row in place.
+      const row = existing[i];
+      const nameEl = row.querySelector(".proc-mini-name");
+      const fillEl = row.querySelector(".proc-mini-fill");
+      const valEl = row.querySelector(".proc-mini-value");
+      if (nameEl) {
+        nameEl.textContent = rowData.name || "(unnamed)";
+        nameEl.title = rowData.path || rowData.name;
+      }
+      if (fillEl) {
+        fillEl.style.width = `${Math.max(1, Math.min(100, rowData.cpuPct)).toFixed(1)}%`;
+      }
+      if (valEl) {
+        valEl.textContent = fmtPct(rowData.cpuPct);
+      }
+    } else if (rowData && i >= existing.length) {
+      // Append new row.
+      listEl.append(h("div", { class: "proc-mini-row" },
+        h("span", { class: "proc-mini-name", dir: "auto", title: rowData.path || rowData.name }, rowData.name || "(unnamed)"),
+        h("span", { class: "proc-mini-bar", "aria-hidden": "true" },
+          h("span", {
+            class: "proc-mini-fill",
+            style: `width:${Math.max(1, Math.min(100, rowData.cpuPct)).toFixed(1)}%`,
+          }),
+        ),
+        h("span", { class: "proc-mini-value num" }, fmtPct(rowData.cpuPct)),
+      ));
+    }
+  }
+
+  // Remove excess rows.
+  for (let i = usable.length; i < existing.length; i++) {
+    existing[i]?.remove();
+  }
+}
+
+// Update connections-by-state breakdown in place.
+function updateConnectionStates(page, state) {
+  const host = page.querySelector("#overview-states");
+  if (!host) return;
+  const summary = state.networkSummary;
+  if (!summary) return;
+
+  const byState = summary.byState || {};
+  const states = [
+    { key: "ESTABLISHED", label: "Established", color: "info" },
+    { key: "LISTENING", label: "Listening", color: "accent" },
+    { key: "TIME_WAIT", label: "Time wait", color: "muted" },
+    { key: "CLOSE_WAIT", label: "Close wait", color: "warning" },
+    { key: "SYN_SENT", label: "SYN sent", color: "destructive" },
+  ];
+
+  let grid = host.querySelector(".state-grid");
+  if (!grid) {
+    clear(host);
+    grid = h("div", { class: "state-grid" });
+    host.append(grid);
+  }
+
+  const existing = Array.from(grid.children);
+  // Match/reuse by state key.
+  const used = new Set();
+  for (const s of states) {
+    const count = byState[s.key];
+    if (count == null) continue;
+    let cell = existing.find((el) => !used.has(el) && el.dataset.state === s.key);
+    if (!cell) {
+      cell = h("div", { class: `state-cell state-${s.color}`, "data-state": s.key },
+        h("div", { class: "state-value num" }, ""),
+        h("div", { class: "state-label" }, s.label),
+      );
+      grid.append(cell);
+    }
+    used.add(cell);
+    const valEl = cell.querySelector(".state-value");
+    if (valEl) valEl.textContent = fmtInt(count);
+  }
+
+  // Remove cells for states no longer present.
+  for (const cell of existing) {
+    if (!used.has(cell)) cell.remove();
+  }
+}
+
+// Initial render of connections by state (called once after mount).
+function renderConnectionStates(page, state) {
+  const host = page.querySelector("#overview-states");
+  if (!host) return;
+  updateConnectionStates(page, state);
 }
 
 function renderKpis(page, state) {
@@ -423,6 +852,7 @@ function renderBreakdowns(page, state) {
 }
 
 async function mountCharts(page) {
+  const ov = page._overviewState;
   const hosts = [
     {
       sel: "#chart-cpu-mem",
@@ -461,9 +891,6 @@ async function mountCharts(page) {
 
   let history;
   try {
-    // 300 samples is five minutes at 1 Hz, which is what the sparklines and the
-    // deltas need. Asking for the full 900 would put a ~60 KB body on a page the
-    // browser also polls every two seconds.
     history = await api.get("/api/metrics/history?max=300");
   } catch (err) {
     for (const host of hosts) {
@@ -473,6 +900,7 @@ async function mountCharts(page) {
     return;
   }
 
+  ov.history = history;
   const t = Array.isArray(history.t) ? history.t : [];
   const raw = history.series || {};
 
@@ -487,6 +915,7 @@ async function mountCharts(page) {
     connections: [],
     processes: [],
   };
+  ov.sparkData = sparkData;
   // The KPI cards were already rendered from the store; repaint just the
   // sparkline slots and deltas now that the series exists.
   paintTrends(page, sparkData, t, raw);
@@ -503,27 +932,53 @@ async function mountCharts(page) {
     return;
   }
 
-  const charts = [];
   for (const host of hosts) {
     const el = page.querySelector(host.sel);
     if (!el) continue;
+    // Only mount a chart if the container is still empty (no existing chart).
+    if (el._chartEntry) continue;
+    // Clear any placeholder (e.g. "Collecting samples") before mounting.
+    clear(el);
     try {
-      charts.push(await createTimeseries(el, {
+      const entry = await createTimeseries(el, {
         height: 200,
         data: { t, values: host.transform(raw) },
         series: host.series,
-      }));
+      });
+      el._chartEntry = entry;
+      // Store the transform function for future updates; key by element id.
+      ov.charts.set(host.sel, { entry, transform: host.transform });
     } catch (err) {
       clear(el);
       el.append(emptyState({}, "Chart unavailable", err.message));
     }
   }
 
+  // Teardown hook for page navigation: destroys all charts so they don't leak.
   page._chartDestroy = () => {
-    for (const chart of charts) {
-      try { chart.destroy(); } catch { /* already gone */ }
+    for (const info of ov.charts.values()) {
+      try { info.entry.destroy(); } catch { /* already gone */ }
     }
+    ov.charts.clear();
   };
+}
+
+// Update chart data in place using setData, avoiding chart destruction.
+function updateCharts(page, ov) {
+  if (!ov.history) return;
+  const t = Array.isArray(ov.history.t) ? ov.history.t : [];
+  const raw = ov.history.series || {};
+
+  for (const [sel, info] of ov.charts) {
+    const el = page.querySelector(sel);
+    if (!el || !el._chartEntry) continue;
+    try {
+      const nextData = { t, values: info.transform(raw) };
+      el._chartEntry.setData(nextData);
+    } catch (err) {
+      console.warn("chart update failed", sel, err);
+    }
+  }
 }
 
 function paintTrends(page, sparkData, t, raw) {
