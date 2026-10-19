@@ -8,7 +8,7 @@
 
 namespace wintcp {
 
-int RunWebUiServer();
+int RunWebUiServer(unsigned portHint = 0);
 
 // JSON emitters, exposed so the unit tests can assert their output shape
 // directly. These were file-local before; ParseUint64Strict in particular is
