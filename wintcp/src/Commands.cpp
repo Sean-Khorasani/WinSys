@@ -1559,18 +1559,11 @@ PrintSelection SelectedForPrint(ConnectionStore& store,
     return sel;
 }
 
-// A row that can never carry enrichment: a wildcard or unspecified peer, a
-// listener with no remote, or a row the kernel has already given up on
-// (TIME_WAIT and friends keep their endpoint for a while, but the process is
-// gone, so `process` stays an em-dash no matter what is switched on).
+// Address enrichment needs a concrete remote IP. Process ownership and TCP
+// state do not affect whether reverse DNS or GeoIP can resolve that address.
 bool RowCanEnrich(const Connection& c) {
     if (c.display.remoteAddress.empty() || c.display.remoteAddress == L"*") return false;
     if (c.display.remoteAddress == L"0.0.0.0" || c.display.remoteAddress == L"::") return false;
-    if (c.identity.remotePort == 0) return false;              // listener / unbound
-    const bool terminal = c.identity.state == MIB_TCP_STATE_TIME_WAIT ||
-                          c.identity.state == MIB_TCP_STATE_CLOSED ||
-                          c.identity.state == MIB_TCP_STATE_DELETE_TCB;
-    if (terminal && c.identity.pid == 0) return false;
     return true;
 }
 
