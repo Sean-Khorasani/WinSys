@@ -20,7 +20,7 @@ constexpr size_t kVendorMaxBytes = 2 * 1024 * 1024;  // 2 MiB for /vendor/
 
 // Allowed prefixes (must start with /)
 const std::vector<std::string> kAllowedPrefixes = {
-    "/js/", "/css/", "/vendor/", "/fonts/", "/data/", "/img/", "/legacy/",
+    "/js/", "/css/", "/vendor/", "/fonts/", "/data/", "/img/",
 };
 
 // Allowed extensions
