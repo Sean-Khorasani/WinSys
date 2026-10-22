@@ -388,8 +388,11 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 }
 @media (max-width: 1024px) { .map-layout { grid-template-columns: 1fr; } }
 .map-panel {
-  height: 38rem;
-  min-height: 28rem;
+  /* Adapt to the viewport instead of a fixed 38rem block: on a maximized
+     browser window the map grows, while still keeping a usable minimum on
+     small windows. */
+  height: clamp(30rem, calc(100vh - 10rem), 80rem);
+  min-height: 30rem;
   position: relative;
   border: 1px solid var(--border);
   border-radius: var(--radius);
