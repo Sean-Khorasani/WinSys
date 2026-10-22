@@ -71,6 +71,7 @@ public:
 private:
     NOTIFYICONDATAW nid_ = {};
     bool shown_ = false;
+    bool ownsIcon_ = false;
 };
 
 }  // namespace wintcp

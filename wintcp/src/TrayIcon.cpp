@@ -32,8 +32,11 @@ bool TrayIcon::Add(HWND owner, HINSTANCE instance) {
     nid_.uCallbackMessage = WM_APP_TRAY;
     nid_.hIcon = static_cast<HICON>(::LoadImageW(
         instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, 16, 16, 0));
-    if (nid_.hIcon == nullptr)
+    ownsIcon_ = (nid_.hIcon != nullptr);
+    if (nid_.hIcon == nullptr) {
         nid_.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
+        ownsIcon_ = false;
+    }
     ::wcscpy_s(nid_.szTip, L"WinTCP - TCP/UDP Connections");
     shown_ = ::Shell_NotifyIconW(NIM_ADD, &nid_) != FALSE;
     return shown_;
@@ -48,6 +51,9 @@ void TrayIcon::Remove() {
     // dependency explicit rather than incidental.
     if (!DllAvailable("shell32.dll")) return;
     ::Shell_NotifyIconW(NIM_DELETE, &nid_);
+    if (ownsIcon_ && nid_.hIcon != nullptr) ::DestroyIcon(nid_.hIcon);
+    nid_.hIcon = nullptr;
+    ownsIcon_ = false;
     shown_ = false;
 }
 
