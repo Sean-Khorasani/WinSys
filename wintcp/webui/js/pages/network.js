@@ -794,7 +794,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
   const selectionHeader = h("div", { class: "selection-header" },
     selectAllButton,
     h("span", { class: "muted text-sm" },
-      "Ctrl-click toggles rows; Shift-click selects a range; Ctrl+A selects all shown."));
+      "Ctrl/Command-click toggles a row; Shift-click selects a range; use Select all shown for every visible row."));
   const clearSelectionButton = h("button", {
     class: "btn btn-ghost btn-sm",
     type: "button",
