@@ -75,9 +75,10 @@ without a remote peer show `*` for that port, and retained rows are marked
 Unavailable values are disabled with an explanation. Use the arrow keys to
 move through the menu and **Escape** to dismiss it.
 
-In the Connections and Closed history tables, **Ctrl-click** toggles a row,
-**Shift-click** selects a visible range, and **Ctrl+A** or **Select all shown**
-selects the full filtered table, including rows outside the virtualized viewport.
+In the Connections and Closed history tables, **Ctrl/Command-click** toggles a row,
+**Shift-click** selects a visible range, and **Select all shown** selects all
+visible rows. **Ctrl+A** selects all shown only when the table has keyboard focus;
+otherwise it performs the browser's normal text selection.
 The selection bar can copy deduplicated remote IPs, resolved hostnames, endpoints,
 or all selected rows as TSV, and can download selected current rows as a TSV file
 using the visible column order. Text fields containing tabs, quotes, or line breaks
@@ -172,7 +173,7 @@ updates do not replace fields currently being edited or saved locally.
 
 Country enrichment requires a MaxMind-format `.mmdb` database. WinTCP does not ship one or download one. Configure a country database in **Settings**; the map and Flows view use the configured database without a restart. An ASN database is separate and is not required for country lookup.
 
-The Map page shades countries with remote connections and places a marker for each geolocated connection. Hover a marker to see its process, PID, remote address and port, DNS name when available, protocol, state, and country. Use the button in the page header to switch between the globe and a 2D projection. The map boundaries are bundled locally; the page does not request map tiles from an external service.
+The Map page shades countries with remote connections and places a marker for each geolocated connection. Hover a marker to see its process, PID, remote address and port, DNS name when available, protocol, state, and country. Use the button in the page header to switch between the globe and a 2D projection. The map boundaries are bundled locally; the page does not request map tiles from an external service. If the map fails to load, use **Retry map** to reload it. The map resizes with the browser window.
 
 Locations are **country-level estimates**, not device or person locations. Private, loopback, link-local, reserved, and unrecognized addresses are not assigned a country. The map and Flows view show connection counts, not bandwidth. Without a configured database, the dashboard explains why geographic results are unavailable.
 
