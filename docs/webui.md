@@ -76,16 +76,19 @@ Unavailable values are disabled with an explanation. Use the arrow keys to
 move through the menu and **Escape** to dismiss it.
 
 In the Connections and Closed history tables, **Ctrl/Command-click** toggles a row,
-**Shift-click** selects a visible range, and **Select all shown** selects all
-visible rows. **Ctrl+A** selects all shown only when the table has keyboard focus;
+**Shift-click** selects a visible range, and the **Selection** group keeps
+**Select all shown** beside **Clear selection**. **Ctrl+A** selects all shown only
+when the table has keyboard focus;
 otherwise it performs the browser's normal text selection.
-The selection bar can copy deduplicated remote IPs, resolved hostnames, endpoints,
-or all selected rows as TSV, and can download selected current rows as a TSV file
-using the visible column order. Text fields containing tabs, quotes, or line breaks
-are escaped for spreadsheet import; unresolved hostnames and unknown values remain
-blank. Sorting and refresh keep selection attached to stable connection
-identities. Rows outside the filter are counted separately from rows that are no
-longer current; copy actions use last-seen values, while export omits stale rows.
+When rows are selected, actions appear in separate **Copy**, **Export**, and
+**Evidence** groups. They can copy deduplicated remote IPs, resolved hostnames,
+endpoints, or all selected rows as TSV, and download current selected rows as TSV
+or JSON using the visible column order. Text fields containing tabs, quotes, or
+line breaks are escaped for spreadsheet import; unresolved hostnames and unknown
+values remain blank. Sorting and refresh keep selection attached to stable
+connection identities. Rows outside the filter are counted separately from rows
+that are no longer current; copy actions use last-seen values, while export omits
+stale rows.
 Bulk close and firewall changes are not offered; use a row's reviewed action menu.
 
 The Network filter accepts space-separated terms combined with AND. Bare words
@@ -115,8 +118,8 @@ original layouts. Process/name identity and row actions remain visible. Layouts
 are saved with the local dashboard configuration and restored when the page is
 reopened.
 
-On the Network page, use **Name this view** and **Save view** to keep up to 30
-named presets. A preset stores the current text and structured filters, sort,
+On the Network page, open **Manage views** and use **Name this view** and
+**Save view** to keep up to 30 named presets. A preset stores the current text and structured filters, sort,
 Network tab, and that tab's table layout; loading it reapplies those settings to
 the live snapshot. Saving another view with the same name updates it, and
 **Delete view** removes the selected preset. Presets do not save sampled rows,
@@ -126,6 +129,13 @@ scroll position, or row selection.
 the query, structured filters, sort, tab, and current table layout. This history
 is stored in browser-local storage rather than the WinTCP server configuration.
 Use **Clear recent** to remove it; named presets are unaffected.
+
+Open **Compare endpoints…** above the connection table to save the current
+filtered endpoint set as a browser-local baseline. **Compare with baseline** then
+lists endpoint identities added since that capture and identities no longer in the
+current filtered view. This is a point-in-time identity comparison, not complete
+connection history or a reachability test. **Clear baseline** removes only this
+browser-local comparison data; it does not affect named views or live endpoints.
 
 **Block remote peer** is a reviewed, outbound TCP firewall rule for the literal
 remote IP and port; it is not application-scoped and does not close the current
