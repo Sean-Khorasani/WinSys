@@ -73,7 +73,7 @@ std::wstring DoLookup(const std::wstring& addr) {    const std::wstring bare = S
     // address back when no PTR record exists. (SDK spells the wide entry
     // point GetNameInfoW.)
     if (::GetNameInfoW(reinterpret_cast<const sockaddr*>(&ss), sockLen, host,
-                       static_cast<DWORD>(kHostBufChars / sizeof(wchar_t)) - 1,
+                       static_cast<DWORD>(kHostBufChars - 1),
                        nullptr, 0, NI_NAMEREQD) != 0)
         return std::wstring();
     host[kHostBufChars - 1] = L'\0';
@@ -136,6 +136,8 @@ void DnsResolver::ClearCache() {
     cache_.clear();
     cacheOrder_.clear();
     inFlight_.clear();
+    queue_.clear();
+    queued_.clear();
 }
 
 std::wstring DnsResolver::Lookup(const std::wstring& addr, unsigned timeoutMs) {
@@ -144,8 +146,7 @@ std::wstring DnsResolver::Lookup(const std::wstring& addr, unsigned timeoutMs) {
     // wedged resolver cannot hang the CLI indefinitely. The worker keeps its
     // own per-tick budget via Run(); this overload just exposes the knob to
     // callers that need the blocking core directly.
-    (void)timeoutMs;   // getnameinfo itself is un-cancellable; the bound is a
-                       // documentation/contract value for one-shot callers.
+    if (timeoutMs == 0) timeoutMs = kDnsTimeoutDefault;
 
     // An answer already on disk, and still believed, so no query at
     // all. This is the whole point of the cache - a peer seen in an earlier
@@ -159,8 +160,26 @@ std::wstring DnsResolver::Lookup(const std::wstring& addr, unsigned timeoutMs) {
     // A throwing lookup resolves to empty — the same answer a failed
     // lookup gives, and the cache records it either way. A name we could
     // not compute is not worth a dead resolver thread.
+    // getnameinfo itself is un-cancellable, so run it on a detached helper and
+    // bound the wait to timeoutMs. A late completion writes into the shared
+    // state, which stays alive for the helper's lifetime.
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    auto result = std::make_shared<std::wstring>();
+    std::thread([result, done, addr] {
+        std::wstring host;
+        if (!RunGuarded([&] { host = DoLookup(addr); }).empty()) host.clear();
+        *result = host;
+        done->store(true);
+    }).detach();
+
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeoutMs);
+    while (!done->load() &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     std::wstring host;
-    if (!RunGuarded([&] { host = DoLookup(addr); }).empty()) host.clear();
+    if (done->load()) host = *result;
 
     // Record only what was actually answered. An empty result is not
     // recorded: DoLookup cannot tell "no PTR record" from "the query failed
@@ -194,20 +213,20 @@ void DnsResolver::Run() {
         // the helper runs to completion in the background and delivers a
         // resolved result when it returns, refreshing the row then.
         auto done = std::make_shared<std::atomic<bool>>(false);
-        std::wstring resultHost;   // filled by the helper under lk
+        auto resultHost = std::make_shared<std::wstring>();
         {
             std::lock_guard<std::mutex> lk(m_);
             if (stop_) return;
-            inFlight_[addr] = InFlight{done, nullptr};
+            inFlight_[addr] = InFlight{done, resultHost, nullptr};
         }
-        std::thread([this, addr, done, &resultHost] {
+        std::thread([this, addr, done, resultHost] {
             std::wstring host;
-            // A throwing lookup resolves to empty — the same answer a
+            // A throwing lookup resolves to empty - the same answer a
             // failed lookup gives, and the cache records it either way.
             if (!RunGuarded([&] { host = DoLookup(addr); }).empty()) host.clear();
             {
                 std::lock_guard<std::mutex> lk(m_);
-                resultHost = host;
+                *resultHost = host;
                 done->store(true);
             }
             cv_.notify_all();
@@ -246,7 +265,7 @@ void DnsResolver::Run() {
         // Helper finished within budget: cache + deliver the resolved result.
         {
             std::lock_guard<std::mutex> lk(m_);
-            cache_[addr] = resultHost;                  // negative results too
+            cache_[addr] = *resultHost;                  // negative results too
             cacheOrder_.push_back(addr);
             while (cache_.size() > kMaxCacheEntries && !cacheOrder_.empty()) {
                 cache_.erase(cacheOrder_.front());
@@ -259,7 +278,7 @@ void DnsResolver::Run() {
         if (sink) (void)RunGuarded([&] {
             auto result = std::make_unique<Result>();
             result->address = addr;
-            result->hostname = resultHost;
+            result->hostname = *resultHost;
             sink(std::move(result));
         });
         // Loop: predicate re-checks stop_/queue_/enabled_.
