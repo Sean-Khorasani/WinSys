@@ -60,6 +60,7 @@ let mapLibrePromise = null;
 
 export async function renderMap(page, store) {
   clear(page);
+  page.classList.add("full-width");
   page.append(
     h("div", { class: "page-heading map-heading" },
       h("div", {},
@@ -103,11 +104,22 @@ export async function renderMap(page, store) {
   const projectionButton = page.querySelector("#map-projection");
   const retryButton = page.querySelector("#map-retry");
 
+  let userZoomed = false;
+  const fitToContainer = () => {
+    if (!map || destroyed || userZoomed) return;
+    map.fitBounds([[-175, -60], [175, 75]], {
+      padding: 12,
+      duration: 0,
+      maxZoom: 2.8,
+    });
+  };
+  const resizeObserver = new ResizeObserver(() => fitToContainer());
   page._mapDestroy = () => {
     destroyed = true;
     requests.abort();
     if (pulseTimer) window.clearInterval(pulseTimer);
     if (popup) popup.remove();
+    resizeObserver.disconnect();
     if (map) map.remove();
     page._mapUpdate = null;
     page._mapDestroy = null;
@@ -165,6 +177,8 @@ export async function renderMap(page, store) {
       canvasContextAttributes: { antialias: true },
     });
     popup = new maplibre.Popup({ closeButton: false, closeOnClick: false, offset: 10, maxWidth: "300px" });
+    map.on("zoomstart", (event) => { if (event?.originalEvent) userZoomed = true; });
+    resizeObserver.observe(container);
 
     map.on("load", () => {
       if (destroyed) return;
@@ -219,6 +233,7 @@ export async function renderMap(page, store) {
         },
       });
       installMapInteractions(map, popup);
+      fitToContainer();
       renderCountryList(page.querySelector("#map-countries"), data.topCountries, store.get());
       pulseTimer = window.setInterval(() => {
         const phase = Date.now() / 650;
@@ -244,6 +259,16 @@ export async function renderMap(page, store) {
     if (destroyed) return;
     status.textContent = `Map unavailable: ${error.message}`;
     retryButton.hidden = false;
+    // The failed dynamic import is cached by the browser/module graph, so a
+    // retry must clear it and rebuild the whole page rather than calling the
+    // incremental updater, which has nothing to update.
+    mapLibrePromise = null;
+    page._mapRetry = () => {
+      if (typeof page._mapDestroy === "function") page._mapDestroy();
+      mapLibrePromise = null;
+      void renderMap(page, store);
+    };
+    retryButton.onclick = () => page._mapRetry?.();
     renderCountryList(page.querySelector("#map-countries"), [], store.get());
   }
 }
