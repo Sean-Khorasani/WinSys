@@ -52,6 +52,7 @@ public:
     BookmarkActions(HWND owner, SelectedRow selected, Changed changed)
         : owner_(owner), selected_(std::move(selected)),
           changed_(std::move(changed)) {}
+    void SetOwner(HWND owner) { owner_ = owner; }
 
     // View > Bookmarks: everything in the store, with the unreadable count
     // stated rather than quietly dropped.
