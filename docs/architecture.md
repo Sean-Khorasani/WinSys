@@ -35,7 +35,7 @@ The CLI follows a strict command contract. Each command accepts only its support
 
 `wintcp.exe webui serve` starts an HTTP server bound to `127.0.0.1`. It serves the static modules and styles alongside same-origin JSON endpoints. A metrics sampler collects system readings independently of request handling and retains a bounded history for the browser charts. The browser polls while visible and pauses its work when the tab is hidden.
 
-The server validates local requests, checks a per-process token and origin for state changes, and serves only approved static assets. Sensitive commands run through the sibling CLI with bounded arguments and explicit confirmation. The Web UI does not fetch remote map tiles, fonts, or scripts; its country geometry and libraries are bundled under `wintcp/webui/vendor/` with their licence notices.
+The server validates local requests, checks a per-process token and origin for state changes, and serves only approved static assets. Read-only endpoints are intentionally unauthenticated loopback endpoints; the token protects state-changing requests against cross-origin web pages, not against other local processes. Sensitive commands run through the sibling CLI with bounded arguments and explicit confirmation. The Web UI does not fetch remote map tiles, fonts, or scripts; its country geometry and libraries are bundled under `wintcp/webui/vendor/` with their licence notices.
 
 The user-facing pages and service controls are described in the [Web UI guide](webui.md); UI conventions are in the [Web UI design guide](webui-design.md).
 
