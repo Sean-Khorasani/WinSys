@@ -352,6 +352,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 void MainWindow::OnCreate() {
+    // Member initializers ran before hwnd_ existed; repair the owner now that
+    // the window handle is available.
+    presetDialogs_.SetOwner(hwnd_);
+    bookmarks_.SetOwner(hwnd_);
     etw_ = new EtwTraffic();   // per-PID traffic; leaked by design (MainWindow.h)
     // socketTraffic_: allocated here, never deleted. A scan thread blocked in
     // SIO_TCP_INFO holds a pointer to its sampler and cannot be cancelled, so
@@ -4688,12 +4692,18 @@ MainWindow::MinimizeTarget MainWindow::ResolveMinimize() {
     int radio = 0;
     BOOL checked = FALSE;
     HRESULT hr = ::TaskDialogIndirect(&tc, &which, &radio, &checked);
-    if (hr != S_OK || which == kBtnExit) {
-        // A cancel / close (X) or explicit exit: treat as exit so the window
-        // does not vanish into a hidden state with no icon to restore it.
-        trayMinimizeChoice_ = 2;
-        settings_.trayMinimizeChoice = 2;
-        if (checked) settings_.Save();
+    if (hr != S_OK || which == IDCANCEL) {
+        // A cancel / close (X) exits this minimize without enabling the tray
+        // or remembering a permanent choice. The prompt returns next time.
+        return MinimizeTarget::kExit;
+    }
+    if (which == kBtnExit) {
+        // Explicit exit: remember it only when "don't ask again" is checked.
+        if (checked) {
+            trayMinimizeChoice_ = 2;
+            settings_.trayMinimizeChoice = 2;
+            settings_.Save();
+        }
         return MinimizeTarget::kExit;
     }
 
