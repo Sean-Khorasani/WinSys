@@ -21,6 +21,7 @@ export function createColumnLayoutControls(table, {
   let editGeneration = 0;
   let configReadGeneration = 0;
   let locallyEdited = false;
+  let savedViewApplied = false;
   let saveTimer = null;
   let layout = defaults;
 
@@ -70,6 +71,7 @@ export function createColumnLayoutControls(table, {
   function apply(next, focusKey = "") {
     editGeneration++;
     locallyEdited = true;
+    savedViewApplied = false;
     normalized(next);
     renderPanel(focusKey);
     saveSoon();
@@ -150,7 +152,7 @@ export function createColumnLayoutControls(table, {
     const generation = ++configReadGeneration;
     try {
       const config = await api.get("/api/config", { signal: loadController.signal });
-      if (disposed || generation !== configReadGeneration || locallyEdited) return;
+      if (disposed || generation !== configReadGeneration || locallyEdited || savedViewApplied) return;
       const saved = config.preferences?.tableLayouts?.[layoutKey];
       if (saved && saved.version === 1) {
         normalized(saved);
@@ -162,7 +164,7 @@ export function createColumnLayoutControls(table, {
     }
   }
   const unsubscribeConfig = api.subscribeConfigChanges(() => {
-    if (!disposed && !locallyEdited && saveTimer === null) loadSavedLayout(true);
+    if (!disposed && !locallyEdited && !savedViewApplied && saveTimer === null) loadSavedLayout(true);
   });
   loadSavedLayout();
 
@@ -171,6 +173,8 @@ export function createColumnLayoutControls(table, {
     applySavedLayout(next) {
       if (disposed || !next || next.version !== 1) return false;
       editGeneration++;
+      configReadGeneration++;
+      savedViewApplied = true;
       normalized(next);
       renderPanel();
       status.textContent = "Saved view layout loaded";
