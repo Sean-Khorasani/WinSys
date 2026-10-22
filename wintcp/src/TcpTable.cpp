@@ -189,6 +189,12 @@ bool EnumerateEndpoints(std::vector<Connection>& out, std::wstring& errorMessage
     }
     if (buffer.size() >= sizeof(MIB_TCPTABLE_OWNER_PID)) {
         const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(buffer.data());
+        const size_t availableRows =
+            (buffer.size() - sizeof(DWORD)) / sizeof(MIB_TCPROW_OWNER_PID);
+        if (table->dwNumEntries > availableRows) {
+            errorMessage = L"GetExtendedTcpTable returned an incomplete IPv4 TCP table.";
+            return false;
+        }
         for (DWORD i = 0; i < table->dwNumEntries; ++i) {
             const MIB_TCPROW_OWNER_PID& row = table->table[i];
             Connection info;
@@ -218,6 +224,12 @@ bool EnumerateEndpoints(std::vector<Connection>& out, std::wstring& errorMessage
         // IPv6 stack unavailable: keep IPv4 results.
     } else if (buffer.size() >= sizeof(MIB_TCP6TABLE_OWNER_PID)) {
         const auto* table6 = reinterpret_cast<const MIB_TCP6TABLE_OWNER_PID*>(buffer.data());
+        const size_t availableRows6 =
+            (buffer.size() - sizeof(DWORD)) / sizeof(MIB_TCP6ROW_OWNER_PID);
+        if (table6->dwNumEntries > availableRows6) {
+            errorMessage = L"GetExtendedTcpTable returned an incomplete IPv6 TCP table.";
+            return false;
+        }
         for (DWORD i = 0; i < table6->dwNumEntries; ++i) {
             const MIB_TCP6ROW_OWNER_PID& row = table6->table[i];
             Connection info;
@@ -248,6 +260,12 @@ bool EnumerateEndpoints(std::vector<Connection>& out, std::wstring& errorMessage
         }
     } else if (buffer.size() >= sizeof(MIB_UDPTABLE_OWNER_PID)) {
         const auto* table = reinterpret_cast<const MIB_UDPTABLE_OWNER_PID*>(buffer.data());
+        const size_t availableRows =
+            (buffer.size() - sizeof(DWORD)) / sizeof(MIB_UDPROW_OWNER_PID);
+        if (table->dwNumEntries > availableRows) {
+            errorMessage = L"GetExtendedUdpTable returned an incomplete IPv4 UDP table.";
+            return false;
+        }
         for (DWORD i = 0; i < table->dwNumEntries; ++i) {
             const MIB_UDPROW_OWNER_PID& row = table->table[i];
             Connection info;
@@ -275,6 +293,12 @@ bool EnumerateEndpoints(std::vector<Connection>& out, std::wstring& errorMessage
         }
     } else if (buffer.size() >= sizeof(MIB_UDP6TABLE_OWNER_PID)) {
         const auto* table6 = reinterpret_cast<const MIB_UDP6TABLE_OWNER_PID*>(buffer.data());
+        const size_t availableRows6 =
+            (buffer.size() - sizeof(DWORD)) / sizeof(MIB_UDP6ROW_OWNER_PID);
+        if (table6->dwNumEntries > availableRows6) {
+            errorMessage = L"GetExtendedUdpTable returned an incomplete IPv6 UDP table.";
+            return false;
+        }
         for (DWORD i = 0; i < table6->dwNumEntries; ++i) {
             const MIB_UDP6ROW_OWNER_PID& row = table6->table[i];
             Connection info;
