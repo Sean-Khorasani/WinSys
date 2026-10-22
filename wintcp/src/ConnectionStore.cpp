@@ -1978,17 +1978,29 @@ int ConnectionStore::ApplySocketBytes(const std::vector<SocketBytes>& bytes) {
     if (bytes.empty()) return 0;
     int updated = 0;
     std::vector<char> claimed(rows_.size(), 0);
+    // Index rows by their 4-tuple once, so the scan is O(samples + rows)
+    // instead of O(samples * rows).
+    std::unordered_map<std::wstring, std::vector<size_t>> byTuple;
+    byTuple.reserve(rows_.size() * 2 + 1);
+    for (size_t i = 0; i < rows_.size(); ++i) {
+        const Connection& r = rows_[i];
+        if (r.identity.protocol != IPPROTO_TCP) continue;
+        const std::wstring key = r.display.localAddress + L"|" +
+            r.display.remoteAddress + L"|" +
+            std::to_wstring(r.identity.localPort) + L"|" +
+            std::to_wstring(r.identity.remotePort);
+        byTuple[key].push_back(i);
+    }
     for (const SocketBytes& b : bytes) {
         if (!b.known) continue;
-        for (size_t i = 0; i < rows_.size(); ++i) {
+        const std::wstring key = b.localAddress + L"|" + b.remoteAddress + L"|" +
+            std::to_wstring(b.localPort) + L"|" +
+            std::to_wstring(b.remotePort);
+        const auto it = byTuple.find(key);
+        if (it == byTuple.end()) continue;
+        for (size_t i : it->second) {
             if (claimed[i]) continue;
             Connection& r = rows_[i];
-            if (r.identity.localPort != b.localPort || r.identity.remotePort != b.remotePort)
-                continue;
-            if (r.display.localAddress != b.localAddress ||
-                r.display.remoteAddress != b.remoteAddress)
-                continue;
-            if (r.identity.protocol != IPPROTO_TCP) continue;   // SIO_TCP_INFO is TCP
             r.traffic.trafficRx = b.rx;
             r.traffic.trafficTx = b.tx;
             r.rate.perRowBytes = true;   // this row's counters ARE one Socket's
@@ -2018,16 +2030,26 @@ int ConnectionStore::ApplySocketTcpInfo(
     if (infos.empty()) return 0;
     int updated = 0;
     std::vector<char> claimed(rows_.size(), 0);
+    std::unordered_map<std::wstring, std::vector<size_t>> byTuple;
+    byTuple.reserve(rows_.size() * 2 + 1);
+    for (size_t i = 0; i < rows_.size(); ++i) {
+        const Connection& r = rows_[i];
+        if (r.identity.protocol != IPPROTO_TCP) continue;   // TCP_INFO_v0 is TCP only
+        const std::wstring key = r.display.localAddress + L"|" +
+            r.display.remoteAddress + L"|" +
+            std::to_wstring(r.identity.localPort) + L"|" +
+            std::to_wstring(r.identity.remotePort);
+        byTuple[key].push_back(i);
+    }
     for (const SocketTcpInfo& t : infos) {
-        for (size_t i = 0; i < rows_.size(); ++i) {
+        const std::wstring key = t.localAddress + L"|" + t.remoteAddress + L"|" +
+            std::to_wstring(t.localPort) + L"|" +
+            std::to_wstring(t.remotePort);
+        const auto it = byTuple.find(key);
+        if (it == byTuple.end()) continue;
+        for (size_t i : it->second) {
             if (claimed[i]) continue;
             Connection& r = rows_[i];
-            if (r.identity.localPort != t.localPort || r.identity.remotePort != t.remotePort)
-                continue;
-            if (r.display.localAddress != t.localAddress ||
-                r.display.remoteAddress != t.remoteAddress)
-                continue;
-            if (r.identity.protocol != IPPROTO_TCP) continue;   // TCP_INFO_v0 is TCP only
             // Cumulative/best-ever values only move in one direction, so a
             // smaller reading is a recycled Socket rather than new information.
             // Letting it overwrite would reset the connection's history every
