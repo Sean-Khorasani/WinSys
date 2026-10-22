@@ -1113,6 +1113,87 @@ function renderListening(rows, sortKey, sortDir, onSort, store, viewState = null
   const layoutHost = h("div", { class: "table-layout-host" });
   const listening = rows.filter(isListening);
 
+  // P3-06 focused port-owner input
+  const portInput = h("input", {
+    class: "input input-sm",
+    type: "text",
+    placeholder: "Port (e.g. 443) — find listening socket owner",
+    "aria-label": "Find which process owns a listening port",
+    maxlength: "5",
+  });
+  const portResult = h("div", { class: "port-owner-summary", hidden: true });
+  const portSearchRow = h("div", { class: "port-owner-search" },
+    h("label", { for: portInput.id || "port-owner-input" }, h("strong", {}, "Port owner"),
+      h("span", { class: "muted text-xs" }, "Find the process, interface and rules for a listening port")),
+    portInput,
+    portResult,
+  );
+  portInput.id = portInput.id || "port-owner-input-" + Math.random().toString(36).slice(2);
+  portInput.addEventListener("input", () => {
+    const val = String(portInput.value || "").trim();
+    if (!/^\d{1,5}$/.test(val)) { portResult.hidden = true; return; }
+    const portNum = parseInt(val, 10);
+    if (portNum < 1 || portNum > 65535) { portResult.hidden = true; return; }
+    const matches = listening.filter((r) => Number(r.lport) === portNum);
+    if (matches.length === 0) {
+      portResult.hidden = false;
+      portResult.innerHTML = "";
+      portResult.append(
+        h("p", { class: "muted text-sm" }, `No listening socket found for port ${portNum}. Check the current filter and that the service is running.`),
+        h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => {
+          document.dispatchEvent(new CustomEvent("wintcp:firewall-investigate", {
+            detail: { target: { direction: "Inbound", proto: "TCP", local: null, lport: portNum, remote: null, rport: null, path: null, service: null } },
+          }));
+        } }, "Investigate firewall rules for this port"),
+      );
+      return;
+    }
+    const first = matches[0];
+    const exposureLabel = exposureOf(first).label;
+    const exposureHint = exposureOf(first).hint;
+    portResult.hidden = false;
+    portResult.innerHTML = "";
+    portResult.append(
+      h("div", { class: "card card-compact" },
+        h("div", { class: "card-header" },
+          h("h4", {}, `Port ${portNum}`),
+          h("span", { class: "badge badge-secondary" }, exposureLabel),
+        ),
+        h("div", { class: "card-content" },
+          h("p", { class: "muted text-sm" }, `Protocol: ${first.proto || "—"} · Bind: ${first.local || first.localAddress || "—"} · Process: ${first.process || first.processName || "—"} (PID ${first.pid ?? "—"})`),
+          h("p", { class: "muted text-sm", title: exposureHint }, `Exposure: ${exposureLabel} — ${exposureHint}`),
+        ),
+        h("div", { class: "card-footer" },
+          h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => { if (first) showConnectionDetails(first); } }, "Connection details"),
+          h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => {
+            if (store) {
+              store.set({ automationDraft: {
+                name: `Port ${portNum} owner`,
+                source: `# Listening port ${portNum}\n# Protocol ${first.proto || ""}\n# Process ${first.process || first.processName || ""}\n# PID ${first.pid ?? ""}\n`,
+              } });
+              window.location.hash = "#/automations";
+            }
+          } }, "Create automation for this port"),
+          h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => {
+            document.dispatchEvent(new CustomEvent("wintcp:firewall-investigate", {
+              detail: { target: {
+                direction: "Inbound",
+                proto: first.proto || "TCP",
+                local: first.local || first.localAddress || null,
+                lport: Number(first.lport) || portNum,
+                remote: null,
+                rport: null,
+                path: first.path || null,
+                service: first.service || null,
+              } },
+            }));
+          } }, "Find inbound firewall rules"),
+        ),
+      ),
+    );
+  });
+  host.append(portSearchRow);
+
   if (listening.length === 0) {
     return emptyState({}, "No listening sockets",
       "Nothing in this filter is bound to an address.");
