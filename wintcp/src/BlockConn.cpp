@@ -85,6 +85,7 @@ constexpr size_t kIpv4AddrBytes = 4;
 // the anonymous namespace, making every use of the real one ambiguous.
 void LedgerRemember(const BlockRequest& req);
 void LedgerForget(const BlockRequest& req);
+void LedgerRememberRule(const std::wstring& name);
 
 namespace {
 
@@ -902,6 +903,9 @@ FwRuleOutcome AddFwRule(const FwRule& rule, std::wstring* name,
             if (name != nullptr) {
                 *name = ruleName;
             }
+            // The rule is already in the firewall; make sure we own a ledger
+            // entry for it too, so it can be inventoried and removed.
+            LedgerRememberRule(ruleName);
             return FwRuleOutcome::kAlreadyPresent;
         }
     }
@@ -1026,6 +1030,10 @@ FwRuleOutcome AddFwRule(const FwRule& rule, std::wstring* name,
     if (name != nullptr) {
         *name = ruleName;
     }
+    // Record ownership so the rule can be inventoried and removed later.
+    // This runs for both newly created and already-present rules; the helper
+    // is idempotent.
+    LedgerRememberRule(ruleName);
     return FwRuleOutcome::kCreated;
 }
 
@@ -1075,7 +1083,6 @@ bool Addr4ToDword(const unsigned char* raw, DWORD* out) {
 }
 
 struct KillCtx {
-    DWORD localAddr = 0;
     DWORD remoteAddr = 0;
     DWORD localPort = 0;
     DWORD remotePort = 0;
@@ -1085,7 +1092,7 @@ struct KillCtx {
 
 bool KillVisitor(const MIB_TCPROW& row, void* rawCtx) {
     KillCtx* ctx = static_cast<KillCtx*>(rawCtx);
-    if (row.dwLocalAddr != ctx->localAddr || row.dwRemoteAddr != ctx->remoteAddr ||
+    if (row.dwRemoteAddr != ctx->remoteAddr ||
         row.dwLocalPort != ctx->localPort || row.dwRemotePort != ctx->remotePort) {
         return true;  // not our row; keep scanning
     }
@@ -1256,9 +1263,9 @@ BlockOutcome BlockConnection(const BlockRequest& req, std::wstring* error) {
     // rules were newly created) because a block that was already installed by
     // an earlier session still has to be removable by this one, and the
     // enumerator cannot be used to rediscover it. See the ledger note above.
-    if (madeEndpoint || madePorts) {
-        LedgerRemember(req);
-    }
+    // Record ownership even when both rules were already present: the ledger is
+    // what lets a later session find and remove them.
+    LedgerRemember(req);
 
     if (killed) {
         SetError(error, killError);  // empty when the kill genuinely succeeded
@@ -1301,8 +1308,13 @@ bool UnblockConnection(const BlockRequest& req, std::wstring* error) {
         }
         ComPtr<INetFwRule> existing;
         const HRESULT hr = rules->Item(bname, existing.receive());
-        if (FAILED(hr)) {
+        if (IsMissingFirewallRuleResult(hr)) {
             continue;  // already absent: nothing to do, and not an error
+        }
+        if (FAILED(hr)) {
+            SetError(error, L"could not inspect firewall rule \"" + name +
+                                L"\": " + FormatHresult(hr));
+            return false;
         }
         const HRESULT del = rules->Remove(bname);
         if (FAILED(del)) {
@@ -1505,7 +1517,14 @@ std::vector<std::wstring> ReadLedger(std::wstring* error) {
     if (path.empty()) return pairs;
     HANDLE f = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return pairs;
+    if (f == INVALID_HANDLE_VALUE) {
+        const DWORD err = ::GetLastError();
+        if (err != ERROR_FILE_NOT_FOUND) {
+            SetError(error, L"cannot open the block ledger " + path + L": " +
+                                FormatSystemError(err));
+        }
+        return pairs;
+    }
     // Bound the read before allocating anything. The old loop appended
     // until ReadFile returned 0, so a corrupt or planted multi-gigabyte file
     // was unbounded memory growth in a process that only ever wanted a few KB.
@@ -1584,9 +1603,15 @@ bool WriteLedger(const std::vector<std::wstring>& pairs) {
         text += "\r\n";
     }
     DWORD written = 0;
-    ::WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &written,
-                nullptr);
+    const BOOL writeOk = ::WriteFile(f, text.data(),
+                                    static_cast<DWORD>(text.size()), &written,
+                                    nullptr);
+    ::FlushFileBuffers(f);
     ::CloseHandle(f);
+    if (!writeOk || written != static_cast<DWORD>(text.size())) {
+        ::DeleteFileW(tmp.c_str());
+        return false;
+    }
     if (!::MoveFileExW(tmp.c_str(), path.c_str(),
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         ::DeleteFileW(tmp.c_str());
@@ -1628,6 +1653,24 @@ void LedgerForget(const BlockRequest& req) {
     const auto it = std::find(pairs.begin(), pairs.end(), pair);
     if (it == pairs.end()) return;
     pairs.erase(it);
+    WriteLedger(pairs);
+}
+
+// Record one general firewall rule in the ledger, so the inventory and
+// remove-all paths can find it. A single-name line is the shape
+// SplitLedgerNames/RemoveBlockedRule already understand.
+void LedgerRememberRule(const std::wstring& name) {
+    if (name.empty()) return;
+    std::lock_guard<std::mutex> lock(g_ledgerLock);
+    std::wstring readErr;
+    std::vector<std::wstring> pairs = ReadLedger(&readErr);
+    if (!readErr.empty()) return;
+    for (const std::wstring& line : pairs) {
+        for (const std::wstring& existing : SplitLedgerNames(line)) {
+            if (existing == name) return;   // already recorded
+        }
+    }
+    pairs.push_back(name);
     WriteLedger(pairs);
 }
 
