@@ -28,6 +28,8 @@
 #include <cstring>
 
 #include "Utils.h"
+#include "ConnectionsList.h"  // WriteClipboardText / NativeClipboardApi
+#include "TextSheetDialog.h"  // manual clipboard fallback
 #include "WinCaps.h"   // DllAvailable: pdh.dll is delay-loaded (see kDelayedDlls)
 #include "FontCache.h"   // shared, DPI-correct fonts
 #include "Theme.h"       // shared system palette + HighContrastActive()
@@ -954,22 +956,13 @@ void ChartsWindow::CopyValues() {
     // captions paint and the accessible name announces, so copying is
     // reading, not a second derivation.
     const std::wstring text = ValuesText();
-    if (text.empty() || !::OpenClipboard(hwnd_)) return;
-    ::EmptyClipboard();
-    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (hMem != nullptr) {
-        void* dst = ::GlobalLock(hMem);
-        if (dst != nullptr) {
-            ::memcpy(dst, text.c_str(), bytes);
-            ::GlobalUnlock(hMem);
-            if (::SetClipboardData(CF_UNICODETEXT, hMem) == nullptr)
-                ::GlobalFree(hMem);
-            hMem = nullptr;
-        }
-        if (hMem != nullptr) ::GlobalFree(hMem);
+    if (text.empty()) return;
+    const ClipboardWriteStatus result =
+        WriteClipboardText(hwnd_, text, NativeClipboardApi());
+    if (ClipboardNeedsManualFallback(result)) {
+        ShowTextSheet(hwnd_, L"Clipboard unavailable - select text and press Ctrl+C",
+                      text, nullptr, true);
     }
-    ::CloseClipboard();
 }
 
 void ChartsWindow::ExportCharts() {
