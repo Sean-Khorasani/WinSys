@@ -4246,10 +4246,15 @@ void ServeSseStream(SOCKET client) {
 void ServeClient(ServerContext& context, SOCKET client) {
     DWORD receiveTimeout = 5000;
     DWORD sendTimeout = kMaxCliExecutionMs + 10000;
-    (void)::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
-                       reinterpret_cast<const char*>(&receiveTimeout), sizeof(receiveTimeout));
-    (void)::setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
-                       reinterpret_cast<const char*>(&sendTimeout), sizeof(sendTimeout));
+    if (::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&receiveTimeout),
+                     sizeof(receiveTimeout)) == SOCKET_ERROR ||
+        ::setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
+                     reinterpret_cast<const char*>(&sendTimeout),
+                     sizeof(sendTimeout)) == SOCKET_ERROR) {
+        ::closesocket(client);
+        return;
+    }
     HttpRequest request;
     int errorStatus = 400;
     if (!ReceiveRequest(client, &request, &errorStatus)) {
@@ -4441,6 +4446,7 @@ int RunWebUiServer(unsigned portHint) {
     }
     HANDLE refresher = ::CreateThread(nullptr, 0, ConnectionRefresherThread, &context,
                                        0, nullptr);
+    if (refresher != nullptr) ::CloseHandle(refresher);
     if (refresher == nullptr) {
         // Not fatal: /api/connections still refreshes inline, and the summary
         // endpoints will report snapshotKnown=false rather than an empty set.
