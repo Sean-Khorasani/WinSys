@@ -22,7 +22,7 @@ import { matchesConnectionFilters, connectionFilterLabel, normalizeConnectionFil
 import { createFirewallInventoryView } from "../firewallinventory.js";
 import { addressComparator, numberComparator, stateComparator, textComparator } from "../sort.js";
 import { createColumnLayoutControls } from "../ui/columnlayout.js";
-import { closeInspector, openInspector, updateInspector } from "../ui/inspector.js";
+import { closeInspector, formatProcessInstance, openInspector, updateInspector } from "../ui/inspector.js";
 
 const UNAVAILABLE = "\u2014";
 const num = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -51,7 +51,6 @@ function copyValues(rows, select) {
   }
   return values.join("\n");
 }
-
 function normalizeSavedNetworkViews(value) {
   if (!Array.isArray(value)) return [];
   const views = [];
@@ -1413,8 +1412,10 @@ function connectionInspectorSections(row) {
     { title: "Identity", fields: [
       field("Process", row.process || row.processName),
       field("PID", row.pid, { mono: true }),
-      field("Process instance", formatInstanceId(row.processInstanceId), { mono: true,
-        reason: row.processInstanceId ? "PID lifetime token; a PID alone can be reused." : "Process creation time is unknown, so the owner cannot be verified by lifetime." }),
+      field("Process identity", formatProcessInstance(row.processInstanceId, row.pid), {
+        copyValue: row.processInstanceId, reason: row.processInstanceId
+          ? "Verified using the PID and process creation time; this prevents PID-reuse mistakes."
+          : "Process creation time is unknown, so the owner cannot be verified by lifetime." }),
       field("Executable path", row.path, { mono: true,
         reason: row.path ? "" : "Windows did not provide a readable image path." }),
       field("Service", row.service, { reason: row.service ? "" : "No service attribution is available for this endpoint." }),
@@ -1926,12 +1927,4 @@ function showBlockPeerPreview(row) {
       if (!view.isConnected || error.name === "AbortError") return;
       status.textContent = `Firewall rule preview failed: ${error.message}`;
     });
-}
-
-function formatInstanceId(value) {
-  if (!value || typeof value !== "string") return String(value ?? "—");
-  const parts = value.split(":");
-  if (parts.length === 3 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]))
-    return `PID ${parts[0]} · Token ${parts[1]}:${parts[2]}`;
-  return value;
 }
