@@ -44,6 +44,7 @@ public:
     ViewPresetDialogs(HWND owner, CurrentView current, ApplyView apply)
         : owner_(owner), current_(std::move(current)),
           apply_(std::move(apply)) {}
+    void SetOwner(HWND owner) { owner_ = owner; }
 
     void Save();
     void Load();
