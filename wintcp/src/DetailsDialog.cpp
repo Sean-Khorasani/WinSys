@@ -369,9 +369,13 @@ void DetailsDialog::ApplyFont(HFONT font) {
             ApplyColors();
         }
     }
-    SetChildFont(hwndCopy_, font_);
-    SetChildFont(hwndOpen_, font_);
-    SetChildFont(hwndClose_, font_);
+    // The button row uses the same face as the body text so the window does not
+    // mix the borrowed MainWindow font with the Details window's own derived
+    // faces.
+    const HFONT buttonFont = (bodyFont_ != nullptr) ? bodyFont_ : font_;
+    SetChildFont(hwndCopy_, buttonFont);
+    SetChildFont(hwndOpen_, buttonFont);
+    SetChildFont(hwndClose_, buttonFont);
     if (hwnd_ != nullptr) {
         RECT rc = {};
         ::GetClientRect(hwnd_, &rc);
