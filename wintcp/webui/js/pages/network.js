@@ -892,9 +892,33 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
       copyText(lines.join("\\n"), "incident summary");
     },
   }, "Copy incident summary");
+  const copyVpnExceptionButton = h("button", {
+    class: "btn btn-ghost btn-sm",
+    type: "button",
+    title: "Copy unique remote IPs and observed hostnames for VPN exceptions",
+    onclick: () => {
+      const selectedRows = vt?.getCurrentSelectedRows() || [];
+      if (!selectedRows.length) return;
+      const ips = copyValues(selectedRows, remoteIpValue);
+      const hosts = copyValues(selectedRows, remoteHostnameValue);
+      const lines = [
+        "WinTCP VPN exception data",
+        `Observed: ${new Date().toISOString()}`,
+        "",
+        "Unique remote IPs:",
+        ...(ips.length ? ips : ["(none)"]),
+        "",
+        "Observed hostnames (reverse DNS estimates):",
+        ...(hosts.length ? hosts : ["(none)"]),
+        "",
+        "Reverse DNS is an estimate; WinTCP does not invent domains or subnets.",
+      ];
+      copyText(lines.join("\\n"), "VPN exception data");
+    },
+  }, "Copy VPN exception data");
   selectionActions.append(clearSelectionButton, copyRemoteButton,
     copyHostButton, copyEndpointButton, copyRowsButton, exportRowsButton, exportJsonButton,
-    copyIncidentSummaryButton);
+    copyIncidentSummaryButton, copyVpnExceptionButton);
   const updateSelection = ({ rows: selected, selectedCount, visibleCount, hiddenCount, staleCount }) => {
     selectionBar.hidden = selectedCount === 0;
     const details = [];
@@ -910,6 +934,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     exportRowsButton.disabled = !vt?.getCurrentSelectedRows().length;
   exportJsonButton.disabled = !vt?.getCurrentSelectedRows().length;
   copyIncidentSummaryButton.disabled = !vt?.getCurrentSelectedRows().length;
+  copyVpnExceptionButton.disabled = !vt?.getCurrentSelectedRows().length;
   };
   function copySelected(label, select) {
     const text = copyValues(vt?.getSelectedRows() || [], select);
