@@ -791,8 +791,54 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     type: "button",
     onclick: () => vt?.selectAll(),
   }, "Select all shown");
+  const saveSnapshotButton = h("button", {
+    class: "btn btn-ghost btn-sm",
+    type: "button",
+    title: "Save the current filtered endpoint set as a named snapshot",
+    onclick: () => {
+      const snapshot = { savedAt: new Date().toISOString(), keys: rows.map(connectionKey) };
+      localStorage.setItem("wintcp.network.snapshot.v1", JSON.stringify(snapshot));
+      setSavedViewStatus(`Snapshot saved with ${snapshot.keys.length} endpoint(s).`);
+    },
+  }, "Save snapshot");
+  const compareSnapshotButton = h("button", {
+    class: "btn btn-ghost btn-sm",
+    type: "button",
+    title: "Compare the current filtered view with the saved snapshot",
+    onclick: () => {
+      const raw = localStorage.getItem("wintcp.network.snapshot.v1");
+      if (!raw) {
+        setSavedViewStatus("No saved snapshot. Use Save snapshot first.");
+        return;
+      }
+      let snapshot;
+      try { snapshot = JSON.parse(raw); } catch (err) {
+        setSavedViewStatus("Saved snapshot is unreadable.");
+        return;
+      }
+      const previous = new Set(Array.isArray(snapshot.keys) ? snapshot.keys : []);
+      const current = new Set(rows.map(connectionKey));
+      const added = [...current].filter((key) => !previous.has(key));
+      const removed = [...previous].filter((key) => !current.has(key));
+      const d = dialog({ class: "details-dialog action-preview-dialog", "aria-labelledby": "snapshot-compare-title" },
+        dialogHeader({},
+          dialogTitle({ id: "snapshot-compare-title" }, "Snapshot comparison"),
+          dialogDescription({}, `${snapshot.savedAt || "saved snapshot"} to ${new Date().toISOString()}`)),
+        dialogContent({},
+          h("p", {}, `Added endpoints: ${added.length}`),
+          h("p", {}, `Removed endpoints: ${removed.length}`),
+          h("p", { class: "muted text-sm" }, "Counts use exact connection identity. Review the current filtered table for details."),
+        ),
+        dialogFooter({},
+          h("button", { type: "button", class: "btn btn-primary", onclick: () => closeDialog(d) }, "Close")),
+      );
+      openDialog(d);
+    },
+  }, "Compare snapshot");
   const selectionHeader = h("div", { class: "selection-header" },
     selectAllButton,
+    saveSnapshotButton,
+    compareSnapshotButton,
     h("span", { class: "muted text-sm" },
       "Ctrl/Command-click toggles a row; Shift-click selects a range; use Select all shown for every visible row."));
   const clearSelectionButton = h("button", {
