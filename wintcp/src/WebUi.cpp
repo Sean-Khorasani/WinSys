@@ -1029,8 +1029,9 @@ void SendResponse(SOCKET client, const HttpResponse& response, bool headOnly) {
             << "X-Frame-Options: DENY\r\n"
             << "Referrer-Policy: no-referrer\r\n"
             << "Content-Security-Policy: default-src 'self'; connect-src 'self'; "
-               "style-src 'self'; script-src 'self'; img-src 'self' data:; "
-               "object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n"
+               "style-src 'self'; script-src 'self'; worker-src 'self'; font-src 'self'; "
+               "img-src 'self' data:; object-src 'none'; base-uri 'none'; "
+               "frame-ancestors 'none'\r\n"
             << "Connection: close\r\n\r\n";
     const std::string head = headers.str();
     (void)SendAll(client, head.data(), head.size());
@@ -2012,8 +2013,30 @@ std::string NetworkSummaryJson(ServerContext& context) {
     context.lastStoreAccess.store(::GetTickCount64());
     std::lock_guard<std::mutex> lock(g_storeMutex);
     std::map<std::string, int> byState, byProto, byFamily, byProcess;
-    int loopback = 0, lan = 0, wildcard = 0;
+    int loopback = 0, privateCount = 0, specific = 0, wildcard = 0;
     size_t liveRows = 0;
+    auto isPrivateListenerAddress = [](const std::wstring& local) -> bool {
+        std::wstring address = local;
+        // IPv4-mapped IPv6 addresses follow their mapped IPv4 scope.
+        const std::wstring mappedPrefix = L"::ffff:";
+        if (address.rfind(mappedPrefix, 0) == 0) address = address.substr(mappedPrefix.size());
+        if (address == L"10." || address.rfind(L"10.", 0) == 0) return true;
+        // 172.16.0.0/12
+        if (address.rfind(L"172.", 0) == 0) {
+            const size_t dot = address.find(L'.', 4);
+            if (dot != std::wstring::npos) {
+                const int second = _wtoi(address.substr(4, dot - 4).c_str());
+                if (second >= 16 && second <= 31) return true;
+            }
+        }
+        if (address.rfind(L"192.168.", 0) == 0) return true;
+        if (address.rfind(L"169.254.", 0) == 0) return true;
+        // IPv6 ULA / link-local.
+        if (address.rfind(L"fc", 0) == 0 || address.rfind(L"fd", 0) == 0) return true;
+        if (address.rfind(L"fe8", 0) == 0 || address.rfind(L"fe9", 0) == 0 ||
+            address.rfind(L"fea", 0) == 0 || address.rfind(L"feb", 0) == 0) return true;
+        return false;
+    };
     for (size_t i = 0; i < context.store.View().size(); ++i) {
         const Connection* row = context.store.ViewRow(i);
         if (row == nullptr || (row->flags & kRowRemoved) != 0) continue;
@@ -2030,7 +2053,8 @@ std::string NetworkSummaryJson(ServerContext& context) {
             const std::wstring& local = row->display.localAddress;
             if (local == L"0.0.0.0" || local == L"::" || local == L"*") wildcard++;
             else if (local == L"127.0.0.1" || local == L"::1") loopback++;
-            else lan++;
+            else if (isPrivateListenerAddress(local)) privateCount++;
+            else specific++;
         }
     }
     std::ostringstream out;
@@ -2046,7 +2070,8 @@ std::string NetworkSummaryJson(ServerContext& context) {
     out << "},\"byProcess\":{";
     first = true;
     for (const auto& kv : byProcess) { if (!first) out << ","; first = false; out << JsonQuote(kv.first) << ":" << kv.second; }
-    out << "},\"listeners\":{\"loopback\":" << loopback << ",\"lan\":" << lan << ",\"wildcard\":" << wildcard << "}";
+    out << "},\"listeners\":{\"loopback\":" << loopback << ",\"private\":" << privateCount
+        << ",\"specific\":" << specific << ",\"wildcard\":" << wildcard << "}";
     out << ",\"snapshotKnown\":" << (context.connectionSnapshotTick.load() > 0 ? "true" : "false");
     out << ",\"snapshotAgeMs\":" << (context.connectionSnapshotTick.load() > 0
                                        ? ::GetTickCount64() - context.connectionSnapshotTick.load()
