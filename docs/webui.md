@@ -33,7 +33,7 @@ server. Leave it unset to use `%LOCALAPPDATA%\WinTCP\WebUi`.
 | Page | What it shows |
 |---|---|
 | **Overview** | Current CPU, memory, disk, network, connection, and process summaries with recent trends. |
-| **Performance** | Per-core CPU readings and CPU, memory, disk, and network history where the system provides it. |
+| **Performance** | Per-core CPU readings and CPU, memory, disk, and network history where the system provides it. Includes an evidence-export button for troubleshooting. |
 | **Processes** | Process table and parent/child tree, with a treemap sized by working set or CPU share. |
 | **Network** | Live connections, listening sockets, retained closed history, blocked-peer, and country-flow views. |
 | **Map** | Interactive country map with a globe/2D projection switch and connection markers. |
@@ -154,10 +154,15 @@ but not a PID, leaving a narrow, unavoidable race if that exact tuple is reused
 between the final check and the API call.
 
 **Connections** shows live endpoints. **Closed history** shows the bounded set
-of closed endpoints retained by the server, separately from live counts.
+of closed endpoints retained by the server (with a retention note and a reset-to-live button), separately from live counts.
 Historical rows cannot apply a live peer-block action. **Listening** includes
 TCP listeners and UDP bindings, their numeric local ports, and their binding
 scope: all interfaces, loopback, private/link-local, or a specific address.
+The **Port owner** input above the Listening sockets table finds which process,
+interface, and rules apply to a given listening port. It links directly to the
+process details, automation draft, and inbound firewall investigation for that
+port. A bound socket is distinct from a tested reachable service; firewall policy
+and routing determine reachability.
 IPv4-mapped IPv6 addresses follow the mapped IPv4 address scope. These labels
 describe the local bind only; a wildcard or specific bind does not prove that a
 firewall permits access or that the endpoint is externally reachable.
