@@ -2,6 +2,7 @@ import { connectionRowsTsv, endpoint, remoteEndpointValue, remoteHostnameValue, 
 import { copyText } from "./feedback.js";
 import { openContextMenu } from "./contextmenu.js";
 import { processConnectionFilter, investigateConnections } from "../connectionfilters.js";
+import { store } from "../store.js";
 
 function closeUnavailableReason(row) {
   if (row.removed) return "Retained history is no longer live";
@@ -143,6 +144,14 @@ export function connectionMenu(row, { event, anchor, onDetails, onClose, onBlock
     { label: "Exclude this remote IP", disabled: !hasRemote,
       action: () => investigateConnections([{ field: "remote", value: remote, exclude: true }], "add") },
     { label: "Clear connection filters", action: () => investigateConnections([], "replace") },
+    { separator: true },
+    { label: "Create automation for this connection", action: () => {
+        store.set({ automationDraft: {
+          name: `Connection ${row.remote || row.remoteAddress || ""}:${row.rport || ""}`,
+          source: `# Selected connection\\n# PID ${row.pid ?? ""}\\n# Remote ${row.remote || row.remoteAddress || ""}:${row.rport ?? ""}\\n`,
+        } });
+        window.location.hash = "#/automations";
+      } },
     { separator: true },
     copyItem("Remote IP", remoteIp, hasRemote),
     copyItem("Remote hostname", hostname, hasHostname),

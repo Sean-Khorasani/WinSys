@@ -12,6 +12,7 @@ import { createTabs } from "../ui/tabs.js";
 import { emptyState, card, cardHeader, cardTitle, cardDescription, cardContent, cardFooter } from "../ui/card.js";
 import { badge } from "../ui/badge.js";
 import { api } from "../api.js";
+import { store } from "../store.js";
 import {
   parseScript,
   scriptCommandNodes,
@@ -76,6 +77,8 @@ export async function renderAutomations(page, store) {
   };
 
   // Shared state for the Scripts tab workbench.
+  const draft = store.get().automationDraft || null;
+  if (draft) store.set({ automationDraft: null });
   const scriptsState = {
     config: null,
     templates: [],
@@ -93,6 +96,10 @@ export async function renderAutomations(page, store) {
     },
   };
   page._autoState = scriptsState;
+  if (draft) {
+    scriptsState.editName = draft.name || "Selected connection automation";
+    scriptsState.editSource = draft.source || "";
+  }
 
   // ---- Scripts tab workbench ----
   // Declared before the initial render to avoid a temporal dead zone:
