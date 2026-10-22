@@ -722,6 +722,7 @@ export async function renderAutomations(page, store) {
       output: "",
       status: "Running",
       failed: false,
+      stepsExecuted: 0,
     };
     renderRunState();
 
@@ -993,6 +994,7 @@ export async function renderAutomations(page, store) {
       output: "",
       status: "Not run",
       failed: false,
+      stepsExecuted: 0,
     };
     renderRunState();
   }
