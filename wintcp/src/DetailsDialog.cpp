@@ -15,6 +15,8 @@
 #include "Utils.h"
 #include "FontCache.h"   // header/mono/small faces are cache entries
 #include "Theme.h"       // shared dark substitutes + Mix + HC probe
+#include "ConnectionsList.h"  // WriteClipboardText / NativeClipboardApi
+#include "TextSheetDialog.h"  // manual clipboard fallback
 
 namespace wintcp {
 namespace {
@@ -307,7 +309,12 @@ void DetailsDialog::UpdateModel(const DetailModel& model) {
     // Silent refresh while auto-refresh runs: no show, no foreground, no
     // focus steal. No-op when the window was closed meanwhile.
     if (hwnd_ == nullptr) return;
+    // Auto-refresh rebuilds the model every couple of seconds. Preserve the
+    // tab the user is looking at instead of resetting to Process each time;
+    // RebuildLayout() clamps an unavailable tab back to a valid one.
+    const DetailTab previousTab = model_.activeTab;
     model_ = model;
+    model_.activeTab = previousTab;
     if (collapsed_.size() != model_.sections.size())
         collapsed_.assign(model_.sections.size(), 0);
     // RebuildLayout() clamps scrollPos_ to the new content height, so a
@@ -1097,22 +1104,13 @@ void DetailsDialog::OnMouseDown(int x, int y) {
 void DetailsDialog::CopyTextToClipboard() {
     const std::wstring text = model_.ToPlainText();
     if (text.empty()) return;
-    if (!::OpenClipboard(hwnd_)) return;   // another app holds it
-    ::EmptyClipboard();
-    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (hMem != nullptr) {
-        void* dst = ::GlobalLock(hMem);
-        if (dst != nullptr) {
-            ::memcpy(dst, text.c_str(), bytes);
-            ::GlobalUnlock(hMem);
-            if (::SetClipboardData(CF_UNICODETEXT, hMem) == nullptr)
-                ::GlobalFree(hMem);
-            hMem = nullptr;
-        }
-        if (hMem != nullptr) ::GlobalFree(hMem);
+    const ClipboardWriteStatus result =
+        WriteClipboardText(hwnd_, text, NativeClipboardApi());
+    if (ClipboardNeedsManualFallback(result)) {
+        ShowTextSheet(hwnd_,
+                      L"Clipboard unavailable - select text and press Ctrl+C",
+                      text, nullptr, true);
     }
-    ::CloseClipboard();
 }
 
 void DetailsDialog::OnCommand(WORD id) {
