@@ -1413,7 +1413,7 @@ function connectionInspectorSections(row) {
     { title: "Identity", fields: [
       field("Process", row.process || row.processName),
       field("PID", row.pid, { mono: true }),
-      field("Process instance", row.processInstanceId, { mono: true,
+      field("Process instance", formatInstanceId(row.processInstanceId), { mono: true,
         reason: row.processInstanceId ? "PID lifetime token; a PID alone can be reused." : "Process creation time is unknown, so the owner cannot be verified by lifetime." }),
       field("Executable path", row.path, { mono: true,
         reason: row.path ? "" : "Windows did not provide a readable image path." }),
@@ -1926,4 +1926,12 @@ function showBlockPeerPreview(row) {
       if (!view.isConnected || error.name === "AbortError") return;
       status.textContent = `Firewall rule preview failed: ${error.message}`;
     });
+}
+
+function formatInstanceId(value) {
+  if (!value || typeof value !== "string") return String(value ?? "—");
+  const parts = value.split(":");
+  if (parts.length === 3 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]))
+    return `PID ${parts[0]} · Token ${parts[1]}:${parts[2]}`;
+  return value;
 }

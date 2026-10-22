@@ -395,6 +395,16 @@ function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInp
 
 // ---- Tree -------------------------------------------------------------------
 
+function formatInstanceId(value) {
+  if (!value || typeof value !== "string") return String(value ?? "—");
+  const match = /^\d+:(\d+):(\d+)$/.exec(value);
+  if (match) return `PID ${value.split(":")[0]} · Created ${match[1]}:${match[2]}`;
+  const parts = value.split(":");
+  if (parts.length === 3 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]))
+    return `PID ${parts[0]} · Token ${parts[1]}:${parts[2]}`;
+  return value;
+}
+
 function processCreationTime(row) {
   const match = /^(\d+):(\d+):(\d+)$/.exec(String(row.instanceId || ""));
   if (!match || Number(match[1]) !== Number(row.pid)) return null;
@@ -1081,7 +1091,7 @@ function processInspectorSections(row) {
       field("Process", row.name || "(unnamed)"),
       field("PID", row.pid, { mono: true }),
       field("Parent PID", row.ppid, { mono: true, reason: known(row.ppid) ? "" : "Parent identity was not supplied by this process snapshot." }),
-      field("Process instance", row.instanceId, { mono: true, reason: known(row.instanceId) ? "" : "Creation time is unknown; PID alone is not a stable identity." }),
+      field("Process instance", formatInstanceId(row.instanceId), { mono: true, reason: known(row.instanceId) ? "PID lifetime token; a PID alone can be reused." : "Creation time is unknown; PID alone is not a stable identity." }),
       field("Executable path", row.path, { mono: true, reason: known(row.path) ? "" : "Windows did not provide a readable image path." }),
       field("Service", row.service, { reason: known(row.service) ? "" : "Service attribution is not included in this process snapshot." }),
     ] },
