@@ -201,6 +201,7 @@ export async function renderOverview(page, store) {
     lastMetricsTs: null,
     lastConnectionSnapshotTs: null,
     lastHistoryTs: null,
+    prevVolumeSignature: "",
     disposed: false,
     loading: true,
     requests: new AbortController(),
@@ -522,8 +523,10 @@ function updateBreakdowns(page, state, ov) {
   // Volumes - only rebuild if the volume set changed.
   const volCard = host.querySelectorAll(":scope > .card")[1];
   if (volCard && Array.isArray(facts.volumes)) {
-    if (ov.prevVolumeCount !== facts.volumes.length) {
-      ov.prevVolumeCount = facts.volumes.length;
+    const volumeSignature = facts.volumes.map((vol) =>
+      `${vol.label || ""}:${vol.totalBytes || 0}:${vol.freeBytes || 0}`).join("|");
+    if (ov.prevVolumeSignature !== volumeSignature) {
+      ov.prevVolumeSignature = volumeSignature;
       const contentBox = volCard.querySelector(".card-content");
       if (contentBox) {
         clear(contentBox);
@@ -1042,9 +1045,12 @@ function paintTrends(page, sparkData, t, raw) {
     const delta = deltaOf(raw[key], t);
     if (!delta) continue;
     const head = node.querySelector(".kpi-head");
-    if (!head || head.querySelector(".kpi-delta")) continue;
+    if (!head) continue;
     const mode = id === "memory" ? "absolute" : "relative";
-    head.append(renderDelta(delta, mode, id === "memory" ? fmtBytes : (v) => fmtBps(v)));
+    const rendered = renderDelta(delta, mode, id === "memory" ? fmtBytes : (v) => fmtBps(v));
+    const existing = head.querySelector(".kpi-delta");
+    if (existing) existing.replaceWith(rendered);
+    else head.append(rendered);
   }
 }
 
