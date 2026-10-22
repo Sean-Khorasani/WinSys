@@ -344,6 +344,9 @@ function replacePage() {
   disposePage();
   const previous = document.getElementById("page");
   const page = previous.cloneNode(false);
+  // Per-page layout classes (such as the Map page's full-width mode) must not
+  // leak into the next route's cloned shell.
+  page.className = "page";
   previous.replaceWith(page);
   return page;
 }
