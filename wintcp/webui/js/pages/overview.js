@@ -273,7 +273,7 @@ export async function updateOverview(page, store) {
   // never got data.
   ov.loading = true;
   try {
-    const history = await api.get("/api/metrics/history?max=300", { signal: ov.requests.signal });
+    const history = await api.get("/api/metrics/history?max=180", { signal: ov.requests.signal });
     if (ov.disposed) return;
     if (history && history.t) {
       ov.history = history;
@@ -493,7 +493,7 @@ function updateBreakdowns(page, state, ov) {
     const existingGrid = exposureCard.querySelector(".exposure-grid");
     if (existingGrid) {
       const cells = existingGrid.querySelectorAll(".exposure-value");
-      const keys = ["wildcard", "lan", "loopback"];
+      const keys = ["wildcard", "private", "specific", "loopback"];
       keys.forEach((key, i) => {
         if (cells[i]) {
           cells[i].textContent = listeners ? fmtInt(listeners[key] ?? 0) : "—";
@@ -507,7 +507,8 @@ function updateBreakdowns(page, state, ov) {
         const list = h("div", { class: "exposure-grid" });
         for (const [key, label, hint] of [
           ["wildcard", "Wildcard", "binds every interface, reachable from the network"],
-          ["lan", "LAN", "binds one specific address"],
+          ["private", "Private / link-local", "bound to one private or link-local address"],
+          ["specific", "Specific address", "bound to one address; binding alone does not prove external reachability"],
           ["loopback", "Loopback", "reachable only from this machine"],
         ]) {
           list.append(h("div", { class: "exposure-cell", title: hint },
@@ -814,7 +815,8 @@ function renderBreakdowns(page, state) {
             const list = h("div", { class: "exposure-grid" });
             for (const [key, label, hint] of [
               ["wildcard", "Wildcard", "binds every interface, reachable from the network"],
-              ["lan", "LAN", "binds one specific address"],
+              ["private", "Private / link-local", "bound to one private or link-local address"],
+              ["specific", "Specific address", "bound to one address; binding alone does not prove external reachability"],
               ["loopback", "Loopback", "reachable only from this machine"],
             ]) {
               list.append(h("div", { class: "exposure-cell", title: hint },
@@ -935,7 +937,7 @@ async function mountCharts(page) {
 
   let history;
   try {
-    history = await api.get("/api/metrics/history?max=300", { signal: ov.requests.signal });
+    history = await api.get("/api/metrics/history?max=180", { signal: ov.requests.signal });
   } catch (err) {
     if (ov.disposed) return;
     for (const host of hosts) {
