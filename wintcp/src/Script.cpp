@@ -1257,7 +1257,11 @@ namespace Script {
         if (first.type == TokenType::Keyword && first.value == L"return") {
             result.exitCode = 0;
             if (tokens.size() > 1 && tokens[1].type == TokenType::Number) {
-                result.exitCode = std::stoi(WideToUtf8(tokens[1].value));
+                try {
+                    result.exitCode = std::stoi(WideToUtf8(tokens[1].value));
+                } catch (...) {
+                    result.exitCode = 0;
+                }
             }
             result.continueExecution = false;
             return result;
