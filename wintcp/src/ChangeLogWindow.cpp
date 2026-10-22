@@ -20,6 +20,8 @@
 #include <cstring>
 
 #include "Utils.h"
+#include "ConnectionsList.h"  // WriteClipboardText / NativeClipboardApi
+#include "TextSheetDialog.h"  // manual clipboard fallback
 #include "WinCaps.h"   // DelayLoadGuard: comdlg32.dll is delay-loaded
 
 #pragma comment(lib, "comctl32.lib")
@@ -670,22 +672,12 @@ void ChangeLogWindow::CopySelection() {
         text += L"\r\n";
     }
 
-    if (!::OpenClipboard(hwnd_)) return;   // another app holds it
-    ::EmptyClipboard();
-    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (hMem != nullptr) {
-        void* dst = ::GlobalLock(hMem);
-        if (dst != nullptr) {
-            std::memcpy(dst, text.c_str(), bytes);
-            ::GlobalUnlock(hMem);
-            if (::SetClipboardData(CF_UNICODETEXT, hMem) == nullptr)
-                ::GlobalFree(hMem);
-            hMem = nullptr;
-        }
-        if (hMem != nullptr) ::GlobalFree(hMem);
+    const ClipboardWriteStatus result =
+        WriteClipboardText(hwnd_, text, NativeClipboardApi());
+    if (ClipboardNeedsManualFallback(result)) {
+        ShowTextSheet(hwnd_, L"Clipboard unavailable - select text and press Ctrl+C",
+                      text, nullptr, true);
     }
-    ::CloseClipboard();
     // The count is the fallback's receipt: without it a whole-log copy
     // is indistinguishable from a one-row copy.
     if (fellBackToAll) {
