@@ -313,7 +313,11 @@ export function updateProcesses(page, store) {
 
 function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInput, store) {
   const host = h("div", { class: "tab-panel-body" });
-  const layoutHost = h("div", { class: "table-layout-host" });
+  const tableTools = h("div", { class: "table-layout-actions" });
+  const layoutHost = h("div", { class: "table-layout-host" },
+    h("span", { class: "table-toolbar-hint muted text-sm" },
+      "Select a process to inspect it; use the Actions menu for process and firewall operations."),
+    tableTools);
   const container = h("div", { id: "proc-table-container" });
   const procState = store ? store.get() : {};
   host.append(layoutHost, container);
@@ -332,8 +336,8 @@ function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInp
       { key: "memPrivate", label: "Private", width: 1, align: "right", sortable: true },
       { key: "ioRead", label: "I/O read", width: 1, align: "right", sortable: true },
       { key: "ioWrite", label: "I/O write", width: 1, align: "right", sortable: true },
-      { key: "connections", label: "Conns", width: 1, align: "right", sortable: true },
-      { key: "listeners", label: "Listen", width: 1, align: "right", sortable: true },
+      { key: "connections", label: "Connections", width: 1, align: "right", sortable: true },
+      { key: "listeners", label: "Listeners", width: 1, align: "right", sortable: true },
       {
         key: "actions",
         label: "Actions",
@@ -379,7 +383,7 @@ function renderTableView(rows, sortKey, sortDir, onSort, filteredRows, filterInp
   });
   const tableDestroy = vt.destroy;
   vt.destroy = () => { layoutControls.destroy(); tableDestroy(); };
-  layoutHost.append(layoutControls.element);
+  tableTools.append(layoutControls.element);
   host._virtualTable = vt;
   vt.updateRows(rows);
 
