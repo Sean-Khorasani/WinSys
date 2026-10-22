@@ -670,6 +670,15 @@ try {
     const netStore = createStore({ connections: sample.connections, geoSummary: { geoIpConfigured: true, countries: { US: 100, CA: 20 }, local: 0, unknown: 2 }, lastUpdate: new Date(), networkView: "connections" });
     await renderNetwork(host, netStore);
     check("Network defaults to live rows", host.querySelector('#panel-connections [role="grid"]').getAttribute("aria-rowcount") === "4");
+    const selectionControls = host.querySelector("#panel-connections .selection-controls");
+    check("Network keeps Select all shown beside Clear selection in one labeled group",
+      selectionControls?.querySelector(".selection-action-label")?.textContent === "Selection" &&
+      [...selectionControls.querySelectorAll("button")].map((button) => button.textContent).join("|") ===
+        "Select all shown|Clear selection");
+    check("Endpoint comparison is an explained secondary table tool rather than loose snapshot buttons",
+      host.querySelector("#panel-connections .endpoint-comparison > summary")?.textContent === "Compare endpoints…" &&
+      host.querySelector("#panel-connections .endpoint-comparison-panel")?.textContent.includes("local browser baseline") &&
+      !host.querySelector("#panel-connections .selection-header"));
     const networkQuery = host.querySelector("#net-filter");
     networkQuery.value = 'process:"beta.exe" pid:20 port:443';
     networkQuery.dispatchEvent(new Event("input", { bubbles: true }));
@@ -808,7 +817,8 @@ try {
           service: sample.connections[0].service } }));
     document.querySelector('[role="menu"]')?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-    host.querySelector('#panel-connections .selection-actions button:first-child')?.click();
+    [...host.querySelectorAll('#panel-connections .selection-actions button')].find((button) =>
+      button.textContent === "Clear selection")?.click();
     const selectedNetworkKeys = () => [...host.querySelectorAll('#panel-connections .virtual-table-row[aria-selected="true"]')]
       .map((row) => row.dataset.rowKey);
     const afterClearKeys = selectedNetworkKeys();
@@ -849,7 +859,7 @@ try {
       exportName = this.download;
     } });
     [...host.querySelectorAll('#panel-connections .selection-actions button')].find((button) =>
-      button.textContent === "Export selected rows")?.click();
+      button.textContent === "Export selected rows (TSV)")?.click();
     const exportedTsv = exportBlob ? await exportBlob.text() : "";
     check("Bulk export downloads every current selected row in the visible column order",
       /^wintcp-connections-.*\.tsv$/.test(exportName) && exportedTsv ===
@@ -1609,6 +1619,10 @@ try {
     });
     setFormatUnits("iec");
     await renderProcesses(host, processStore);
+    check("Processes table explains row interaction and uses complete connection column names",
+      host.querySelector("#panel-table .table-toolbar-hint")?.textContent.includes("Select a process to inspect it") &&
+      [...host.querySelectorAll('#panel-table [role="columnheader"]')].some((cell) => cell.textContent === "Connections") &&
+      [...host.querySelectorAll('#panel-table [role="columnheader"]')].some((cell) => cell.textContent === "Listeners"));
     const processFilter = host.querySelector("#proc-filter");
     processFilter.value = "FixtureSvc";
     processFilter.dispatchEvent(new Event("input", { bubbles: true }));
