@@ -719,7 +719,20 @@ std::wstring ConnectionsList::SelectedRowsText(
     // selection - or every row, when the caller asked for all.
     std::vector<int> idx;
     std::vector<Connection> rows;
-    if (copyAll || !SelectedRowIndices(idx)) {
+    if (copyAll) {
+        // "Copy all" means the rows the table is actually showing, not every
+        // row in the store: hidden rows, filtered-out rows and retained
+        // history that the view has dropped must not sneak into the paste.
+        const std::vector<size_t>& view = store_.View();
+        if (view.empty() && !store_.Rows().empty()) {
+            rows = store_.Rows();
+        } else {
+            rows.reserve(view.size());
+            for (size_t i : view) {
+                if (i < store_.Rows().size()) rows.push_back(store_.Rows()[i]);
+            }
+        }
+    } else if (!SelectedRowIndices(idx)) {
         rows = store_.Rows();
     } else {
         rows.reserve(idx.size());
