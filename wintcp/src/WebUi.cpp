@@ -2954,17 +2954,44 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
         // answered 404 (the page rendered with no CSS and no JS).
         const std::wstring fullPath = context.executableDirectory + L"webui\\" + relative;
         const size_t maxBytes = StaticMaxBytesFor(path);
+        // Validate every path component, not just the final one: an intermediate
+        // junction or symlink could otherwise escape the webui tree.
+        std::wstring current = context.executableDirectory + L"webui";
+        size_t pos = 0;
+        bool found = true;
         WIN32_FILE_ATTRIBUTE_DATA fad = {};
-        if (::GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &fad)) {
-            // A reparse point (symlink, junction, mount point) inside the webui
-            // tree can point anywhere on the machine, so it is refused outright
-            // rather than resolved.
-            if ((fad.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-                (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        while (true) {
+            const size_t next = relative.find(L'\\', pos);
+            const std::wstring component =
+                (next == std::wstring::npos) ? relative.substr(pos)
+                                             : relative.substr(pos, next - pos);
+            if (component.empty()) break;
+            current += L"\\" + component;
+            if (!::GetFileAttributesExW(current.c_str(), GetFileExInfoStandard,
+                                        &fad)) {
+                found = false;
+                break;
+            }
+            if ((fad.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
                 response.status = 403;
                 response.body = "Forbidden";
                 return response;
             }
+            if (next == std::wstring::npos) {
+                if ((fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                    response.status = 403;
+                    response.body = "Forbidden";
+                    return response;
+                }
+            } else if ((fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                response.status = 404;
+                response.body = "Not found";
+                return response;
+            }
+            if (next == std::wstring::npos) break;
+            pos = next + 1;
+        }
+        if (found) {
             const ULONGLONG fileSize =
                 (static_cast<ULONGLONG>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
             if (fileSize > maxBytes) {
