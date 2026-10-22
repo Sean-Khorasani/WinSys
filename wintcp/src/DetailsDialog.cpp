@@ -1160,22 +1160,53 @@ LRESULT CALLBACK DetailsDialog::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
 
 LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_DRAWITEM: {
+            const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (dis == nullptr || dis->CtlType != ODT_BUTTON) return FALSE;
+            const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+            const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+            const bool focused = (dis->itemState & ODS_FOCUS) != 0;
+            RECT rc = dis->rcItem;
+            const bool dark = dark_ && !HighContrastActive();
+            HBRUSH bgBrush = dark && brushWindow_ != nullptr
+                                 ? brushWindow_
+                                 : reinterpret_cast<HBRUSH>(
+                                       ::GetStockObject(COLOR_BTNFACE + 1));
+            ::FillRect(dis->hDC, &rc, bgBrush);
+            ::DrawEdge(dis->hDC, &rc,
+                       pressed ? EDGE_SUNKEN : EDGE_RAISED,
+                       BF_RECT | BF_ADJUST);
+            if (pressed) ::OffsetRect(&rc, 1, 1);
+            const HFONT face = (bodyFont_ != nullptr) ? bodyFont_ : font_;
+            HFONT oldFont = nullptr;
+            if (face != nullptr) oldFont = static_cast<HFONT>(::SelectObject(dis->hDC, face));
+            ::SetBkMode(dis->hDC, TRANSPARENT);
+            ::SetTextColor(dis->hDC, disabled ? clrDim_ : clrText_);
+            wchar_t text[256] = {0};
+            ::GetWindowTextW(dis->hwndItem, text, 256);
+            ::DrawTextW(dis->hDC, text, -1, &rc,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont != nullptr) ::SelectObject(dis->hDC, oldFont);
+            if (focused) ::DrawFocusRect(dis->hDC, &rc);
+            return TRUE;
+        }
         case WM_CREATE: {
             const HINSTANCE inst = ::GetModuleHandleW(nullptr);
             hwndCopy_ = ::CreateWindowExW(
-                0, L"BUTTON", L"&Copy", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0, L"BUTTON", L"&Copy",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 0, 0, hwnd_,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_DLG_COPY)),
                 inst, nullptr);
             hwndOpen_ = ::CreateWindowExW(
                 0, L"BUTTON", L"&Open file location",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED | BS_OWNERDRAW,
                 0, 0, 0, 0, hwnd_,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_DLG_OPEN)),
                 inst, nullptr);
             hwndClose_ = ::CreateWindowExW(
                 0, L"BUTTON", L"C&lose",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 0, 0, hwnd_,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_DLG_CLOSE)),
                 inst, nullptr);
