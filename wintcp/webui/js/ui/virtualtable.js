@@ -675,6 +675,7 @@ function buildRow(index) {
     getLayout, setLayout,
     getColumns: () => allColumns.map((column) => ({ ...column })),
     getVisibleColumns: () => activeColumns.map((column) => ({ ...column })),
+    getRows: () => state.rows.slice(),
     getSelectedRows: selectedRowsInViewOrder,
     getCurrentSelectedRows: selectedCurrentRows,
   };
