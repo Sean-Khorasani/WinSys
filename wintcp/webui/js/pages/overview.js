@@ -226,7 +226,7 @@ export async function renderOverview(page, store) {
   renderBreakdowns(page, state);
 
   try {
-    await Promise.all([mountCharts(page), mountProcesses(page)]);
+    await Promise.all([mountCharts(page, store), mountProcesses(page)]);
   } finally {
     view.loading = false;
   }
@@ -294,7 +294,7 @@ export async function updateOverview(page, store) {
       if (t.length >= 2) {
         if (ov.charts.size === 0) {
           // Charts not yet created; mount them now.
-          await mountCharts(page);
+          await mountCharts(page, store);
         } else {
           updateCharts(page, ov);
         }
@@ -897,7 +897,7 @@ function renderBreakdowns(page, state) {
   ));
 }
 
-async function mountCharts(page) {
+async function mountCharts(page, store) {
   const ov = page._overviewState;
   const hosts = [
     {
@@ -935,16 +935,23 @@ async function mountCharts(page) {
     },
   ];
 
+  const metricsTs = store.get().lastUpdate;
   let history;
-  try {
-    history = await api.get("/api/metrics/history?max=180", { signal: ov.requests.signal });
-  } catch (err) {
-    if (ov.disposed) return;
-    for (const host of hosts) {
-      const el = page.querySelector(host.sel);
-      if (el) { clear(el); el.append(emptyState({}, "No history yet", err.message)); }
+  if (ov.history && ov.lastHistoryTs === metricsTs) {
+    history = ov.history;
+  } else {
+    try {
+      history = await api.get("/api/metrics/history?max=180", { signal: ov.requests.signal });
+    } catch (err) {
+      if (ov.disposed) return;
+      for (const host of hosts) {
+        const el = page.querySelector(host.sel);
+        if (el) { clear(el); el.append(emptyState({}, "No history yet", err.message)); }
+      }
+      return;
     }
-    return;
+    if (ov.disposed) return;
+    ov.lastHistoryTs = metricsTs;
   }
 
   if (ov.disposed) return;

@@ -1010,7 +1010,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
         actions: true,
         width: 1,
         sortable: false,
-        renderCell: (row) => renderConnActions(host, row, () => vt?.getVisibleColumns()),
+        renderCell: (row) => renderConnActions(host, row, () => vt?.getVisibleColumns(), store),
       },
     ],
     rowHeight: 34,
@@ -1033,7 +1033,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     sortDir,
     onSort,
     onRowClick: (row) => showConnectionDetails(row),
-    onRowContextMenu: (row, event, anchor) => connectionMenu(row, { event, anchor, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onBlockApplication: showApplicationBlockPreview, onBlockApplicationPeer: showApplicationPeerBlockPreview, onBlockServicePeer: showServicePeerBlockPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], vt.getVisibleColumns()) }),
+    onRowContextMenu: (row, event, anchor) => connectionMenu(row, { event, anchor, store, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onBlockApplication: showApplicationBlockPreview, onBlockApplicationPeer: showApplicationPeerBlockPreview, onBlockServicePeer: showServicePeerBlockPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], vt.getVisibleColumns()) }),
     format: { hostname: (row) => hostnameLabel(row.hostname) },
   });
   const layoutControls = createColumnLayoutControls(vt, {
@@ -1062,7 +1062,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
   return host;
 }
 
-function renderConnActions(host, row, visibleColumns) {
+function renderConnActions(host, row, visibleColumns, store) {
   const wrap = h("div", { class: "row-actions", style: "display: flex; gap: 0.25rem; justify-content: flex-end;" });
   const hasRemote = !row.removed && row.remote && String(row.remote) !== "0.0.0.0" && String(row.remote) !== "*" && row.rport;
 
@@ -1075,7 +1075,7 @@ function renderConnActions(host, row, visibleColumns) {
       title: "Connection actions (right-click or Shift+F10)",
       onclick: (event) => {
         event.stopPropagation();
-        connectionMenu(row, { event, anchor: event.currentTarget, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onBlockApplication: showApplicationBlockPreview, onBlockApplicationPeer: showApplicationPeerBlockPreview, onBlockServicePeer: showServicePeerBlockPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], visibleColumns?.()) });
+        connectionMenu(row, { event, anchor: event.currentTarget, store, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onBlockApplication: showApplicationBlockPreview, onBlockApplicationPeer: showApplicationPeerBlockPreview, onBlockServicePeer: showServicePeerBlockPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], visibleColumns?.()) });
       },
     }, "⋯"),
     h("button", {
@@ -1149,7 +1149,7 @@ function renderListening(rows, sortKey, sortDir, onSort, store, viewState = null
         actions: true,
         width: 0.8,
         sortable: false,
-        renderCell: (row) => renderListeningActions(row, () => vt?.getVisibleColumns()),
+        renderCell: (row) => renderListeningActions(row, () => vt?.getVisibleColumns(), store),
       },
     ],
     rowHeight: 34,
@@ -1170,7 +1170,7 @@ function renderListening(rows, sortKey, sortDir, onSort, store, viewState = null
     sortDir,
     onSort,
     onRowClick: (row) => showConnectionDetails(row),
-    onRowContextMenu: (row, event, anchor) => connectionMenu(row, { event, anchor, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], vt.getVisibleColumns()) }),
+    onRowContextMenu: (row, event, anchor) => connectionMenu(row, { event, anchor, store, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], vt.getVisibleColumns()) }),
   });
   vt.applySavedLayout = (next) => {
     if (!next || next.version !== 1) return false;
@@ -1195,14 +1195,14 @@ function renderListening(rows, sortKey, sortDir, onSort, store, viewState = null
   return host;
 }
 
-function renderListeningActions(row, visibleColumns) {
+function renderListeningActions(row, visibleColumns, store) {
   const wrap = h("div", { class: "row-actions", style: "display: flex; gap: 0.25rem; justify-content: flex-end;" });
   wrap.append(
     h("button", {
       class: "btn btn-ghost btn-sm", type: "button", "aria-label": "Connection actions", "aria-haspopup": "menu",
       onclick: (event) => {
         event.stopPropagation();
-        connectionMenu(row, { event, anchor: event.currentTarget, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], visibleColumns?.()) });
+        connectionMenu(row, { event, anchor: event.currentTarget, store, onDetails: showConnectionDetails, onClose: showConnectionClosePreview, onBlock: showBlockPeerPreview, onCloseAndBlock: showCloseAndBlockPreview, blockReason: blockPeerReason(row), serializeRow: (target) => connectionRowsTsv([target], visibleColumns?.()) });
       },
     }, "⋯"),
     h("button", {

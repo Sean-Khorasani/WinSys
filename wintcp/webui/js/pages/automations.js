@@ -12,7 +12,6 @@ import { createTabs } from "../ui/tabs.js";
 import { emptyState, card, cardHeader, cardTitle, cardDescription, cardContent, cardFooter } from "../ui/card.js";
 import { badge } from "../ui/badge.js";
 import { api } from "../api.js";
-import { store } from "../store.js";
 import {
   parseScript,
   scriptCommandNodes,

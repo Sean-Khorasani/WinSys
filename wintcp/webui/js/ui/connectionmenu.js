@@ -2,7 +2,6 @@ import { connectionRowsTsv, endpoint, remoteEndpointValue, remoteHostnameValue, 
 import { copyText } from "./feedback.js";
 import { openContextMenu } from "./contextmenu.js";
 import { processConnectionFilter, investigateConnections } from "../connectionfilters.js";
-import { store } from "../store.js";
 
 function closeUnavailableReason(row) {
   if (row.removed) return "Retained history is no longer live";
@@ -32,7 +31,7 @@ function positiveInteger(value, maximum) {
   return Number.isSafeInteger(number) && number > 0 && number <= maximum ? number : null;
 }
 
-export function connectionMenu(row, { event, anchor, onDetails, onClose, onBlock, onBlockApplication, onBlockApplicationPeer, onBlockServicePeer, onCloseAndBlock, blockReason, serializeRow }) {
+export function connectionMenu(row, { event, anchor, onDetails, onClose, onBlock, onBlockApplication, onBlockApplicationPeer, onBlockServicePeer, onCloseAndBlock, blockReason, serializeRow, store }) {
   const remote = row.remote || row.remoteAddress || "";
   const remoteIp = remoteIpValue(row);
   const remoteEndpoint = remoteEndpointValue(row);
@@ -146,7 +145,7 @@ export function connectionMenu(row, { event, anchor, onDetails, onClose, onBlock
     { label: "Clear connection filters", action: () => investigateConnections([], "replace") },
     { separator: true },
     { label: "Create automation for this connection", action: () => {
-        store.set({ automationDraft: {
+        if (store) store.set({ automationDraft: {
           name: `Connection ${row.remote || row.remoteAddress || ""}:${row.rport || ""}`,
           source: `# Selected connection\\n# PID ${row.pid ?? ""}\\n# Remote ${row.remote || row.remoteAddress || ""}:${row.rport ?? ""}\\n`,
         } });
