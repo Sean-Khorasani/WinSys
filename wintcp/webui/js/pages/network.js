@@ -844,9 +844,35 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
       }, 1000);
       exportTimers.set(timer, url);
     },
-  }, "Export selected rows");
+  }, "Export selected rows (TSV)");
+  const exportJsonButton = h("button", {
+    class: "btn btn-ghost btn-sm",
+    type: "button",
+    title: "Export selected rows as JSON evidence",
+    onclick: () => {
+      const selectedRows = vt?.getCurrentSelectedRows() || [];
+      if (!selectedRows.length) return;
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        rowCount: selectedRows.length,
+        rows: selectedRows,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = h("a", { href: url, download: `wintcp-connections-${new Date().toISOString().replace(/[:.]/g, "-")}.json` });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      const timer = window.setTimeout(() => {
+        URL.revokeObjectURL(url);
+        exportTimers.delete(timer);
+      }, 1000);
+      exportTimers.set(timer, url);
+    },
+  }, "Export selected rows (JSON)");
   selectionActions.append(clearSelectionButton, copyRemoteButton,
-    copyHostButton, copyEndpointButton, copyRowsButton, exportRowsButton);
+    copyHostButton, copyEndpointButton, copyRowsButton, exportRowsButton, exportJsonButton);
   const updateSelection = ({ rows: selected, selectedCount, visibleCount, hiddenCount, staleCount }) => {
     selectionBar.hidden = selectedCount === 0;
     const details = [];
@@ -860,6 +886,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     copyEndpointButton.disabled = !copyValues(selected, remoteEndpointValue);
     copyRowsButton.disabled = selectedCount === 0;
     exportRowsButton.disabled = !vt?.getCurrentSelectedRows().length;
+  exportJsonButton.disabled = !vt?.getCurrentSelectedRows().length;
   };
   function copySelected(label, select) {
     const text = copyValues(vt?.getSelectedRows() || [], select);
