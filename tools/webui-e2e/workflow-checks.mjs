@@ -1202,6 +1202,13 @@ try {
       networkDetails?.textContent.includes("Identity") && networkDetails?.textContent.includes("Endpoints") &&
       networkDetails?.textContent.includes("Activity") && networkDetails?.textContent.includes("Rules") &&
       Boolean(networkDetails?.querySelector('[aria-label="Copy Remote endpoint"]')));
+    const networkInspectorFields = [...(networkDetails?.querySelectorAll(".inspector-field") || [])];
+    check("Connection inspector keeps every label and value in one field row without literal null nodes",
+      networkInspectorFields.length > 0 &&
+      networkInspectorFields.every((field) => field.querySelectorAll(":scope > dt").length === 1 &&
+        field.querySelectorAll(":scope > dd.inspector-value").length === 1) &&
+      ![...networkDetails.querySelectorAll("*")].some((node) => [...node.childNodes].some((child) =>
+        child.nodeType === Node.TEXT_NODE && child.textContent.trim() === "null")));
     host._netUpdate({ lastUpdate: Date.now(), connections: sample.connections.map((row) =>
       row.id === 1 ? { ...row, state: "CLOSE_WAIT" } : { ...row }), geoSummary: {} });
     check("Connection inspector follows an exact matching identity across a live update",
@@ -1529,11 +1536,18 @@ try {
     const treeProcessDetails = document.querySelector('[data-details-row="proc"]');
     check("Tree Enter opens details for the exact process instance", treeProcessDetails?.querySelector(".dialog-title")?.textContent === "child.exe" && treeProcessDetails.textContent.includes("105"));
     check("Process inspector exposes lifetime identity, unknown reasons, and copyable path",
-      treeProcessDetails?.textContent.includes("Process instance") &&
+      treeProcessDetails?.textContent.includes("Process identity") &&
       treeProcessDetails?.textContent.includes("Activity") &&
       Boolean(treeProcessDetails?.querySelector('[aria-label="Copy Executable path"]')) &&
       [...treeProcessDetails.querySelectorAll(".inspector-footer button")].some((button) => button.textContent.includes("Show this process's connections")) &&
       [...treeProcessDetails.querySelectorAll(".inspector-footer button")].some((button) => button.textContent.includes("Review app firewall block")));
+    const processInspectorFields = [...(treeProcessDetails?.querySelectorAll(".inspector-field") || [])];
+    check("Process inspector keeps every label and value in one field row without literal null nodes",
+      processInspectorFields.length > 0 &&
+      processInspectorFields.every((field) => field.querySelectorAll(":scope > dt").length === 1 &&
+        field.querySelectorAll(":scope > dd.inspector-value").length === 1) &&
+      ![...treeProcessDetails.querySelectorAll("*")].some((node) => [...node.childNodes].some((child) =>
+        child.nodeType === Node.TEXT_NODE && child.textContent.trim() === "null")));
     const reusedChildRows = treeRows.map((row) => row.pid === 105
       ? { ...row, instanceId: "105:1:999", name: "reused-child.exe" } : row);
     treeStore.set({ processes: reusedChildRows, processFilter: "", lastUpdate: new Date() });
