@@ -506,7 +506,8 @@ export async function renderNetwork(page, store) {
     renderChips();
     const history = activeView === "history";
     const total = history ? snapshotRows.filter((row) => row.removed).length : conns.length;
-    summary.textContent = `${fmtInt(rows.length)} of ${fmtInt(total)} ${history ? "retained closed endpoints" : "live endpoints"}` +
+    const retentionNote = history ? " (bounded retention: closed endpoints kept for a limited time)" : "";
+    summary.textContent = `${fmtInt(rows.length)} of ${fmtInt(total)} ${history ? "retained closed endpoints" : "live endpoints"}` + retentionNote +
       (filterInput.value.trim() ? ` matching "${filterInput.value.trim()}"` : "");
   };
 
@@ -667,7 +668,7 @@ export async function renderNetwork(page, store) {
     tabs: [
       { id: "connections", label: "Connections", render: renderConnectionTable },
       { id: "listening", label: "Listening", render: renderListeningTable },
-      { id: "history", label: "Closed history", render: renderConnectionTable },
+      { id: "history", label: "Closed history (bounded, retained)", render: renderConnectionTable },
         { id: "blocked", label: "Firewall rules", render: () => {
         firewallView = createFirewallInventoryView({
           target: store.get().firewallTarget || null,
