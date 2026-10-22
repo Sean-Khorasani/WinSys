@@ -106,10 +106,26 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
   grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
   align-items: center;
   gap: 0.5rem;
-  margin: 0.75rem 0;
 }
 .network-saved-views .input { min-width: 0; }
 .network-saved-views [role="status"] { grid-column: 1 / -1; min-height: 1.25rem; }
+.network-view-manager { position: relative; width: fit-content; margin: 0.75rem 0; }
+.network-view-manager > summary { list-style: none; cursor: pointer; }
+.network-view-manager > summary::-webkit-details-marker { display: none; }
+.network-view-manager-panel {
+  position: absolute;
+  z-index: 7;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  display: grid;
+  gap: 0.625rem;
+  width: min(48rem, calc(100vw - 2rem));
+  padding: 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--popover);
+  color: var(--popover-foreground);
+}
 @media (max-width: 640px) {
   .network-page-heading { flex-direction: column; }
   .network-filter-control { width: 100%; }
