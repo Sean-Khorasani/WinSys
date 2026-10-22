@@ -6,6 +6,10 @@
   padding: 0;
 }
 
+/* Author-level display rules (for example .btn { display: inline-flex }) must
+   never make semantically hidden controls visible again. */
+[hidden] { display: none !important; }
+
 html {
   font-size: 16px;
   -webkit-text-size-adjust: 100%;
