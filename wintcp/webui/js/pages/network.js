@@ -871,8 +871,30 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
       exportTimers.set(timer, url);
     },
   }, "Export selected rows (JSON)");
+  const copyIncidentSummaryButton = h("button", {
+    class: "btn btn-ghost btn-sm",
+    type: "button",
+    title: "Copy a concise incident summary for the selected rows",
+    onclick: () => {
+      const selectedRows = vt?.getCurrentSelectedRows() || [];
+      if (!selectedRows.length) return;
+      const filter = store.get().networkFilter || "";
+      const predicates = store.get().networkPredicates || [];
+      const lines = [
+        `WinTCP incident summary`,
+        `Exported: ${new Date().toISOString()}`,
+        `Selected rows: ${selectedRows.length} of ${rows.length} visible`,
+        `Filter: ${filter || "(none)"}`,
+        `Predicates: ${predicates.length ? predicates.map((p) => p.field + ":" + p.value).join(", ") : "(none)"}`,
+        `Snapshot age: ${store.get().lastUpdate ? new Date(store.get().lastUpdate).toISOString() : "unknown"}`,
+        `Unknown values are shown as “—” and are not zero or measured values.`,
+      ];
+      copyText(lines.join("\\n"), "incident summary");
+    },
+  }, "Copy incident summary");
   selectionActions.append(clearSelectionButton, copyRemoteButton,
-    copyHostButton, copyEndpointButton, copyRowsButton, exportRowsButton, exportJsonButton);
+    copyHostButton, copyEndpointButton, copyRowsButton, exportRowsButton, exportJsonButton,
+    copyIncidentSummaryButton);
   const updateSelection = ({ rows: selected, selectedCount, visibleCount, hiddenCount, staleCount }) => {
     selectionBar.hidden = selectedCount === 0;
     const details = [];
@@ -887,6 +909,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     copyRowsButton.disabled = selectedCount === 0;
     exportRowsButton.disabled = !vt?.getCurrentSelectedRows().length;
   exportJsonButton.disabled = !vt?.getCurrentSelectedRows().length;
+  copyIncidentSummaryButton.disabled = !vt?.getCurrentSelectedRows().length;
   };
   function copySelected(label, select) {
     const text = copyValues(vt?.getSelectedRows() || [], select);
