@@ -152,6 +152,7 @@ private:
     void Run();
 
     std::thread thread_;
+    std::atomic<bool> detachedRunning_{false};
     std::mutex m_;
     std::condition_variable cv_;
     bool stop_ = false;
