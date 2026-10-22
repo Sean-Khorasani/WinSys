@@ -35,12 +35,35 @@ export async function renderPerformance(page, store) {
     view.charts = [];
   };
   clear(page);
+  const exportButton = h("button", {
+    class: "btn btn-sm btn-quiet",
+    type: "button",
+    onclick: () => {
+      const state = store.get();
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        source: "Performance metrics",
+        metricsTimestamp: state.metrics?._timestamp || null,
+        capabilities: state.capabilities || null,
+        metrics: state.metrics || null,
+        note: "Performance measurements distinguish adapter/process/socket data. Unavailable counters carry null + a reason; totals are not rates.",
+      };
+      const text = JSON.stringify(payload, null, 2);
+      const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `wintcp-performance-${new Date().toISOString().replace(/[:.]/g, "-")}.json`; document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+    title: "Export current performance metrics as JSON evidence",
+  }, "Export evidence");
   page.append(
     h("div", { class: "page-heading" },
       h("div", {},
         h("h1", { class: "page-title" }, "Performance"),
         h("p", { class: "page-description" }, "CPU, memory, disk, and network utilisation"),
       ),
+      h("div", {}, exportButton),
     ),
     h("div", { class: "perf-layout" },
       h("div", { class: "perf-rail", id: "perf-rail" }),
