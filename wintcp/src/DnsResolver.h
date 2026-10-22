@@ -167,6 +167,7 @@ private:
     // simply writes into cache_ when it returns and is dropped.
     struct InFlight {
         std::shared_ptr<std::atomic<bool>> done;
+        std::shared_ptr<std::wstring> host;
         std::unique_ptr<Result> result;
     };
     std::unordered_map<std::wstring, InFlight> inFlight_;
