@@ -31,13 +31,17 @@ RefreshEngine::~RefreshEngine() {
 
 bool RefreshEngine::Start(Callback cb) {
     if (thread_.joinable()) return false;
+    if (detachedRunning_.load()) return false;   // a detached worker may still be live
     {
         std::lock_guard<std::mutex> lk(m_);
         cb_ = std::move(cb);
         stop_ = false;
         workPending_ = true;   // do one pass right away
     }
-    thread_ = std::thread([this] { Run(); });
+    thread_ = std::thread([this] {
+        Run();
+        detachedRunning_.store(false);
+    });
     return true;
 }
 
@@ -114,6 +118,7 @@ void RefreshEngine::Stop() {
             return;
         }
     }
+    detachedRunning_.store(true);
     thread_.detach();
 }
 
