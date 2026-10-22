@@ -2540,6 +2540,7 @@ try {
         addLayer(layer) { this.layers[layer.id] = true; }
         getLayer(name) { return this.layers[name] || null; }
         getCanvas() { return { style: {} }; }
+        fitBounds() {}
         setFeatureState() {}
         setPaintProperty() {}
         getProjection() { return { type: "globe" }; }
