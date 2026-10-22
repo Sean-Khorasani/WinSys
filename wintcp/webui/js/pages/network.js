@@ -963,7 +963,19 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
       copyText(lines.join("\\n"), "VPN exception data");
     },
   }, "Copy VPN exception data");
-  selectionActions.append(clearSelectionButton, copyRemoteButton,
+  const clearHistoryButton = h("button", {
+    class: "btn btn-sm btn-quiet",
+    type: "button",
+    onclick: () => {
+      if (store) {
+        store.set({ automationDraft: null, networkPredicates: [], networkFilter: "" });
+        filterInput.value = "";
+        applyFilter();
+      }
+    },
+    title: "Clear retained history filter and reset to all live endpoints",
+  }, "Reset to live view");
+  selectionActions.append(clearSelectionButton, clearHistoryButton, copyRemoteButton,
     copyHostButton, copyEndpointButton, copyRowsButton, exportRowsButton, exportJsonButton,
     copyIncidentSummaryButton, copyVpnExceptionButton);
   const updateSelection = ({ rows: selected, selectedCount, visibleCount, hiddenCount, staleCount }) => {
