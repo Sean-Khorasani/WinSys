@@ -203,7 +203,7 @@ function renderActive() {
       const value = field.value == null || field.value === "" ? "Unavailable" : String(field.value);
       const copyable = field.copyValue != null && String(field.copyValue) !== "";
       const copyKey = `${section.title}:${field.label}`;
-      list.append(
+      list.append(h("div", { class: "inspector-field" },
         h("dt", {}, field.label),
         h("dd", { class: field.mono ? "inspector-value mono" : "inspector-value" },
           h("span", { title: field.reason || "" }, value),
@@ -214,7 +214,7 @@ function renderActive() {
             onclick: () => copyText(field.copyValue, field.label),
           }, "Copy") : null),
         field.reason ? h("dd", { class: "inspector-reason" }, field.reason) : null,
-      );
+      ));
     }
     current.content.append(h("section", { class: "inspector-section" },
       h("h3", {}, section.title), list));
@@ -232,12 +232,30 @@ function renderActive() {
 }
 
 function identityText(row) {
-  if (row?.instanceId || row?.processInstanceId) return row.instanceId || row.processInstanceId;
   if (row?.idExact != null || row?.id != null) {
     const id = row.idExact ?? row.id;
     const local = row.local || row.localAddress || "?";
     const remote = row.remote || row.remoteAddress || "?";
     return `${row.proto || "Connection"} #${id} · ${local}:${row.lport ?? "?"} → ${remote}:${row.rport ?? "?"}`;
   }
+  if (row?.instanceId || row?.processInstanceId) {
+    const instance = row.instanceId || row.processInstanceId;
+    return formatProcessInstance(instance, row.pid);
+  }
   return row?.pid != null ? `PID ${row.pid}` : "Identity unavailable";
+}
+
+export function formatProcessInstance(instance, fallbackPid) {
+  const parts = String(instance || "").split(":");
+  if (parts.length !== 3 || !parts.every((part) => /^\d+$/.test(part)))
+    return fallbackPid != null ? `PID ${fallbackPid}` : "Process identity available";
+  const pid = parts[0];
+  try {
+    const ticks = (BigInt(parts[1]) << 32n) | BigInt(parts[2]);
+    const unixMs = Number(ticks / 10000n - 11644473600000n);
+    const started = new Date(unixMs);
+    if (Number.isFinite(started.getTime()))
+      return `PID ${pid} · Started ${started.toLocaleString()}`;
+  } catch { }
+  return `PID ${pid} · Verified process lifetime`;
 }
