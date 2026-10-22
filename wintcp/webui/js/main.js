@@ -215,7 +215,7 @@ function renderTopbar(container, handlers = {}) {
         ),
       ),
       h("div", { class: "topbar-right" },
-        h("span", { class: "topbar-status", id: "topbar-status" }, ""),
+        h("span", { class: "topbar-status", id: "topbar-status", role: "status", "aria-live": "polite" }, ""),
         h("button", {
           class: "btn btn-ghost btn-icon btn-sm topbar-palette",
           type: "button",
