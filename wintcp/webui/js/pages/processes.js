@@ -636,8 +636,8 @@ function renderTreeView(allRows, query, treeState) {
       default: break;
     }
   });
-  renderItems();
   host.append(tree);
+  renderItems();
   return host;
 }
 
