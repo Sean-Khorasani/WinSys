@@ -9,7 +9,8 @@ import { createVirtualTable } from "../ui/virtualtable.js";
 import { createTabs } from "../ui/tabs.js";
 import { emptyState, refreshAction, card, cardHeader, cardTitle, cardContent, cardFooter } from "../ui/card.js";
 import { badge } from "../ui/badge.js";
-import { dialog, openDialog, closeDialog } from "../ui/dialog.js";
+import { dialog, dialogContent, dialogDescription, dialogFooter, dialogHeader,
+  dialogTitle, openDialog, closeDialog } from "../ui/dialog.js";
 import { api } from "../api.js";
 import { fmtInt, fmtBytes } from "../format.js";
 import { icon } from "../icons.js";
@@ -158,6 +159,12 @@ export async function renderNetwork(page, store) {
   const savedViewControls = h("div", { class: "network-saved-views" },
     savedViewName, savedViewSave, savedViewSelect, savedViewDelete,
     recentViewSelect, recentViewClear, savedViewStatus);
+  const savedViewManager = h("details", { class: "network-view-manager" },
+    h("summary", { class: "btn btn-outline btn-sm" }, "Manage views"),
+    h("div", { class: "network-view-manager-panel" },
+      h("p", { class: "muted text-sm" },
+        "Save or restore filters, sorting, the active tab, and table columns. Endpoint data is not stored."),
+      savedViewControls));
   const savedViewAbort = new AbortController();
   let savedViews = [];
   let savedViewsReady = false;
@@ -194,7 +201,7 @@ export async function renderNetwork(page, store) {
           "Use field:value; spaces combine as AND. Example: pid:123 port:443"),
       ),
     ),
-    savedViewControls,
+    savedViewManager,
     layout,
   );
 
@@ -667,7 +674,7 @@ export async function renderNetwork(page, store) {
     tabs: [
       { id: "connections", label: "Connections", render: renderConnectionTable },
       { id: "listening", label: "Listening", render: renderListeningTable },
-      { id: "history", label: "Closed history (bounded, retained)", render: renderConnectionTable },
+      { id: "history", label: "Closed history", render: renderConnectionTable },
         { id: "blocked", label: "Firewall rules", render: () => {
         firewallView = createFirewallInventoryView({
           target: store.get().firewallTarget || null,
@@ -780,72 +787,140 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
   const host = h("div", { class: "tab-panel-body" });
   let vt = null;
   const exportTimers = new Map();
-  const selectionCount = h("span", { class: "selection-count", "aria-live": "polite" });
+  const selectionCount = h("span", { class: "selection-count", "aria-live": "polite" },
+    "No rows selected");
   const selectionActions = h("div", { class: "selection-actions" });
-  const selectionBar = h("div", { class: "selection-bar", hidden: true },
-    selectionCount, selectionActions);
-  const layoutHost = h("div", { class: "table-layout-host" });
+  const selectionBar = h("section", { class: "selection-bar", "aria-label": "Selected connection actions" },
+    h("div", { class: "selection-summary" },
+      h("strong", {}, "Selection"), selectionCount),
+    selectionActions);
+  const tableTools = h("div", { class: "table-layout-actions" });
+  const layoutHost = h("div", { class: "table-layout-host" },
+    h("span", { class: "table-toolbar-hint muted text-sm" },
+      "Ctrl/Command-click selects rows; Shift-click selects a range."),
+    tableTools);
   const container = h("div", { class: "net-table" });
   const selectAllButton = h("button", {
-    class: "btn btn-ghost btn-sm",
+    class: "btn btn-outline btn-sm",
     type: "button",
     onclick: () => vt?.selectAll(),
   }, "Select all shown");
-  const saveSnapshotButton = h("button", {
-    class: "btn btn-ghost btn-sm",
-    type: "button",
-    title: "Save the current filtered endpoint set as a named snapshot",
-    onclick: () => {
-      const snapshot = { savedAt: new Date().toISOString(), keys: rows.map(connectionKey) };
-      localStorage.setItem("wintcp.network.snapshot.v1", JSON.stringify(snapshot));
-      setSavedViewStatus(`Snapshot saved with ${snapshot.keys.length} endpoint(s).`);
-    },
-  }, "Save snapshot");
-  const compareSnapshotButton = h("button", {
-    class: "btn btn-ghost btn-sm",
-    type: "button",
-    title: "Compare the current filtered view with the saved snapshot",
-    onclick: () => {
-      const raw = localStorage.getItem("wintcp.network.snapshot.v1");
-      if (!raw) {
-        setSavedViewStatus("No saved snapshot. Use Save snapshot first.");
-        return;
-      }
-      let snapshot;
-      try { snapshot = JSON.parse(raw); } catch (err) {
-        setSavedViewStatus("Saved snapshot is unreadable.");
-        return;
-      }
-      const previous = new Set(Array.isArray(snapshot.keys) ? snapshot.keys : []);
-      const current = new Set(rows.map(connectionKey));
-      const added = [...current].filter((key) => !previous.has(key));
-      const removed = [...previous].filter((key) => !current.has(key));
-      const d = dialog({ class: "details-dialog action-preview-dialog", "aria-labelledby": "snapshot-compare-title" },
-        dialogHeader({},
-          dialogTitle({ id: "snapshot-compare-title" }, "Snapshot comparison"),
-          dialogDescription({}, `${snapshot.savedAt || "saved snapshot"} to ${new Date().toISOString()}`)),
-        dialogContent({},
-          h("p", {}, `Added endpoints: ${added.length}`),
-          h("p", {}, `Removed endpoints: ${removed.length}`),
-          h("p", { class: "muted text-sm" }, "Counts use exact connection identity. Review the current filtered table for details."),
-        ),
-        dialogFooter({},
-          h("button", { type: "button", class: "btn btn-primary", onclick: () => closeDialog(d) }, "Close")),
-      );
-      openDialog(d);
-    },
-  }, "Compare snapshot");
-  const selectionHeader = h("div", { class: "selection-header" },
-    selectAllButton,
-    saveSnapshotButton,
-    compareSnapshotButton,
-    h("span", { class: "muted text-sm" },
-      "Ctrl/Command-click toggles a row; Shift-click selects a range; use Select all shown for every visible row."));
   const clearSelectionButton = h("button", {
     class: "btn btn-ghost btn-sm",
-    type: "button",
+    type: "button", disabled: true,
     onclick: () => vt?.clearSelection(),
   }, "Clear selection");
+
+  const baselineStatus = h("p", { class: "endpoint-comparison-status muted text-sm",
+    role: "status", "aria-live": "polite" });
+  const compareBaselineButton = h("button", {
+    class: "btn btn-outline btn-sm", type: "button", disabled: true,
+  }, "Compare with baseline");
+  const clearBaselineButton = h("button", {
+    class: "btn btn-ghost btn-sm", type: "button", disabled: true,
+  }, "Clear baseline");
+  const baselineKey = "wintcp.network.snapshot.v1";
+  const currentTableRows = () => vt?.getRows?.() || rows;
+  const evidenceRecord = (row) => ({
+    key: connectionKey(row),
+    process: row.process || row.processName || "Unknown process",
+    pid: row.pid ?? null,
+    protocol: row.proto || "Unknown protocol",
+    local: endpoint(row.local || row.localAddress, row.lport),
+    remote: endpoint(row.remote || row.remoteAddress, row.rport),
+    state: row.removed ? "Closed" : row.state || "Unknown state",
+  });
+  const evidenceLabel = (record) => record.process
+    ? `${record.process}${record.pid != null ? ` (PID ${record.pid})` : ""} · ${record.protocol} · ${record.local} → ${record.remote}`
+    : `Endpoint identity ${record.key}`;
+  const baselineTime = (baseline) => {
+    const value = new Date(baseline?.savedAt || "");
+    return Number.isFinite(value.getTime()) ? value.toLocaleString() : "at an unknown time";
+  };
+  const readBaseline = () => {
+    try {
+      const raw = localStorage.getItem(baselineKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const records = Array.isArray(parsed.rows) ? parsed.rows
+        : Array.isArray(parsed.keys) ? parsed.keys.map((key) => ({ key })) : null;
+      return records ? { ...parsed, rows: records } : null;
+    } catch { return null; }
+  };
+  const refreshBaselineStatus = (message = "") => {
+    const baseline = readBaseline();
+    compareBaselineButton.disabled = !baseline;
+    clearBaselineButton.disabled = !baseline;
+    baselineStatus.textContent = message || (baseline
+      ? `Baseline: ${baseline.rows.length} endpoint(s), saved ${baselineTime(baseline)}.`
+      : "No baseline saved in this browser.");
+  };
+  const saveBaselineButton = h("button", {
+    class: "btn btn-primary btn-sm", type: "button",
+    onclick: () => {
+      const current = currentTableRows();
+      const baseline = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        view: viewKey,
+        query: filterInput.value.trim(),
+        rows: current.map(evidenceRecord),
+      };
+      try {
+        localStorage.setItem(baselineKey, JSON.stringify(baseline));
+        refreshBaselineStatus(`Saved ${baseline.rows.length} endpoint(s) as the comparison baseline.`);
+      } catch {
+        refreshBaselineStatus("Baseline could not be saved because browser storage is unavailable.");
+      }
+    },
+  }, "Save current view as baseline");
+  compareBaselineButton.onclick = () => {
+    const baseline = readBaseline();
+    if (!baseline) { refreshBaselineStatus(); return; }
+    const previous = new Map(baseline.rows.map((record) => [record.key, record]));
+    const current = new Map(currentTableRows().map((row) => {
+      const record = evidenceRecord(row);
+      return [record.key, record];
+    }));
+    const added = [...current].filter(([key]) => !previous.has(key)).map(([, record]) => record);
+    const removed = [...previous].filter(([key]) => !current.has(key)).map(([, record]) => record);
+    const diffSection = (title, records) => h("section", { class: "endpoint-diff-section" },
+      h("h3", {}, `${title} (${records.length})`),
+      records.length
+        ? h("ul", {}, records.slice(0, 20).map((record) => h("li", {}, evidenceLabel(record))),
+          records.length > 20 ? h("li", { class: "muted" }, `…and ${records.length - 20} more`) : null)
+        : h("p", { class: "muted text-sm" }, "None"));
+    const d = dialog({ class: "details-dialog action-preview-dialog", "aria-labelledby": "snapshot-compare-title" },
+      dialogHeader({},
+        dialogTitle({ id: "snapshot-compare-title" }, "Endpoint comparison"),
+        dialogDescription({}, `Baseline ${baselineTime(baseline)} · Current ${new Date().toLocaleString()}`)),
+      dialogContent({},
+        h("p", {}, `${added.length} added · ${removed.length} no longer in this filtered view.`),
+        h("div", { class: "endpoint-diff-grid" },
+          diffSection("Added", added), diffSection("No longer present", removed)),
+        h("p", { class: "muted text-sm" },
+          "This compares exact endpoint identities in the current filtered table. It does not test reachability or preserve a complete traffic history.")),
+      dialogFooter({},
+        h("button", { type: "button", class: "btn btn-primary", onclick: () => closeDialog(d) }, "Close")),
+    );
+    document.body.append(d);
+    openDialog(d);
+  };
+  clearBaselineButton.onclick = () => {
+    try { localStorage.removeItem(baselineKey); } catch { }
+    refreshBaselineStatus("Comparison baseline cleared.");
+  };
+  const comparisonDetails = h("details", { class: "endpoint-comparison" },
+    h("summary", { class: "btn btn-ghost btn-sm" }, "Compare endpoints…"),
+    h("div", { class: "endpoint-comparison-panel" },
+      h("strong", {}, "Compare this filtered view over time"),
+      h("p", { class: "muted text-sm" },
+        "Save the endpoints currently in this table as a local browser baseline, then compare later to find additions and removals."),
+      h("div", { class: "endpoint-comparison-actions" },
+        saveBaselineButton, compareBaselineButton, clearBaselineButton),
+      baselineStatus));
+  refreshBaselineStatus();
+  tableTools.append(comparisonDetails);
   const copyRemoteButton = h("button", {
     class: "btn btn-ghost btn-sm",
     type: "button",
@@ -929,7 +1004,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
       const lines = [
         `WinTCP incident summary`,
         `Exported: ${new Date().toISOString()}`,
-        `Selected rows: ${selectedRows.length} of ${rows.length} visible`,
+        `Selected rows: ${selectedRows.length} of ${currentTableRows().length} visible`,
         `Filter: ${filter || "(none)"}`,
         `Predicates: ${predicates.length ? predicates.map((p) => p.field + ":" + p.value).join(", ") : "(none)"}`,
         `Snapshot age: ${store.get().lastUpdate ? new Date(store.get().lastUpdate).toISOString() : "unknown"}`,
@@ -962,43 +1037,42 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
       copyText(lines.join("\\n"), "VPN exception data");
     },
   }, "Copy VPN exception data");
-  const clearHistoryButton = h("button", {
-    class: "btn btn-sm btn-quiet",
-    type: "button",
-    onclick: () => {
-      if (store) {
-        store.set({ automationDraft: null, networkPredicates: [], networkFilter: "" });
-        filterInput.value = "";
-        applyFilter();
-      }
-    },
-    title: "Clear retained history filter and reset to all live endpoints",
-  }, "Reset to live view");
-  selectionActions.append(clearSelectionButton, clearHistoryButton, copyRemoteButton,
-    copyHostButton, copyEndpointButton, copyRowsButton, exportRowsButton, exportJsonButton,
-    copyIncidentSummaryButton, copyVpnExceptionButton);
+  const selectionGroup = (label, children, className = "") => h("div", {
+    class: `selection-action-group ${className}`.trim(), role: "group", "aria-label": label,
+  }, h("span", { class: "selection-action-label" }, label), children);
+  const selectionControls = selectionGroup("Selection",
+    [selectAllButton, clearSelectionButton], "selection-controls");
+  const copyActions = selectionGroup("Copy",
+    [copyRemoteButton, copyHostButton, copyEndpointButton, copyRowsButton], "selection-dependent");
+  const exportActions = selectionGroup("Export",
+    [exportRowsButton, exportJsonButton], "selection-dependent");
+  const evidenceActions = selectionGroup("Evidence",
+    [copyIncidentSummaryButton, copyVpnExceptionButton], "selection-dependent");
+  selectionActions.append(selectionControls, copyActions, exportActions, evidenceActions);
   const updateSelection = ({ rows: selected, selectedCount, visibleCount, hiddenCount, staleCount }) => {
-    selectionBar.hidden = selectedCount === 0;
     const details = [];
     if (visibleCount > 0) details.push(`${visibleCount} shown`);
     if (hiddenCount > 0) details.push(`${hiddenCount} outside the filter`);
     if (staleCount > 0) details.push(`${staleCount} no longer current; copies use last seen data`);
-    selectionCount.textContent = `${selectedCount} selected${details.length ? ` · ${details.join(" · ")}` : ""}`;
+    selectionCount.textContent = selectedCount
+      ? `${selectedCount} selected${details.length ? ` · ${details.join(" · ")}` : ""}`
+      : "No rows selected";
     clearSelectionButton.disabled = selectedCount === 0;
+    for (const group of [copyActions, exportActions, evidenceActions]) group.hidden = selectedCount === 0;
     copyRemoteButton.disabled = !copyValues(selected, remoteIpValue);
     copyHostButton.disabled = !copyValues(selected, remoteHostnameValue);
     copyEndpointButton.disabled = !copyValues(selected, remoteEndpointValue);
     copyRowsButton.disabled = selectedCount === 0;
     exportRowsButton.disabled = !vt?.getCurrentSelectedRows().length;
-  exportJsonButton.disabled = !vt?.getCurrentSelectedRows().length;
-  copyIncidentSummaryButton.disabled = !vt?.getCurrentSelectedRows().length;
-  copyVpnExceptionButton.disabled = !vt?.getCurrentSelectedRows().length;
+    exportJsonButton.disabled = !vt?.getCurrentSelectedRows().length;
+    copyIncidentSummaryButton.disabled = !vt?.getCurrentSelectedRows().length;
+    copyVpnExceptionButton.disabled = !vt?.getCurrentSelectedRows().length;
   };
   function copySelected(label, select) {
     const text = copyValues(vt?.getSelectedRows() || [], select);
     if (text) copyText(text, label);
   }
-  host.append(selectionHeader, selectionBar, layoutHost, container);
+  host.append(selectionBar, layoutHost, container);
 
   const emptyMsg = filterInput.value.trim().length > 0 && rows.length === 0
     ? "No endpoints matched the filter."
@@ -1064,7 +1138,7 @@ function renderConnections(rows, sortKey, sortDir, onSort, filteredRows, filterI
     layoutControls.destroy();
     tableDestroy();
   };
-  layoutHost.append(layoutControls.element);
+  tableTools.append(layoutControls.element);
   host._virtualTable = vt;
   vt.updateRows(rows, undefined, { allRows });
   if (viewState) vt.restoreViewState(viewState);
