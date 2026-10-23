@@ -162,7 +162,7 @@ The GUI does not include a Process Properties shell command or a Follow TCP Stre
 
 A sectioned, modeless window with process identity, command line, creation time and service; live CPU, memory, disk and network statistics; the full list of connections owned by the same PID; and the selected connection. Available information is grouped into predictable **Process**, **Connection**, **Sockets**, **Security**, and **Notes** tabs.
 
-- The header identifies the selected process as `process.exe (PID n)`; the window caption stays generic so the process name is not repeated.
+- The header identifies the selected process as `process.exe (PID n)`, and the window caption repeats that identity for taskbar and window switching.
 - It opens centered over the main window and scales with DPI.
 - While open it **refreshes silently on every auto-refresh**. If the tracked process exits, a note appears once.
 - **Copy** and **Open file location** buttons are provided, in a row below the body.
@@ -194,7 +194,7 @@ Fields use a **two-column layout** for ordinary values and a full-width technica
 - Section headings have a restrained surface and accent marker. Click a heading to collapse or expand it; the state is local to the open window.
 - Available tabs share one aligned strip with a clear active state. Their order does not depend on which data happened to appear first. The sockets tab is labeled **Sockets** and lists the selected PID's endpoints.
 - The window opens larger than its earlier compact layout, can be resized, and scales with DPI. The body scrolls independently of the pinned identity header and footer controls.
-- **Copy** retrieves the complete text model, including values that wrap on screen. Keyboard scrolling uses `Up`/`Down`, `PageUp`/`PageDown`, `Home`, and `End`; tabs switch with `Ctrl`+`Tab` / `Ctrl`+`Shift`+`Tab` or the `Left`/`Right` arrows when the window has focus.
+- **Copy** retrieves the complete text model, including values that wrap on screen. Keyboard scrolling uses `Up`/`Down`, `PageUp`/`PageDown`, `Home`, and `End`; tabs switch with `Ctrl`+`Tab` / `Ctrl`+`Shift`+`Tab` or the `Left`/`Right` arrows when the window has focus. `Tab` moves focus through the navigation and footer buttons, with a visible focus indicator.
 - The window's accessible name is the plain-text model, so screen readers announce the same information **Copy** puts on the clipboard.
 
 The same report is available from the command line with `wintcp.exe details`; see the [cookbook](cookbook.md#14-full-dossier-for-one-connection).
