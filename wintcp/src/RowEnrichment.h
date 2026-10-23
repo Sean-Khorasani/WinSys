@@ -54,7 +54,7 @@ public:
 
     // View > Resolve hostnames. Set before the worker starts where possible;
     // the resolver reads it at offer time either way.
-    void SetDnsEnabled(bool on) { dnsEnabled_ = on; }
+    void SetDnsEnabled(bool on) { dnsEnabled_ = on; dns_.SetEnabled(on); }
     bool DnsEnabled() const { return dnsEnabled_; }
 
     // How many reverse lookups the resolver abandoned as stalled. The
