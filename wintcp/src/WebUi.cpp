@@ -53,6 +53,7 @@
 #include "WebMetrics.h"
 #include "WebProcesses.h"
 #include "WebStatic.h"
+#include "Version.h"
 #include "WebUi.h"
 
 namespace wintcp {
@@ -66,6 +67,7 @@ constexpr int kExpectedConfigVersion = 3;
 constexpr size_t kMaxAuditBytes = 2 * 1024 * 1024;
 constexpr size_t kAuditRetention = 1000;
 constexpr size_t kMaxPendingBlocks = 64;
+constexpr size_t kMaxPendingFirewallActions = 64;
 constexpr size_t kMaxPendingConnectionActions = 64;
 constexpr size_t kMaxPendingCliActions = 64;
 constexpr size_t kMaxCliArgs = 64;
@@ -462,9 +464,14 @@ void WriteWebUiLog(const ServerContext& context, WebUiLogLevel level,
         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
     DWORD written = 0;
-    (void)::WriteFile(file, line.data(), static_cast<DWORD>(line.size()),
-                      &written, nullptr);
+    const BOOL wrote = ::WriteFile(file, line.data(), static_cast<DWORD>(line.size()),
+                                  &written, nullptr);
     ::CloseHandle(file);
+    if (!wrote || written != static_cast<DWORD>(line.size())) {
+        // Best-effort: emit to debug output so the failure is not completely
+        // silent when the log file is unavailable (disk full, handle error).
+        ::OutputDebugStringA(("WebUI log write failed: " + message + "\r\n").c_str());
+    }
 }
 
 bool ShouldOpenWebUiBrowser() {
@@ -1245,7 +1252,7 @@ std::string CapabilitiesJson(ServerContext& context) {
         << ",\"type\":" << (context.source.GeoIpLoaded() ? JsonQuote("GeoLite2-Country") : "null")
         << ",\"error\":null}"
          << ",\"etw\":true,\"trafficScan\":false,\"dns\":true,\"signatures\":true"
-        << ",\"version\":" << JsonQuote("2.0.0") << "}";
+        << ",\"version\":" << JsonQuote(WINTCP_VERSION_STRING) << "}";
     return out.str();
 }
 
@@ -3735,7 +3742,7 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             if (it->second.expires < now) it = context.pendingFirewallActions.erase(it);
             else ++it;
         }
-        while (context.pendingFirewallActions.size() >= kMaxPendingBlocks)
+        while (context.pendingFirewallActions.size() >= kMaxPendingFirewallActions)
             context.pendingFirewallActions.erase(context.pendingFirewallActions.begin());
         std::string nonce;
         if (!RandomHex(16, &nonce)) {
@@ -3831,7 +3838,7 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             if (it->second.expires < now) it = context.pendingFirewallActions.erase(it);
             else ++it;
         }
-        while (context.pendingFirewallActions.size() >= kMaxPendingBlocks)
+        while (context.pendingFirewallActions.size() >= kMaxPendingFirewallActions)
             context.pendingFirewallActions.erase(context.pendingFirewallActions.begin());
         std::string nonce;
         if (!RandomHex(16, &nonce)) {
@@ -4657,8 +4664,18 @@ int RunWebUiServer(unsigned portHint) {
     HANDLE acceptor = ::CreateThread(nullptr, 0, WebUiAcceptLoop, &acceptorArgs,
                                     0, nullptr);
     if (acceptor != nullptr) {
-        ::CloseHandle(acceptor);
+        // Signal shutdown and attempt a graceful drain of the accept loop so
+        // in-flight requests (e.g. block/close mutations) can finish. Fall
+        // back to a hard ExitProcess after 2 s so a wedged Winsock call can
+        // never hold shutdown hostage (the original reason for hard-exit).
         ::WaitForSingleObject(stopEvent, INFINITE);
+        g_stop.store(true);
+        const DWORD drained = ::WaitForSingleObject(acceptor, 2000);
+        ::CloseHandle(acceptor);
+        if (drained == WAIT_TIMEOUT) {
+            WriteWebUiLog(context, WebUiLogLevel::Warn,
+                          "graceful drain timed out after 2 s; hard-exiting");
+        }
         ::ExitProcess(0);
     }
     // Thread creation failed (essentially never). Fall back to serving on this
