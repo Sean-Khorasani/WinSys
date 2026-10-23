@@ -118,10 +118,12 @@ private:
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
                                        LPARAM lParam);
+    static LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                       LPARAM lParam, UINT_PTR id, DWORD_PTR data);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
     void OnCommand(WORD id);
     void Layout(int cx, int cy);
-    void OnPaint();
+    void OnPaint(HDC target = nullptr);
     // `textRight` is the value column's right edge: the body passes a
     // scrollbar-aware edge so text stops clear of the native control,
     // the header passes the full client edge.
@@ -162,6 +164,7 @@ private:
     HWND hwndCopy_ = nullptr;
     HWND hwndOpen_ = nullptr;
     HWND hwndClose_ = nullptr;
+    HWND hotButton_ = nullptr;
 
     DetailModel model_;
     std::wstring filePath_;
@@ -181,7 +184,7 @@ private:
     // system's - the hand-drawn thumb it replaces had none of those and
     // lived inset from the edge it scrolled.
     HWND hwndScroll_ = nullptr;
-    // Height of the fixed header (title + subtitle + tab bar) in logical px.
+    // Height of the fixed header (title + subtitle + tab bar), physical px.
     // The body scrolls beneath it; it is recomputed in RebuildLayout so the
     // tab bar never overlaps the content.
     int headerHeight_ = 0;
