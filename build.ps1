@@ -4,6 +4,7 @@
 #   build.bat            incremental: compile only changed .cpp, relink
 #   build.bat fresh      clean all artifacts, then full rebuild
 #   build.bat rebuild    alias for fresh
+#   build.bat gui        build only the standalone GUI executable
 #   build.bat web        copy webui assets to build\ only, no compile
 #   build.bat clean      remove build\ and exit
 #   build.bat -Test      build, then run the CLI smoke gate + unit driver
@@ -49,12 +50,14 @@ $doFresh = $false
 $doWeb   = $false
 $doClean = $false
 $doTest  = $false
+$doGuiOnly = $false
 
 foreach ($a in $args) {
     $al = $a.ToLower()
     if ($al -eq 'fresh')     { $doFresh = $true }
     elseif ($al -eq 'rebuild') { $doFresh = $true }
     elseif ($al -eq 'web')   { $doWeb   = $true }
+    elseif ($al -eq 'gui')   { $doGuiOnly = $true }
     elseif ($al -eq 'clean') { $doClean = $true }
     elseif ($al -eq '-test') { $doTest  = $true }
     elseif ($al -eq '-clean') { $doClean = $true }
@@ -396,7 +399,7 @@ try {
         $p = Get-Mtime $ProdExe
         foreach ($inp in ($prodObjs + $ResFile)) { if ((Get-Mtime $inp) -gt $p) { $linkProd = $true; break } }
     }
-    if ($linkProd) {
+    if ($linkProd -and -not $doGuiOnly) {
         # Delete old exe first
         if (Test-Path -LiteralPath $ProdExe) { Remove-Item -LiteralPath $ProdExe -Force }
         $arg = '/nologo /guard:cf /Fe"' + $ProdExe + '"'
@@ -419,6 +422,8 @@ try {
             Die 1 "product link failed"
         }
         Say ("linked wintcp.exe in {0:N1}s" -f ((Get-Date) - $t0).TotalSeconds)
+    } elseif ($doGuiOnly -and $linkProd) {
+        Say "skipping wintcp.exe for GUI-only build"
     } else {
         Say "wintcp.exe current"
     }
