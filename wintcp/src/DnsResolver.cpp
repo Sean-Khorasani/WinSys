@@ -75,7 +75,7 @@ std::wstring DoLookup(const std::wstring& addr) {    const std::wstring bare = S
     // address back when no PTR record exists. (SDK spells the wide entry
     // point GetNameInfoW.)
     if (::GetNameInfoW(reinterpret_cast<const sockaddr*>(&ss), sockLen, host,
-                       static_cast<DWORD>(kHostBufChars - 1),
+                       static_cast<DWORD>(kHostBufChars),
                        nullptr, 0, NI_NAMEREQD) != 0)
         return std::wstring();
     host[kHostBufChars - 1] = L'\0';
