@@ -42,8 +42,14 @@ void RowEnrichment::StartDnsWorker(HWND hwnd,
             }
         }
         if (registered) {
-            if (::PostMessageW(sink->hwnd, WM_APP_DNS_RESULT, 0,
-                               reinterpret_cast<LPARAM>(raw)) == FALSE) {
+            // Guard against a null or closing sink hwnd: if the window is gone,
+            // PostMessageW fails and we clean up the pending entry instead of
+            // leaking it.
+            if (sink->hwnd == nullptr || sink->shuttingDown) {
+                std::lock_guard<std::mutex> lk(sink->m);
+                if (sink->pendingDns.erase(raw) != 0) delete raw;
+            } else if (::PostMessageW(sink->hwnd, WM_APP_DNS_RESULT, 0,
+                                      reinterpret_cast<LPARAM>(raw)) == FALSE) {
                 std::lock_guard<std::mutex> lk(sink->m);
                 if (sink->pendingDns.erase(raw) != 0) delete raw;
             }
