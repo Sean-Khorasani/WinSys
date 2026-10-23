@@ -86,7 +86,14 @@ bool RefreshEngine::ReapIfExited() {
     // No lock: thread_ is only ever touched from the owning (UI) thread —
     // the worker never touches it — so there is no race to guard. (Stop()
     // is likewise owner-called; shutdown joins from the same thread.)
-    if (!thread_.joinable()) return true;
+    if (!thread_.joinable()) {
+        // The worker was detached (Stop() timed out). Clear the flag so a
+        // fresh worker can be started once the caller has decided the old
+        // one is dead — the detached thread clears it itself when it finishes,
+        // but if it is stuck we must not block Start() forever.
+        detachedRunning_.store(false);
+        return true;
+    }
     if (::WaitForSingleObject(thread_.native_handle(), 0) != WAIT_OBJECT_0)
         return false;
     thread_.join();
