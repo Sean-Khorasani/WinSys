@@ -105,6 +105,13 @@ below the filter instead of being treated as ordinary text. This is a supported
 browser subset of the [CLI/GUI filter language](filters.md); advanced fields such
 as signatures, metrics, ASN, and bookmarks are not supported in this filter.
 
+Remote hostnames are resolved asynchronously by the local Windows resolver.
+Network rows show **Pending** while a reverse lookup is in progress, the PTR
+hostname when one is returned, or **Not resolved** when the lookup completes
+without a name. Lookups stay on the backend; the browser does not send endpoint
+addresses to an external DNS-over-HTTPS service. As with other reverse-DNS
+lookups, results depend on the machine's configured DNS/network access.
+
 Sortable headers start ascending and toggle direction. Process names use
 case-insensitive natural order, numeric fields compare as numbers, and endpoint
 addresses sort by IP family, address bytes, then IPv6 scope ID. TCP states use a
