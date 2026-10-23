@@ -34,15 +34,18 @@
 #include <memory>
 #include <functional>
 #include <mutex>
+#include <deque>
 #include <thread>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "BlockConn.h"
 #include "Commands.h"
 #include "ConnectionStore.h"
+#include "DnsResolver.h"
 #include "Elevate.h"
 #include "Settings.h"
 #include "SocketTraffic.h"
@@ -130,6 +133,10 @@ struct ServerContext {
     USHORT port = 0;
     SnapshotSource source;
     ConnectionStore store;
+    DnsResolver dnsResolver;
+    bool dnsAvailable = false;
+    std::unordered_set<std::wstring> dnsCompleted;
+    std::deque<std::wstring> dnsCompletionOrder;
     MetricsCollector metricsCollector;
     // GeoIP database path, cached from config so the connection refresher can
     // re-apply GeoIP enrichment without re-reading the config file every tick.
@@ -167,6 +174,32 @@ static std::atomic<HANDLE> g_stopEvent{nullptr};
 // could otherwise race on the shared store. The SSE stream itself takes no lock
 // - it only ever writes to its own socket.
 std::mutex g_storeMutex;
+
+constexpr size_t kMaxWebDnsCompletions = 4096;
+
+std::wstring WebDnsKey(const std::wstring& address) {
+    const size_t scope = address.find(L'%');
+    return scope == std::wstring::npos ? address : address.substr(0, scope);
+}
+
+// Called only while g_storeMutex is held. Mark the row pending before offering
+// it, so the very first JSON response exposes an honest in-progress state.
+void OfferWebDnsForRows(ServerContext& context) {
+    if (!context.dnsAvailable) return;
+    std::unordered_set<std::wstring> offered;
+    for (size_t i = 0; i < context.store.View().size(); ++i) {
+        const Connection* row = context.store.ViewRow(i);
+        if (row == nullptr || (row->flags & kRowRemoved) != 0 ||
+            row->display.remoteAddress.empty() || row->display.remoteAddress == L"*") continue;
+        const std::wstring& addr = row->display.remoteAddress;
+        const std::wstring& host = row->display.hostname;
+        const std::wstring key = WebDnsKey(addr);
+        if (!host.empty() || context.dnsCompleted.find(key) != context.dnsCompleted.end() ||
+            !offered.insert(addr).second) continue;
+        context.store.SetHostname(addr, DnsResolver::kPendingHost);
+        context.dnsResolver.Offer(addr);
+    }
+}
 
 // Refresh the connection store on a background thread, so that the read-only
 // endpoints answer from data that is already there.
@@ -235,6 +268,7 @@ DWORD WINAPI ConnectionRefresherThread(LPVOID param) {
                                                      options);
             ok = (result.exitCode == kExitOk);
             if (ok) {
+                OfferWebDnsForRows(*context);
                 context->connectionSnapshotTick.store(::GetTickCount64());
                 context->connectionRefreshFailed.store(false);
             } else {
@@ -1128,6 +1162,8 @@ std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) 
         context.connectionRefreshFailed.store(true);
         return ErrorJson(result.err.empty() ? "snapshot unavailable" : result.err);
     }
+    OfferWebDnsForRows(context);
+    const CommandResult rendered = RenderList(context.store, options);
     context.connectionSnapshotTick.store(::GetTickCount64());
     context.connectionRefreshFailed.store(false);
     size_t socketRows = 0;
@@ -1160,7 +1196,7 @@ std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) 
         << ",\"timeouts\":" << (sampler != nullptr ? sampler->TimeoutCount() : 0)
         << ",\"unreadable\":" << (sampler != nullptr ? sampler->UnreadableCount() : 0)
         << ",\"scanFailures\":" << (sampler != nullptr ? sampler->ScanFailureCount() : 0)
-        << "},\"connections\":" << result.out;
+        << "},\"connections\":" << rendered.out;
     if (!filter.empty()) out << ",\"filteredConnections\":" << filteredJson;
     out << "}";
     return out.str();
@@ -4495,6 +4531,36 @@ int RunWebUiServer(unsigned portHint) {
                       "Winsock initialization failed");
         std::cout << "webui: Winsock initialization failed\r\n";
         return kExitFail;
+    }
+    context.dnsAvailable = context.dnsResolver.Start([&context](
+            std::unique_ptr<DnsResolver::Result> result) {
+        if (!result) return;
+        std::lock_guard<std::mutex> lock(g_storeMutex);
+        if (result->state == DnsResolver::State::kPending) {
+            for (const Connection& row : context.store.Rows()) {
+                if (WebDnsKey(row.display.remoteAddress) == result->address)
+                    context.store.SetHostname(row.display.remoteAddress,
+                                              DnsResolver::kPendingHost);
+            }
+            return;
+        }
+        for (const Connection& row : context.store.Rows()) {
+            if (WebDnsKey(row.display.remoteAddress) == result->address)
+                context.store.SetHostname(row.display.remoteAddress, result->hostname);
+        }
+        if (context.dnsCompleted.insert(WebDnsKey(result->address)).second) {
+            context.dnsCompletionOrder.push_back(WebDnsKey(result->address));
+            while (context.dnsCompletionOrder.size() > kMaxWebDnsCompletions) {
+                context.dnsCompleted.erase(context.dnsCompletionOrder.front());
+                context.dnsCompletionOrder.pop_front();
+            }
+        }
+    });
+    if (context.dnsAvailable) {
+        context.dnsResolver.SetEnabled(true);
+    } else {
+        WriteWebUiLog(context, WebUiLogLevel::Warn,
+                      "reverse DNS resolver did not start; hostnames remain unavailable");
     }
     HANDLE refresher = ::CreateThread(nullptr, 0, ConnectionRefresherThread, &context,
                                        0, nullptr);
