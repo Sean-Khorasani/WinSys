@@ -6,6 +6,7 @@ REM     build.bat           incremental: compile only changed .cpp files
 REM     build.bat fresh     clean all artifacts, then full rebuild
 REM     build.bat rebuild   same as fresh
 REM     build.bat web       copy webui assets to build\ only, no compile
+REM     build.bat gui       build only the standalone GUI executable
 REM     build.bat clean     remove build\ and exit
 REM     build.bat -Test     build, then run the CLI smoke gate + unit driver
 REM
