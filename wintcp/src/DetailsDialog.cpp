@@ -7,6 +7,7 @@
 #include "DetailsDialog.h"
 
 #include <shellapi.h>
+#include <commctrl.h>
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
 #include <algorithm>
@@ -32,21 +33,23 @@ const UINT IDC_DLG_SCROLL = 4;
 // Logical (96 dpi) layout metrics. The renderer works in these units and
 // scales once via S(), so a DPI change is one pass over the line list rather
 // than a recomputation of every measurement.
-constexpr int kMargin = 16;
-constexpr int kBtnH = 30;
-constexpr int kBtnWCpy = 90;
-constexpr int kBtnWOpen = 190;
-constexpr int kBtnWClose = 70;
+constexpr int kMargin = 20;
+constexpr int kBtnH = 34;
+constexpr int kBtnWCpy = 108;
+constexpr int kBtnWOpen = 176;
+constexpr int kBtnWClose = 88;
 constexpr int kTitleH = 36;
 constexpr int kSubtitleH = 24;
-constexpr int kWideLabelH = 22;
+constexpr int kWideLabelH = 28;
+constexpr int kSectionGap = 12;
+constexpr int kCodePadding = 10;
 // One field row. It was 17 before the 2026-10-05 rework and each field was
 // TWO of these (label, then value), so a section read as 34 px of stacked
 // captions. Now it is one row per field, and the extra 2 px buys the vertical
 // padding that makes a table legible rather than cramped.
-constexpr int kLineH = 27;
-constexpr int kSectionH = 34;
-constexpr int kNoteH = 24;
+constexpr int kLineH = 30;
+constexpr int kSectionH = 36;
+constexpr int kNoteH = 28;
 // Label column width accommodates the longest detail labels.
 constexpr int kLabelGutter = 184;
 constexpr int kScrollBarW = 14;
@@ -54,7 +57,7 @@ constexpr int kScrollBarW = 14;
 // Spacing between the label and value columns.
 constexpr int kColGap = 14;
 // Vertical padding inside a field row, top and bottom, in logical px.
-constexpr int kRowPadY = 3;
+constexpr int kRowPadY = 6;
 
 // Window geometry, authored unscaled and multiplied by the DPI ratio (S/MulDiv).
 // The design size appeared TWICE - once in the CreateWindowExW call and once in
@@ -70,11 +73,11 @@ constexpr int kMinHeight = 480;
 // layout and coupling the two would tie one window's geometry to the other's.
 constexpr int kDpiUnscaled = 96;
 constexpr int kTitleFontPt = 16;
-constexpr int kSectionFontPt = 11;
+constexpr int kSectionFontPt = 10;
 constexpr int kNoteFontPt = 9;
-// A colour-mix weight, in percent: 10 is a faint tint, 20 a readable one.
+// Colour-mix weights on Theme::Mix's 0..255 scale.
 constexpr int kTintFaint = 10;
-constexpr int kTintBody = 20;
+constexpr int kTintBody = 12;
 // A section band under the pointer: stronger than the resting band
 // (kTintBody) so hover is visible, weaker than the accent bar so it
 // does not compete with it.
@@ -88,13 +91,13 @@ constexpr int kScrollThumbW = 24;
 // Width of the margin gutter that holds a section header's collapse
 // chevron. The header title starts one gutter in, so the chevron has
 // its own column and the titles still line up across sections.
-constexpr int kChevronGutter = 14;
+constexpr int kChevronGutter = 28;
 // The tab bar lives in the fixed header. One slot per tab; the slot
 // width is measured from the label so short tabs don't hoard space and the
 // whole row never overflows at the design width.
-constexpr int kTabH = 30;
-constexpr int kTabGap = 12;           // leading space before the first tab
-constexpr int kTabPaddingX = 12;
+constexpr int kTabH = 38;
+constexpr int kTabGap = 4;
+constexpr int kTabPaddingX = 16;
 
 // Narrowest a tab slot may be, however short its label - "Notes" at any DPI is
 // still a clickable target, and a slot below this is not one.
@@ -195,6 +198,7 @@ void DetailsDialog::ApplyColors() {
     clrText_ = fg;
     clrDim_ = dim;
     clrHeader_ = header;
+    if (!HighContrastActive()) clrDim_ = Mix(bg, fg, 170);
     // A hovered-but-inactive tab sits between the dim idle colour
     // and the full-strength active colour, so the three states read
     // as three distinct things.
@@ -247,8 +251,10 @@ void DetailsDialog::Show(HWND owner, HFONT font, const DetailModel& model,
     filePath_ = filePath;
     if (font_ != font) ApplyFont(font);
 
-    const std::wstring caption =
-        L"WinTCP — Details";
+    const std::wstring caption = model_.title.empty()
+        ? L"WinTCP — Details" : model_.title + L" — Details — WinTCP";
+    scrollPos_ = 0;
+    hotTab_ = hotSection_ = -1;
     if (hwnd_ == nullptr) {
         // Idempotent registration (ERROR_CLASS_ALREADY_EXISTS is fine).
         WNDCLASSEXW wc = {};
@@ -293,6 +299,10 @@ void DetailsDialog::Show(HWND owner, HFONT font, const DetailModel& model,
     // A new model can have a different number of sections; keep the
     // collapse vector in step rather than indexing past its end.
     collapsed_.assign(model_.sections.size(), 0);
+    for (size_t i = 0; i < model_.sections.size(); ++i) {
+        if (model_.sections[i].title.rfind(L"Threads (", 0) == 0)
+            collapsed_[i] = 1;
+    }
     RebuildLayout();
     // the body is owner-drawn pixels, so without this a screen reader
     // sees an empty window. The plain-text model is the accessible name;
@@ -315,8 +325,13 @@ void DetailsDialog::UpdateModel(const DetailModel& model) {
     const DetailTab previousTab = model_.activeTab;
     model_ = model;
     model_.activeTab = previousTab;
-    if (collapsed_.size() != model_.sections.size())
+    if (collapsed_.size() != model_.sections.size()) {
         collapsed_.assign(model_.sections.size(), 0);
+        for (size_t i = 0; i < model_.sections.size(); ++i) {
+            if (model_.sections[i].title.rfind(L"Threads (", 0) == 0)
+                collapsed_[i] = 1;
+        }
+    }
     // RebuildLayout() clamps scrollPos_ to the new content height, so a
     // live refresh that shrinks the list cannot leave the view scrolled
     // past the end.
@@ -332,7 +347,8 @@ void DetailsDialog::SetDark(bool dark) {
     if (dark_ == dark) return;
     dark_ = dark;
     ApplyColors();
-    if (hwnd_ != nullptr) ::InvalidateRect(hwnd_, nullptr, FALSE);
+    if (hwnd_ != nullptr)
+        ::RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 void DetailsDialog::Close() {
@@ -516,7 +532,6 @@ void DetailsDialog::RebuildLayout() {
 
     const DetailTab active = model_.activeTab;
     const int m = S(kMargin);
-    const int tabSlotH = S(kTabH);
     RECT client = {};
     if (hwnd_ != nullptr) ::GetClientRect(hwnd_, &client);
     const int valueLeft = S(kMargin + kLabelGutter);
@@ -583,7 +598,6 @@ void DetailsDialog::RebuildLayout() {
         if (hwnd_ != nullptr) ::ReleaseDC(hwnd_, hdc);
         else ::ReleaseDC(nullptr, hdc);
     }
-    (void)tabSlotH;
 
     // The tabs share ONE row. The loop above pushed one line per tab, each of
     // height kTabH, but the slots paint side-by-side from their running-x
@@ -600,13 +614,27 @@ void DetailsDialog::RebuildLayout() {
     }
     tabBarH_ = tabs.empty() ? 0 : S(kTabH);
     tabBarY_ = m + headerHeight_ - tabBarH_;
+    // A fixed gutter keeps the first body row clear of the navigation rule.
+    Line gutter;
+    gutter.kind = Line::Blank;
+    gutter.height = kSectionGap;
+    gutter.pinned = true;
+    pushHeader(gutter);
 
     // The body scrolls. Only the active tab's sections render (plus the
     // Sockets-tab connection list), so switching tabs collapses the body to
     // the relevant fields without a separate hide/show pass.
+    bool firstSection = true;
     for (size_t s = 0; s < model_.sections.size(); ++s) {
         const DetailSection& sec = model_.sections[s];
         if (sec.tab != active) continue;
+        if (!firstSection) {
+            Line gap;
+            gap.kind = Line::Blank;
+            gap.height = kSectionGap;
+            push(gap);
+        }
+        firstSection = false;
         Line h;
         h.kind = Line::SectionHeader;
         h.text = sec.title;
@@ -632,10 +660,10 @@ void DetailsDialog::RebuildLayout() {
             l.stacked = (l.text == L"Command line");
             if (l.stacked) {
                 const int wideWidth = (std::max)(
-                    S(80), valueRight - m - S(8));
+                    S(80), valueRight - m - 2 * S(kCodePadding));
                 l.height = kWideLabelH + wrappedHeight(
                     l.value, l.monospace ? monoFont_ : bodyFont_, wideWidth,
-                    kLineH);
+                    kLineH) + 2 * kCodePadding - 2 * kRowPadY;
             } else {
                 l.height = wrappedHeight(l.value,
                     l.monospace ? monoFont_ : bodyFont_, valueWidth, kLineH);
@@ -646,10 +674,10 @@ void DetailsDialog::RebuildLayout() {
             Line n;
             n.kind = Line::SectionNote;
             n.text = sec.note;
-            const int noteLeft = m + S(kLabelGutter);
+            const int noteLeft = m + S(kIndentPx);
             n.height = wrappedHeight(sec.note, smallFont_,
                 (std::max)(S(80), valueRight - noteLeft), kNoteH);
-            n.indent = kLabelGutter;
+            n.indent = kIndentPx;
             n.section = static_cast<int>(s);
             push(n);
         }
@@ -668,7 +696,8 @@ void DetailsDialog::RebuildLayout() {
             l.kind = Line::Connection;
             l.text = c;
             l.monospace = true;
-            l.height = kLineH;
+            l.height = wrappedHeight(c, monoFont_,
+                (std::max)(S(80), valueRight - m - S(kIndentPx)), kLineH);
             l.indent = kIndentPx;
             l.section = -1;
             push(l);
@@ -687,6 +716,9 @@ void DetailsDialog::RebuildLayout() {
         }
     }
     if (measure != nullptr) ::ReleaseDC(hwnd_, measure);
+    // Header height can change with the model/tab/DPI. Derive the viewport
+    // AFTER the new header is measured, including on the first Show().
+    Layout(client.right, client.bottom);
     const int maxScroll = MaxScroll();
     if (scrollPos_ > maxScroll) scrollPos_ = maxScroll;
     SyncScrollBar();
@@ -719,7 +751,7 @@ void DetailsDialog::Layout(int cx, int cy) {
     // The body is painted, not a child, so it only needs its height: the
     // area between the header (title + tab bar, pinned) and the button row.
     const int top = m + headerHeight_;
-    viewHeight_ = cy - btnRowH - top - m;
+    viewHeight_ = cy - btnRowH - top - S(kSectionGap);
     if (viewHeight_ < 0) viewHeight_ = 0;
 
     // the native scrollbar owns the body's right edge, full body
@@ -744,6 +776,8 @@ void DetailsDialog::Layout(int cx, int cy) {
 
 void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
                               int m, int textRight) {
+    (void)cx;
+    if (l.kind == Line::Blank) return;
     // Selects the right face for this row kind. Section headers and
     // tabs keep their own faces; notes and field rows differ. Field
     // rows honour the value's monospace flag separately below (the
@@ -757,7 +791,7 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
         : (l.kind == Line::Tab)          ?
               ((l.section == static_cast<int>(model_.activeTab))
                    ? headerFont_ : bodyFont_)
-        : (l.kind == Line::SectionNote)   ? smallFont_
+        : (l.kind == Line::SectionNote || l.kind == Line::Subtitle) ? smallFont_
         : l.monospace                     ? monoFont_
                                           : bodyFont_;
     if (face != nullptr) ::SelectObject(mem, face);
@@ -780,11 +814,12 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
         const int slotW = l.width;
         RECT tr = {l.indent + S(kTabPaddingX), y,
                    l.indent + slotW - S(kTabPaddingX), y + lh};
-        if (active && brushSection_ != nullptr) {
+        if ((active || l.section == hotTab_) && brushSection_ != nullptr) {
             RECT activeSurface = {l.indent, y + S(2),
                                   l.indent + slotW, y + lh - S(2)};
             HGDIOBJ oldPen = ::SelectObject(mem, ::GetStockObject(NULL_PEN));
-            HGDIOBJ oldBrush = ::SelectObject(mem, brushSection_);
+            HGDIOBJ oldBrush = ::SelectObject(mem,
+                active ? brushSection_ : brushAlternate_);
             ::RoundRect(mem, activeSurface.left, activeSurface.top,
                         activeSurface.right, activeSurface.bottom,
                         S(6), S(6));
@@ -799,11 +834,16 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
                         l.indent + slotW - S(4), y + lh};
             ::FillRect(mem, &bar, brushAccent_);
         }
+        if (active && ::GetFocus() == hwnd_) {
+            RECT focus = {l.indent + S(4), y + S(4),
+                          l.indent + slotW - S(4), y + lh - S(5)};
+            ::DrawFocusRect(mem, &focus);
+        }
         return;
     }
 
     if (l.kind == Line::SectionHeader && brushSection_ != nullptr) {
-        RECT band = {m, y, cx - m, y + lh};
+        RECT band = {m, y, textRight, y + lh};
         // Hover brightens the band itself - the old code filled a
         // rect with the SAME brush the band already used, so hover
         // was invisible, and its x was a doubly-scaled S(kMargin-
@@ -812,11 +852,6 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
         ::FillRect(mem, &band,
                        hovered && brushSectionHover_ != nullptr
                            ? brushSectionHover_ : brushSection_);
-        // Accent bar on EVERY section header, not only the hovered one.
-        if (brushAccent_ != nullptr) {
-            RECT bar = {m, y, m + S(3), y + lh};
-            ::FillRect(mem, &bar, brushAccent_);
-        }
         // The collapse chevron. It is the ONLY affordance that a
         // section can be collapsed, so it is drawn whenever the
         // header is a real, collapsible section. The synthetic
@@ -829,7 +864,7 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
             DrawChevron(mem, m + S(kChevronGutter) / 2, y + lh / 2,
                             S(4), !isCollapsed, clrHeader_);
         }
-    } else if (l.kind == Line::FieldRow && brushRule_ != nullptr &&
+    } else if ((l.kind == Line::FieldRow || l.kind == Line::Connection) && brushRule_ != nullptr &&
                !l.stacked) {
         RECT separator = {m + S(8), y + lh - 1, textRight, y + lh};
         ::FillRect(mem, &separator, brushRule_);
@@ -852,14 +887,13 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
         if (l.stacked) {
             if (labelFont_ != nullptr) ::SelectObject(mem, labelFont_);
             ::SetTextColor(mem, clrDim_);
-            RECT labelRect = {m + S(8), y + S(2), textRight,
+            RECT labelRect = {m + S(kIndentPx), y + S(2), textRight,
                               y + S(kWideLabelH)};
             ::DrawTextW(mem, l.text.c_str(),
                         static_cast<int>(l.text.size()), &labelRect,
                         DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX |
                             DT_END_ELLIPSIS);
-            RECT codeSurface = {m + S(4), y + S(kWideLabelH),
-                                textRight, y + lh - S(2)};
+            RECT codeSurface = {m, y + S(kWideLabelH), textRight, y + lh};
             if (brushAlternate_ != nullptr)
                 ::FillRect(mem, &codeSurface, brushAlternate_);
             if (l.monospace && monoFont_ != nullptr)
@@ -867,10 +901,10 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
             else if (bodyFont_ != nullptr)
                 ::SelectObject(mem, bodyFont_);
             ::SetTextColor(mem, clrText_);
-            RECT valueRect = {codeSurface.left + S(8),
-                              codeSurface.top + S(4),
-                              codeSurface.right - S(8),
-                              codeSurface.bottom - S(2)};
+            RECT valueRect = {codeSurface.left + S(kCodePadding),
+                              codeSurface.top + S(kCodePadding),
+                              codeSurface.right - S(kCodePadding),
+                              codeSurface.bottom - S(kCodePadding)};
             ::DrawTextW(mem, l.value.c_str(),
                         static_cast<int>(l.value.size()), &valueRect,
                         DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
@@ -879,7 +913,7 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
 
         if (labelFont_ != nullptr) ::SelectObject(mem, labelFont_);
         ::SetTextColor(mem, clrDim_);
-        RECT labelRect = {m, y + S(kRowPadY),
+        RECT labelRect = {m + S(kIndentPx), y + S(kRowPadY),
                           m + S(kLabelGutter) - S(kColGap),
                           y + lh - S(kRowPadY)};
         ::DrawTextW(mem, l.text.c_str(),
@@ -913,7 +947,9 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
                          : m + S(l.indent);
     RECT draw = {left, y + (l.kind == Line::SectionNote ? S(kRowPadY) : 0),
                  textRight, y + lh};
-    if (l.kind == Line::SectionNote) {
+    if (l.kind == Line::SectionNote || l.kind == Line::Connection) {
+        draw.top = y + S(kRowPadY);
+        draw.bottom = y + lh - S(kRowPadY);
         ::DrawTextW(mem, l.text.c_str(), static_cast<int>(l.text.size()),
                     &draw, DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
         return;
@@ -924,9 +960,9 @@ void DetailsDialog::PaintLine(HDC mem, const Line& l, int y, int lh, int cx,
                     DT_END_ELLIPSIS);
 }
 
-void DetailsDialog::OnPaint() {
+void DetailsDialog::OnPaint(HDC target) {
     PAINTSTRUCT ps = {};
-    HDC hdc = ::BeginPaint(hwnd_, &ps);
+    HDC hdc = target != nullptr ? target : ::BeginPaint(hwnd_, &ps);
     if (hdc == nullptr) return;
 
     RECT rc = {};
@@ -999,23 +1035,20 @@ void DetailsDialog::OnPaint() {
     // rather than a layout error: Layout() already computed viewHeight_ correctly
     // and the hand-drawn scrollbar already honoured it.
     //
-    // DEPENDS ON viewHeight_ BEING SET BEFORE THE FIRST PAINT, because it
-    // defaults to 0 and `m + 0 == m` would clip the body to nothing - a blank
-    // window rather than a wrong one, which is at least not silently plausible.
-    // Two independent paths establish it: WM_CREATE calls ApplyFont, which calls
-    // Layout(GetClientRect) at the end; and WM_SIZE calls Layout directly, and a
-    // created window is always sent WM_SIZE before it is ever painted. So this
-    // bound is safe today, but it is a landmine for anyone who adds a paint path
-    // that can run before both - if you add one, call Layout() first.
+    // RebuildLayout measures the pinned header first, then calls Layout to set
+    // the body viewport. Keeping that order makes this bottom edge match the
+    // scrollbar and footer positions after a tab, resize, or DPI change.
     const int contentBottom = headerBottom + viewHeight_;
 
-    // the body stops clear of the native scrollbar when one is shown,
-    // instead of running under the hand-drawn thumb it replaced.
-    const int bodyRight =
-        cx - m - ((MaxScroll() > 0 && viewHeight_ > 0)
-                      ? ScrollBarWidth() + S(4)
-                      : 0);
+    // Reserve the scrollbar width during both measurement and painting. Text
+    // then stays aligned when live content makes the scrollbar appear.
+    const int bodyRight = cx - m - ScrollBarWidth() - S(4);
 
+    // Testing row intersection only culls fully invisible rows. A partially
+    // visible row still paints its ENTIRE rectangle without a real DC clip,
+    // overwriting tabs at the top and footer buttons at the bottom.
+    const int saved = ::SaveDC(mem);
+    ::IntersectClipRect(mem, m, headerBottom, bodyRight, contentBottom);
     y = headerBottom - scrollPos_;
     for (const Line& l : lines_) {
         if (l.pinned) continue;   // header already drawn above
@@ -1026,6 +1059,7 @@ void DetailsDialog::OnPaint() {
             PaintLine(mem, l, y, lh, cx, m, bodyRight);
         y += lh;
     }
+    ::RestoreDC(mem, saved);
 
     // no hand-drawn scrollbar. The native SCROLLBAR child (hwndScroll_,
     // positioned in Layout, synced in SyncScrollBar) owns this region's
@@ -1035,7 +1069,7 @@ void DetailsDialog::OnPaint() {
     if (oldBmp != nullptr) ::SelectObject(mem, oldBmp);
     if (bmp != nullptr) ::DeleteObject(bmp);
     ::DeleteDC(mem);
-    ::EndPaint(hwnd_, &ps);
+    if (target == nullptr) ::EndPaint(hwnd_, &ps);
 }
 
 void DetailsDialog::OnMouseDown(int x, int y) {
@@ -1043,6 +1077,7 @@ void DetailsDialog::OnMouseDown(int x, int y) {
     // headers in the body. A click elsewhere is left alone so the window still
     // behaves like a static read-out.
     const int m = S(kMargin);
+    ::SetFocus(hwnd_);
 
     // --- tab bar: one strip, pinned at the top, before the scroll offset ---
     // Every tab slot's rect comes from the tab Lines RebuildLayout stored
@@ -1059,6 +1094,8 @@ void DetailsDialog::OnMouseDown(int x, int y) {
                 const DetailTab t = static_cast<DetailTab>(l.section);
                 if (t != model_.activeTab) {
                     model_.activeTab = t;
+                    scrollPos_ = 0;
+                    hotSection_ = -1;
                     RebuildLayout();
                     ::InvalidateRect(hwnd_, nullptr, FALSE);
                 }
@@ -1158,6 +1195,28 @@ LRESULT CALLBACK DetailsDialog::WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
     return ::DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+LRESULT CALLBACK DetailsDialog::ButtonProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                           LPARAM lParam, UINT_PTR id,
+                                           DWORD_PTR data) {
+    auto* self = reinterpret_cast<DetailsDialog*>(data);
+    if (msg == WM_MOUSEMOVE) {
+        if (self->hotButton_ != hwnd) {
+            self->hotButton_ = hwnd;
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd, 0};
+        ::TrackMouseEvent(&track);
+    } else if (msg == WM_MOUSELEAVE) {
+        if (self->hotButton_ == hwnd) self->hotButton_ = nullptr;
+        ::InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (msg == WM_KEYDOWN && (wParam == VK_TAB || wParam == VK_ESCAPE)) {
+        return ::SendMessageW(self->hwnd_, msg, wParam, lParam);
+    } else if (msg == WM_NCDESTROY) {
+        ::RemoveWindowSubclass(hwnd, ButtonProc, id);
+    }
+    return ::DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_DRAWITEM: {
@@ -1165,23 +1224,35 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             if (dis == nullptr || dis->CtlType != ODT_BUTTON) return FALSE;
             const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
             const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
-            const bool focused = (dis->itemState & ODS_FOCUS) != 0;
+            const bool focused = (dis->itemState & ODS_FOCUS) != 0 &&
+                                 (dis->itemState & ODS_NOFOCUSRECT) == 0;
             RECT rc = dis->rcItem;
-            const bool dark = dark_ && !HighContrastActive();
-            HBRUSH bgBrush = dark && brushWindow_ != nullptr
-                                 ? brushWindow_
-                                 : reinterpret_cast<HBRUSH>(
-                                       ::GetStockObject(COLOR_BTNFACE + 1));
-            ::FillRect(dis->hDC, &rc, bgBrush);
-            ::DrawEdge(dis->hDC, &rc,
-                       pressed ? EDGE_SUNKEN : EDGE_RAISED,
-                       BF_RECT | BF_ADJUST);
-            if (pressed) ::OffsetRect(&rc, 1, 1);
+            const bool hot = hotButton_ == dis->hwndItem && !disabled;
+            const bool highContrast = HighContrastActive();
+            ::FillRect(dis->hDC, &rc, brushWindow_);
+            const COLORREF bg = dark_ && !highContrast
+                ? kSharedDarkBg : ::GetSysColor(COLOR_WINDOW);
+            const COLORREF border = focused ? ::GetSysColor(COLOR_HIGHLIGHT)
+                : highContrast ? clrText_ : Mix(bg, clrText_, hot ? 120 : 72);
+            const HBRUSH faceBrush = highContrast && (pressed || hot)
+                ? reinterpret_cast<HBRUSH>(::GetStockObject(COLOR_HIGHLIGHT + 1))
+                : pressed ? brushSectionHover_ : hot ? brushSection_ : brushWindow_;
+            HPEN pen = ::CreatePen(PS_SOLID, (std::max)(1, S(1)), border);
+            HGDIOBJ oldPen = ::SelectObject(dis->hDC, pen);
+            HGDIOBJ oldBrush = ::SelectObject(dis->hDC, faceBrush);
+            ::RoundRect(dis->hDC, rc.left, rc.top, rc.right, rc.bottom, S(6), S(6));
+            ::SelectObject(dis->hDC, oldBrush);
+            ::SelectObject(dis->hDC, oldPen);
+            ::DeleteObject(pen);
+            ::InflateRect(&rc, -S(4), -S(4));
+            if (pressed) ::OffsetRect(&rc, S(1), S(1));
             const HFONT face = (bodyFont_ != nullptr) ? bodyFont_ : font_;
             HFONT oldFont = nullptr;
             if (face != nullptr) oldFont = static_cast<HFONT>(::SelectObject(dis->hDC, face));
             ::SetBkMode(dis->hDC, TRANSPARENT);
-            ::SetTextColor(dis->hDC, disabled ? clrDim_ : clrText_);
+            ::SetTextColor(dis->hDC, disabled ? clrDim_
+                : highContrast && (pressed || hot)
+                    ? ::GetSysColor(COLOR_HIGHLIGHTTEXT) : clrText_);
             wchar_t text[256] = {0};
             ::GetWindowTextW(dis->hwndItem, text, 256);
             ::DrawTextW(dis->hDC, text, -1, &rc,
@@ -1193,7 +1264,7 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CREATE: {
             const HINSTANCE inst = ::GetModuleHandleW(nullptr);
             hwndCopy_ = ::CreateWindowExW(
-                0, L"BUTTON", L"&Copy",
+                0, L"BUTTON", L"&Copy all",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 0, 0, hwnd_,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_DLG_COPY)),
@@ -1210,6 +1281,10 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 0, 0, 0, 0, hwnd_,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_DLG_CLOSE)),
                 inst, nullptr);
+            const HWND buttons[] = {hwndCopy_, hwndOpen_, hwndClose_};
+            for (HWND button : buttons)
+                ::SetWindowSubclass(button, ButtonProc, 1,
+                                    reinterpret_cast<DWORD_PTR>(this));
             // the body's native scrollbar. Positioned in Layout, synced
             // in SyncScrollBar; hidden when the body fits, so a short tab
             // shows no chrome it does not need.
@@ -1224,7 +1299,6 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_SIZE:
-            Layout(LOWORD(lParam), HIWORD(lParam));
             RebuildLayout();
             ::InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
@@ -1262,6 +1336,7 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             hwnd_ = nullptr;
             hwndCopy_ = hwndOpen_ = hwndClose_ = nullptr;
             hwndScroll_ = nullptr;
+            hotButton_ = nullptr;
             fontsReady_ = false;
             return 0;
         case WM_VSCROLL: {
@@ -1315,6 +1390,8 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             OnMouseDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
         case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd_, 0};
+            ::TrackMouseEvent(&track);
             // Track two hover targets: the tab bar (pinned header) and the
             // section headers in the body. Only the pointer's own region is
             // tested, so a stray enter/leave does not flip both at once.
@@ -1370,6 +1447,17 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
+        case WM_MOUSELEAVE:
+            hotTab_ = hotSection_ = -1;
+            ::InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            ::InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_PRINTCLIENT:
+            OnPaint(reinterpret_cast<HDC>(wParam));
+            return 0;
         case WM_PAINT:
             OnPaint();
             return 0;
@@ -1380,7 +1468,8 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             // Re-derive the palette so a theme or high-contrast switch
             // takes effect without reopening the window.
             ApplyColors();
-            ::InvalidateRect(hwnd_, nullptr, FALSE);
+            ::RedrawWindow(hwnd_, nullptr, nullptr,
+                           RDW_INVALIDATE | RDW_ALLCHILDREN);
             return 0;
         case WM_CTLCOLORBTN: {
             // Buttons are the one child control that would otherwise stay
@@ -1443,6 +1532,17 @@ LRESULT DetailsDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             const bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
             if (wParam == VK_TAB && ctrl) {
                 ActivateTab(shift ? -1 : 1);
+                return 0;
+            }
+            if (wParam == VK_TAB) {
+                const HWND stops[] = {hwnd_, hwndCopy_, hwndOpen_, hwndClose_};
+                int index = 0;
+                for (int i = 0; i < 4; ++i)
+                    if (::GetFocus() == stops[i]) index = i;
+                do {
+                    index = (index + (shift ? 3 : 1)) % 4;
+                } while (!::IsWindowEnabled(stops[index]));
+                ::SetFocus(stops[index]);
                 return 0;
             }
             if ((wParam == VK_LEFT || wParam == VK_RIGHT) &&
