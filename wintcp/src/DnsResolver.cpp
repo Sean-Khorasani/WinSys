@@ -16,6 +16,8 @@
 #include "DnsResolver.h"
 #include "Utils.h"   // RunGuarded (worker containment)
 
+#include <vector>
+
 namespace wintcp {
 namespace {
 
@@ -193,17 +195,38 @@ void DnsResolver::Run() {
     for (;;) {
         std::wstring addr;
         Sink sink;
+        std::vector<std::unique_ptr<Result>> lateResults;
         {
             std::unique_lock<std::mutex> lk(m_);
-            cv_.wait(lk, [this] {
+            cv_.wait_for(lk, std::chrono::milliseconds(50), [this] {
                 return stop_ || (enabled_.load() && !queue_.empty());
             });
             if (stop_) return;
-            addr = queue_.front();
-            queue_.pop_front();
-            queued_.erase(addr);
             sink = sink_;
+            for (auto it = inFlight_.begin(); it != inFlight_.end();) {
+                if (!it->second.done->load()) { ++it; continue; }
+                cache_[it->first] = *it->second.host;
+                cacheOrder_.push_back(it->first);
+                while (cache_.size() > kMaxCacheEntries && !cacheOrder_.empty()) {
+                    cache_.erase(cacheOrder_.front());
+                    cacheOrder_.pop_front();
+                }
+                auto result = std::make_unique<Result>();
+                result->address = it->first;
+                result->hostname = *it->second.host;
+                lateResults.push_back(std::move(result));
+                it = inFlight_.erase(it);
+            }
+            if (enabled_.load() && !queue_.empty()) {
+                addr = queue_.front();
+                queue_.pop_front();
+                queued_.erase(addr);
+            }
         }
+        for (auto& result : lateResults) {
+            if (sink) (void)RunGuarded([&] { sink(std::move(result)); });
+        }
+        if (addr.empty()) continue;
 
         // Never block the worker on a single getnameinfo. Launch the
         // lookup on a detached helper and wait at most timeoutMs_ for it. If
@@ -219,31 +242,32 @@ void DnsResolver::Run() {
             if (stop_) return;
             inFlight_[addr] = InFlight{done, resultHost, nullptr};
         }
-        std::thread([this, addr, done, resultHost] {
+        // The helper MUST NOT capture `this` or touch the resolver's mutex/cv:
+        // it is detached and may outlive Stop() (and thus the resolver object).
+        // All communication happens through the shared state (done flag + result).
+        std::thread([addr, done, resultHost] {
             std::wstring host;
             // A throwing lookup resolves to empty - the same answer a
             // failed lookup gives, and the cache records it either way.
             if (!RunGuarded([&] { host = DoLookup(addr); }).empty()) host.clear();
-            {
-                std::lock_guard<std::mutex> lk(m_);
-                *resultHost = host;
-                done->store(true);
-            }
-            cv_.notify_all();
+            *resultHost = host;
+            done->store(true);
         }).detach();
 
-        // Wait for the helper, bounded by the per-tick budget.
+        // Wait for the helper, bounded by the per-tick budget. Poll the shared
+        // atomic flag instead of the resolver's condition variable, so the
+        // detached helper never needs to notify (or touch) the resolver.
         bool finished = false;
-        {
-            std::unique_lock<std::mutex> lk(m_);
-            const auto deadline = std::chrono::steady_clock::now() +
-                std::chrono::milliseconds(timeoutMs_);
-            finished = cv_.wait_until(lk, deadline, [done] { return done->load(); });
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(timeoutMs_);
+        while (!done->load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        finished = done->load();
 
         if (!finished) {
-            // Budget exceeded: report pending, count the stall, and let the
-            // helper deliver late when it finally returns.
+            // Budget exceeded: report pending; Run() reaps and delivers the
+            // shared result once this helper eventually finishes.
             ++stuck_;
             if (stallSink_) stallSink_(stuck_.load(), timeoutMs_);
             if (sink) {
@@ -253,12 +277,7 @@ void DnsResolver::Run() {
                 result->state = State::kPending;
                 (void)RunGuarded([&] { sink(std::move(result)); });
             }
-            // The helper is still running. On its return it posts a resolved
-            // Result via the sink (below path); until then the row shows
-            // `host: pending`. Do NOT erase inFlight_[addr] - the late
-            // delivery in the finished path re-acquires the lock fine, but
-            // Offer() must keep refusing a duplicate queue entry while the
-            // helper is still out.
+            // Keep inFlight_ so Offer() refuses duplicate lookups.
             continue;
         }
 
