@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "recipes": [
+    {"id":"R01","title":"Torrent activity watcher","summary":"Watch a selected torrent executable for new remote TCP endpoints. UDP sends are not yet visible.","trigger":"outbound_activity","cooldownSeconds":60,"snapshotReady":true,"requires":"Exact torrent executable path"},
+    {"id":"R02","title":"Timed torrent pause","summary":"Preemptively restrict a selected torrent executable for a reviewed duration.","trigger":"while_armed","snapshotReady":false,"requires":"Privileged temporary-restriction collector"},
+    {"id":"R03","title":"App network activity watcher","summary":"Notify when a selected app first appears with a non-loopback remote TCP endpoint. Direction and attempted connections are unknown with snapshots.","trigger":"outbound_activity","cooldownSeconds":60,"snapshotReady":true,"requires":"Exact executable path"},
+    {"id":"R04","title":"Reactive app block","summary":"Notify and temporarily restrict an app after supported outbound activity; initial traffic may already have passed.","trigger":"outbound_activity","snapshotReady":false,"requires":"Lifecycle events and privileged temporary-restriction collector"},
+    {"id":"R05","title":"Unexpected document-app networking","summary":"Watch an explicitly selected document application's remote TCP endpoint appearances; legitimate updates may also trigger it.","trigger":"outbound_activity","cooldownSeconds":120,"snapshotReady":true,"requires":"Exact Word, Excel, or PDF-reader executable path"},
+    {"id":"R06","title":"Large upload in a short window","summary":"Alert on a covered transmit-byte threshold; do not treat a burst as proof of data theft.","trigger":"tx_window_threshold","snapshotReady":false,"requires":"Reliable per-flow transmit deltas and incident recorder"},
+    {"id":"R07","title":"New non-loopback TCP listener","summary":"Watch a selected executable for a new TCP binding beyond loopback. This does not prove external reachability.","trigger":"new_listener","cooldownSeconds":300,"snapshotReady":true,"requires":"Exact executable path"},
+    {"id":"R08","title":"Destination allowlist","summary":"Alert when selected apps contact an address outside reviewed IPv4/IPv6 CIDRs.","trigger":"remote_outside_cidrs","snapshotReady":false,"requires":"Lifecycle or UDP events and CIDR policy"},
+    {"id":"R09","title":"VPN-bound app investigation","summary":"Detect confirmed egress on an unapproved interface; predicted routes alone are advisory.","trigger":"interface_policy_violation","snapshotReady":false,"requires":"Observed egress and adapter policy"},
+    {"id":"R10","title":"Repeated connection failures","summary":"Alert on explicit failure events in a covered time window; snapshot disappearance is not a failure.","trigger":"failure_window_threshold","snapshotReady":false,"requires":"Explicit failure-event collector"}
+  ]
+}
