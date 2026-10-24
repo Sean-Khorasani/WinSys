@@ -98,7 +98,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <GenerateManifest>false</GenerateManifest>
       <EnableControlFlowGuard>true</EnableControlFlowGuard>
-      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;fwpuclnt.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
@@ -132,7 +132,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <GenerateManifest>false</GenerateManifest>
       <EnableControlFlowGuard>true</EnableControlFlowGuard>
-      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;fwpuclnt.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
@@ -162,7 +162,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <GenerateManifest>false</GenerateManifest>
       <EnableControlFlowGuard>true</EnableControlFlowGuard>
-      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;fwpuclnt.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
@@ -196,7 +196,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <GenerateManifest>false</GenerateManifest>
       <EnableControlFlowGuard>true</EnableControlFlowGuard>
-      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;iphlpapi.lib;ws2_32.lib;fwpuclnt.lib;comctl32.lib;psapi.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
@@ -223,6 +223,22 @@
     <ClCompile Include="src\CliCommands.cpp" />
     <ClCompile Include="src\Script.cpp" />
     <ClCompile Include="src\Monitors.cpp" />
+    <ClCompile Include="src\EngineRuntime.cpp" />
+    <ClCompile Include="src\EngineConfig.cpp" />
+    <ClCompile Include="src\EngineStore.cpp" />
+    <ClCompile Include="src\EngineOperations.cpp" />
+    <ClCompile Include="src\EngineClock.cpp" />
+    <ClCompile Include="src\RecipeModel.cpp" />
+    <ClCompile Include="src\RestrictionModel.cpp" />
+    <ClCompile Include="src\RestrictionLease.cpp" />
+    <ClCompile Include="src\CollectorRuntime.cpp" />
+    <ClCompile Include="src\EventDecoder.cpp" />
+    <ClCompile Include="src\ConnectionEventCollector.cpp" />
+    <ClCompile Include="src\ProcessInstanceCache.cpp" />
+    <ClCompile Include="src\LifecycleFlowModel.cpp" />
+    <ClCompile Include="src\RestrictionWfp.cpp" />
+    <ClCompile Include="src\NetworkEvents.cpp" />
+    <ClCompile Include="src\SnapshotEvents.cpp" />
     <ClCompile Include="src\Notify.cpp" />
     <ClCompile Include="src\ViewState.cpp" />
     <ClCompile Include="src\DnsResolver.cpp" />
@@ -306,6 +322,22 @@
     <ClInclude Include="src\Commands.h" />
     <ClInclude Include="src\CliCommands.h" />
     <ClInclude Include="src\Monitors.h" />
+    <ClInclude Include="src\EngineRuntime.h" />
+    <ClInclude Include="src\EngineConfig.h" />
+    <ClInclude Include="src\EngineStore.h" />
+    <ClInclude Include="src\EngineOperations.h" />
+    <ClInclude Include="src\EngineClock.h" />
+    <ClInclude Include="src\RecipeModel.h" />
+    <ClInclude Include="src\RestrictionModel.h" />
+    <ClInclude Include="src\RestrictionLease.h" />
+    <ClInclude Include="src\CollectorRuntime.h" />
+    <ClInclude Include="src\EventDecoder.h" />
+    <ClInclude Include="src\ConnectionEventCollector.h" />
+    <ClInclude Include="src\ProcessInstanceCache.h" />
+    <ClInclude Include="src\LifecycleFlowModel.h" />
+    <ClInclude Include="src\RestrictionWfp.h" />
+    <ClInclude Include="src\NetworkEvents.h" />
+    <ClInclude Include="src\SnapshotEvents.h" />
     <ClInclude Include="src\ViewState.h" />
     <ClInclude Include="src\DnsResolver.h" />
     <ClInclude Include="src\DnsCache.h" />
