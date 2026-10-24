@@ -18,6 +18,22 @@
     <ClCompile Include="src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\EngineRuntime.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\EngineConfig.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\EngineStore.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\EngineOperations.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\EngineClock.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\RecipeModel.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\RestrictionModel.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\RestrictionLease.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\CollectorRuntime.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\EventDecoder.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\ConnectionEventCollector.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\ProcessInstanceCache.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\LifecycleFlowModel.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\RestrictionWfp.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\NetworkEvents.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\SnapshotEvents.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\MainWindow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
