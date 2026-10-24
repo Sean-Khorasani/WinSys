@@ -399,6 +399,18 @@ threshold.
 - **Tray.** Minimize-to-tray hides the window; the tray menu offers Open, Always on top and Exit; single-click (double-click works too) restores, and the first hide explains that once per run with a balloon. The tray tip names what the window holds — rows shown / total, plus grouped, frozen and alert states — instead of a fixed title. Alerts are evaluated on every refresh, after the view is rebuilt, so a balloon names rows you can actually look at. **First-run minimize prompt:** the first time you minimize while the tray icon is off, a dialog asks "Minimize to tray or exit?" Choosing **Minimize to tray** or **Close WinTCP (exit)** applies immediately; pressing **Esc** or closing the dialog exits without enabling the tray and without remembering a permanent choice. An unchecked "Don't ask me again" means it will ask again next time. The remembered choice and the tray-on flag persist in `HKCU\Software\WinTCP` as `TrayMinimizeChoice` and `TrayEnabled`.
 - **Always on top** can be toggled from the menu or the tray.
 
+## Background monitoring controls
+
+The **Monitoring** menu starts/stops the optional per-user engine, shows its
+sample state, and explicitly starts/stops the elevated collector. Collector
+start is queued in the engine and requests UAC; **Temporary restriction
+status** shows readiness, active lease count, and the last control result.
+**Release all temporary restrictions** is available directly even when the
+engine is unavailable. Closing the GUI does not stop background monitoring.
+Current observations are sampled endpoints, not proof of connection attempts
+or failures. Keep `wintcp.exe` beside `wintcp-gui.exe` for these process controls;
+ordinary GUI endpoint inspection remains independent.
+
 ## Settings and reset
 
 Window placement, columns (mask, order, widths), sort, filter, always-on-top, tray and the database paths all persist in `HKCU\Software\WinTCP`. When a persisted layout goes wrong, **View → Reset columns & layout** restores every default the startup path uses — visible set, widths, order, `PID`-ascending sort and an empty filter — and persists the fix through the same single write path, so it survives a restart. No registry editing required.
