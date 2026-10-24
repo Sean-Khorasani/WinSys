@@ -72,6 +72,38 @@ wintcp/src/TrayIcon.cpp
     wintcp/src/Script.cpp
     wintcp/src/Script.h
     wintcp/src/Monitors.cpp
+    wintcp/src/NetworkEvents.cpp
+    wintcp/src/NetworkEvents.h
+    wintcp/src/EngineRuntime.cpp
+    wintcp/src/EngineRuntime.h
+    wintcp/src/EngineConfig.cpp
+    wintcp/src/EngineConfig.h
+    wintcp/src/EngineStore.cpp
+    wintcp/src/EngineStore.h
+    wintcp/src/EngineOperations.cpp
+    wintcp/src/EngineOperations.h
+    wintcp/src/EngineClock.cpp
+    wintcp/src/EngineClock.h
+    wintcp/src/RecipeModel.cpp
+    wintcp/src/RecipeModel.h
+    wintcp/src/RestrictionModel.cpp
+    wintcp/src/RestrictionModel.h
+    wintcp/src/RestrictionLease.cpp
+    wintcp/src/RestrictionLease.h
+    wintcp/src/CollectorRuntime.cpp
+    wintcp/src/CollectorRuntime.h
+    wintcp/src/EventDecoder.cpp
+    wintcp/src/EventDecoder.h
+    wintcp/src/ConnectionEventCollector.cpp
+    wintcp/src/ConnectionEventCollector.h
+    wintcp/src/ProcessInstanceCache.cpp
+    wintcp/src/ProcessInstanceCache.h
+    wintcp/src/LifecycleFlowModel.cpp
+    wintcp/src/LifecycleFlowModel.h
+    wintcp/src/RestrictionWfp.cpp
+    wintcp/src/RestrictionWfp.h
+    wintcp/src/SnapshotEvents.cpp
+    wintcp/src/SnapshotEvents.h
     wintcp/src/Notify.cpp
     wintcp/src/Monitors.h
     wintcp/src/WebUi.cpp
@@ -218,6 +250,7 @@ endif()
 target_link_libraries(wintcp PRIVATE
     iphlpapi
     ws2_32
+    fwpuclnt
     comctl32
     psapi
     user32
@@ -386,7 +419,7 @@ target_compile_definitions(wintcp-dev PRIVATE
 target_compile_options(wintcp-dev PRIVATE /W4 /WX /EHsc /utf-8 /permissive-
                                        /Zc:__cplusplus)
 target_link_libraries(wintcp-dev PRIVATE
-    iphlpapi ws2_32 comctl32 psapi user32 gdi32 comdlg32 shell32 advapi32
+    iphlpapi ws2_32 fwpuclnt comctl32 psapi user32 gdi32 comdlg32 shell32 advapi32
     crypt32 wintrust pdh ole32 oleaut32 bcrypt delayimp)
 target_link_options(wintcp-dev PRIVATE
     # /guard:cf (Control Flow Guard): this target did NOT have it while the
