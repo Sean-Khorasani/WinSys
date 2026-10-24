@@ -195,7 +195,7 @@ try {
     $clBase = @('/nologo', '/std:c++17', '/EHsc', '/W4', '/WX', '/permissive-', '/Zc:__cplusplus',
                 '/utf-8', '/DUNICODE', '/D_UNICODE', '/D_WIN32_WINNT=0x0601', '/DWIN32_LEAN_AND_MEAN',
                 '/O2', '/Oy-', '/Zi', '/MT', '/FS', '/guard:cf')
-    $libs   = @('iphlpapi.lib', 'ws2_32.lib', 'comctl32.lib', 'psapi.lib', 'user32.lib', 'gdi32.lib',
+    $libs   = @('iphlpapi.lib', 'ws2_32.lib', 'fwpuclnt.lib', 'comctl32.lib', 'psapi.lib', 'user32.lib', 'gdi32.lib',
                 'comdlg32.lib', 'shell32.lib', 'advapi32.lib', 'crypt32.lib', 'wintrust.lib',
                 'pdh.lib', 'ole32.lib', 'oleaut32.lib', 'bcrypt.lib', 'delayimp.lib')
     $linkOpts = @('/SUBSYSTEM:CONSOLE', '/guard:cf', '/MANIFEST:NO', '/LTCG', '/OPT:REF', '/OPT:ICF', '/DEBUG:NONE')
