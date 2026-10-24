@@ -38,6 +38,19 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "Commands.h"
 #include "ConnectionsList.h"
 #include "FontCache.h"
+#include "NetworkEvents.h"
+#include "EngineConfig.h"
+#include "EngineStore.h"
+#include "EngineOperations.h"
+#include "EngineClock.h"
+#include "RecipeModel.h"
+#include "RestrictionModel.h"
+#include "RestrictionLease.h"
+#include "EventDecoder.h"
+#include "ConnectionEventCollector.h"
+#include "ProcessInstanceCache.h"
+#include "LifecycleFlowModel.h"
+#include "SnapshotEvents.h"
 #include "WebProcesses.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1935,6 +1948,780 @@ void CheckMonitors(TestResult& r) {
     MonitorDef longDur = okd; longDur.durationSeconds = kMonitorDurationMaxSec + 1;
     Check(r, "monitors.validate-duration", !longDur.Validate(&verr));
     Check(r, "monitors.key-pid-separate", MonitorKey(a) != MonitorKey(brand));
+}
+
+void CheckNetworkEvents(TestResult& r) {
+    using namespace wintcp;
+    NetworkEvent event;
+    event.eventId = "epoch:1";
+    event.kind = NetworkEventKind::EndpointObserved;
+    event.source = "snapshot";
+    event.sourceSequence = "9007199254740993";
+    event.monotonicNs = 9007199254740993ULL;
+    event.timebaseId = "epoch:clock-1";
+    event.process.pid = 42;
+    event.process.imagePath = "C:\\A\\\"test\".exe";
+    event.interfaceReason = "not_reported_by_source";
+    const std::string json = NetworkEventJson(event);
+    Check(r, "events.kind-preserved", json.find("\"kind\":\"endpoint_observed\"") != std::string::npos);
+    Check(r, "events.counter-string", json.find("\"monotonicNs\":\"9007199254740993\"") != std::string::npos);
+    Check(r, "events.timebase", json.find("\"timebaseId\":\"epoch:clock-1\"") != std::string::npos);
+    Check(r, "events.unknown-interface", json.find("\"interfaceGuid\":null") != std::string::npos);
+    Check(r, "events.escape-path", json.find("\\\"test\\\"") != std::string::npos);
+    Check(r, "events.unverified-process", !ProcessActionable(event.process));
+    event.process.creationTimeKnown = true;
+    event.process.creationTimeFileTime = 123;
+    Check(r, "events.verified-process", ProcessActionable(event.process));
+
+    NetworkEventJournal journal(2, 4096);
+    journal.Append(event);
+    const NetworkEventPage first = journal.Read("", 1);
+    Check(r, "events.first-page", first.items.size() == 1 && !first.nextCursor.empty());
+    event.eventId = "epoch:2";
+    journal.Append(event);
+    event.eventId = "epoch:3";
+    journal.Append(event);
+    Check(r, "events.bounded", journal.Size() == 2 && journal.EvictedRecords() == 1);
+    Check(r, "events.expired-cursor", journal.Read(first.nextCursor.substr(0, first.nextCursor.find(':') + 1) + "0", 5).cursorExpired);
+    Check(r, "events.remaining-page", journal.Read(first.nextCursor, 5).items.size() == 2);
+    const auto latest = journal.Read("", 1);
+    Check(r, "events.latest-default", latest.items.size() == 1 &&
+          latest.items[0].eventId == "epoch:3");
+    Check(r, "events.foreign-cursor", journal.Read("other:2", 5).cursorExpired);
+    Check(r, "events.bad-cursor", journal.Read("bogus", 5).cursorExpired);
+    Check(r, "events.limit", journal.Read("", 0).items.empty());
+}
+
+void CheckSnapshotEvents(TestResult& r) {
+    using namespace wintcp;
+    Connection row;
+    row.identity.pid = 42;
+    row.identity.family = AF_INET;
+    row.identity.protocol = IPPROTO_TCP;
+    row.identity.localPort = 50000;
+    row.identity.remotePort = 443;
+    row.identity.state = MIB_TCP_STATE_ESTAB;
+    row.display.localAddress = L"192.0.2.10";
+    row.display.remoteAddress = L"198.51.100.20";
+    row.display.processPath = L"C:\\Apps\\Example.exe";
+    row.procMeta.processCreateKnown = true;
+    row.procMeta.processCreate.dwLowDateTime = 123;
+    SnapshotEventAdapter adapter("test-epoch");
+    const auto first = adapter.Observe({row}, "2026-10-23T00:00:00Z", 100);
+    Check(r, "snapshot.baseline-observed", first.size() == 1 &&
+          first[0].kind == NetworkEventKind::EndpointObserved &&
+          first[0].tcpState == "established" &&
+          first[0].firstObservedMidSession);
+    Check(r, "snapshot.stable-no-repeat", adapter.Observe({row}, "later", 200).empty());
+    row.procMeta.processCreate.dwLowDateTime = 124;
+    const auto reused = adapter.Observe({row}, "later", 300);
+    Check(r, "snapshot.pid-reuse-separate-flow", reused.size() == 2 &&
+          reused[0].flowId != reused[1].flowId);
+    const auto gone = adapter.Observe({}, "later", 400);
+    Check(r, "snapshot.disappearance-not-failure", gone.size() == 1 &&
+          gone[0].kind == NetworkEventKind::EndpointDisappeared);
+    const auto reappeared = adapter.Observe({row}, "later", 500);
+    Check(r, "snapshot.tuple-reuse-new-flow", reappeared.size() == 1 &&
+          reappeared[0].flowId != reused[0].flowId &&
+          !reappeared[0].firstObservedMidSession);
+}
+
+void CheckEngineConfig(TestResult& r) {
+    using namespace wintcp;
+    EngineConfig config;
+    std::string error;
+    Check(r, "engine-config.roundtrip",
+          ParseEngineConfig(FormatEngineConfig(config), &config, &error) &&
+          config.snapshotIntervalMs == 1000 &&
+          config.maxEventRecords == 16384);
+    const std::string revision = EngineConfigRevision(config);
+    Check(r, "engine-config.revision-stable", revision.size() == 64 &&
+          revision == EngineConfigRevision(config));
+    EngineConfig changed = config;
+    changed.snapshotIntervalMs = 500;
+    Check(r, "engine-config.revision-changes",
+          EngineConfigRevision(changed) != revision);
+    const EngineConfig before = config;
+    Check(r, "engine-config.bad-version",
+          !ParseEngineConfig("WinTCP-Engine-Config:2\n", &config, &error) &&
+          error == "unsupported_version");
+    Check(r, "engine-config.no-silent-reset",
+          config.snapshotIntervalMs == before.snapshotIntervalMs);
+    Check(r, "engine-config.duplicate",
+          !ParseEngineConfig(FormatEngineConfig(before) +
+                             "snapshotIntervalMs=500\n", &config, &error));
+    Check(r, "engine-config.unknown",
+          !ParseEngineConfig(FormatEngineConfig(before) + "active=true\n",
+                             &config, &error));
+    Check(r, "engine-config.oversized",
+          !ParseEngineConfig(std::string(4097, 'x'), &config, &error));
+    Check(r, "engine-config.bad-range",
+          !ParseEngineConfig("WinTCP-Engine-Config:1\n"
+                             "snapshotIntervalMs=0\n"
+                             "maxEventRecords=16384\n"
+                             "maxEventBytes=67108864\n", &config, &error));
+}
+
+void CheckEngineStore(TestResult& r) {
+    using namespace wintcp;
+    wchar_t temp[MAX_PATH] = {};
+    wchar_t unique[MAX_PATH] = {};
+    const DWORD length = ::GetTempPathW(MAX_PATH, temp);
+    if (length == 0 || length >= MAX_PATH ||
+        !::GetTempFileNameW(temp, L"WTE", 0, unique)) {
+        Check(r, "engine-store.temp-directory", false);
+        return;
+    }
+    (void)::DeleteFileW(unique);
+    if (!::CreateDirectoryW(unique, nullptr)) {
+        Check(r, "engine-store.temp-directory", false);
+        return;
+    }
+    SECURITY_DESCRIPTOR descriptor = {};
+    const bool validSecurity =
+        ::InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) &&
+        ::SetSecurityDescriptorDacl(&descriptor, FALSE, nullptr, FALSE);
+    SECURITY_ATTRIBUTES security = {sizeof(security), &descriptor, FALSE};
+    const std::wstring directory(unique);
+    const std::wstring current = directory + L"\\events-current.ndjson";
+    const std::wstring previous = directory + L"\\events-previous.ndjson";
+    std::string error;
+    std::size_t written = 0;
+    const std::string large = "{\"schemaVersion\":1,\"x\":\"" +
+                              std::string(100000, 'a') + "\"}";
+    bool opened = false, rotated = false, rejected = false, reopened = false;
+    bool paged = false, expired = false;
+    {
+        EngineStore store;
+        opened = validSecurity &&
+            store.Open(directory, L"events", 256 * 1024, security, &error);
+        if (opened) {
+            rotated = store.Append({large, large, large}, &written, &error) &&
+                written == 3 && store.Rollovers() == 1;
+            const EngineStorePage first = store.Read("", 1, 220000);
+            const EngineStorePage second = store.Read(first.nextCursor, 2, 220000);
+            paged = first.items.size() == 1 &&
+                second.items.size() == 2 && second.error.empty();
+            if (store.Append({large, large}, &written, &error))
+                expired = store.Read(first.nextCursor, 1, 220000).cursorExpired;
+            rejected = !store.Append({"{}\n{}"}, &written, &error) &&
+                written == 0 && error == "invalid_store_record";
+        }
+    }
+    {
+        EngineStore store;
+        reopened = store.Open(directory, L"events", 256 * 1024,
+                              security, &error) &&
+                   store.Append({"{\"schemaVersion\":1,\"n\":4}"}, &written, &error) &&
+                   written == 1;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA currentData = {};
+    WIN32_FILE_ATTRIBUTE_DATA previousData = {};
+    const bool bounded = ::GetFileAttributesExW(current.c_str(),
+        GetFileExInfoStandard, &currentData) &&
+        ::GetFileAttributesExW(previous.c_str(), GetFileExInfoStandard,
+                               &previousData) &&
+        currentData.nFileSizeHigh == 0 &&
+        currentData.nFileSizeLow <= 256 * 1024 &&
+        previousData.nFileSizeHigh == 0 &&
+        previousData.nFileSizeLow <= 256 * 1024;
+    Check(r, "engine-store.open", opened);
+    Check(r, "engine-store.rotate", rotated);
+    Check(r, "engine-store.history-page", paged);
+    Check(r, "engine-store.history-expired", expired);
+    Check(r, "engine-store.reject-newline", rejected);
+    Check(r, "engine-store.reopen-bounded", reopened && bounded);
+    HANDLE oversized = ::CreateFileW(current.c_str(), FILE_APPEND_DATA, 0,
+                                      nullptr, OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+    const std::string extra(300000, 'x');
+    DWORD appended = 0;
+    const bool madeOversized = oversized != INVALID_HANDLE_VALUE &&
+        ::WriteFile(oversized, extra.data(), static_cast<DWORD>(extra.size()),
+                    &appended, nullptr) && appended == extra.size();
+    if (oversized != INVALID_HANDLE_VALUE) ::CloseHandle(oversized);
+    EngineStore refusedStore;
+    Check(r, "engine-store.refuse-oversized-existing",
+          madeOversized &&
+          !refusedStore.Open(directory, L"events", 256 * 1024, security,
+                             &error) && error == "store_current_oversized");
+    (void)::DeleteFileW(current.c_str());
+    (void)::DeleteFileW(previous.c_str());
+    (void)::RemoveDirectoryW(directory.c_str());
+}
+
+void CheckEngineOperations(TestResult& r) {
+    using namespace wintcp;
+    EngineOperations separate;
+    separate.SetEpoch("separate");
+    const auto collector = separate.Submit("uac", "", "", 0, "collector.start");
+    const auto general = separate.Submit("save", "rev", "config", 0);
+    EngineOperation* generalNext = separate.TakeNextQueued(EngineOperationQueue::General);
+    Check(r, "engine-ops.collector-does-not-block-general",
+          generalNext != nullptr && generalNext->id == general.id &&
+          separate.HasQueued(EngineOperationQueue::Collector) &&
+          !separate.HasQueued(EngineOperationQueue::General));
+    EngineOperation* collectorNext = separate.TakeNextQueued(EngineOperationQueue::Collector);
+    Check(r, "engine-ops.collector-queue-selection", collectorNext != nullptr &&
+          collectorNext->id == collector.id && !separate.HasQueued());
+    EngineOperations ordered;
+    ordered.SetEpoch("ordered");
+    const auto a = ordered.Submit("a", "rev", "a", 100);
+    const auto b = ordered.Submit("b", "rev", "b", 90);
+    const auto c = ordered.Submit("c", "rev", "c", 110);
+    EngineOperation* takeA = ordered.TakeNextQueued();
+    const bool firstInOrder = takeA != nullptr && takeA->id == a.id;
+    EngineOperation* takeB = ordered.TakeNextQueued();
+    const bool secondInOrder = takeB != nullptr && takeB->id == b.id;
+    EngineOperation* takeC = ordered.TakeNextQueued();
+    Check(r, "engine-ops.fifo-despite-clock-change", firstInOrder &&
+          secondInOrder && takeC != nullptr && takeC->id == c.id &&
+          !ordered.HasQueued());
+    EngineOperations journal;
+    journal.SetEpoch("test-epoch");
+    const OperationSubmission first = journal.Submit("request-one", "rev-1",
+                                                       "config-a", 0);
+    Check(r, "engine-ops.create", first.disposition == OperationDisposition::Created &&
+          first.status == "queued" && !first.id.empty());
+    Check(r, "engine-ops.deduplicate",
+          journal.Existing("request-one", "rev-1", "config-a", 1).disposition ==
+              OperationDisposition::Duplicate);
+    Check(r, "engine-ops.reject-reused-id",
+          journal.Existing("request-one", "rev-1", "config-b", 1).disposition ==
+              OperationDisposition::Reused);
+    Check(r, "engine-ops.reject-cross-kind-reuse",
+          journal.Existing("request-one", "rev-1", "config-a", 1, "recipes")
+              .disposition == OperationDisposition::Reused);
+    EngineOperation* pending = journal.LatestQueued();
+    if (pending != nullptr) {
+        pending->status = "succeeded";
+        pending->completedAtMs = 100;
+    }
+    Check(r, "engine-ops.fake-clock-retention",
+          journal.Find(first.id, 50) != nullptr &&
+          journal.Find(first.id, 3600099) != nullptr &&
+          journal.Find(first.id, 3600100) == nullptr);
+    for (unsigned i = 0; i < 1000; ++i)
+        (void)journal.Submit("pending-" + std::to_string(i), "rev-1",
+                             "config-a", 3600101);
+    Check(r, "engine-ops.bounded-pending", journal.Size() == 1000 &&
+          journal.Submit("overflow", "rev-1", "config-a", 3600102).disposition ==
+              OperationDisposition::Full);
+    // Pending work remains addressable even after the completed-result TTL.
+    Check(r, "engine-ops.pending-not-expired",
+          journal.Find("test-epoch-2", 9000000) != nullptr);
+    EngineOperation* completed = journal.LatestQueued();
+    std::string completedId;
+    if (completed != nullptr) {
+        completedId = completed->id;
+        completed->status = "failed";
+        completed->completedAtMs = 9000000;
+    }
+    Check(r, "engine-ops.evict-terminal-at-cap",
+          journal.Submit("after-complete", "rev-1", "config-a", 9000001)
+              .disposition == OperationDisposition::Created &&
+          journal.Size() == 1000 &&
+          journal.Find(completedId, 9000001) == nullptr);
+}
+
+void CheckEngineClock(TestResult& r) {
+    using namespace wintcp;
+    EngineClock clock("epoch");
+    const ClockObservation first = clock.Observe(100000, 1000);
+    const ClockObservation steady = clock.Observe(101000, 2000);
+    Check(r, "engine-clock.steady-mapping", !first.changed &&
+          !steady.changed && first.mappingId == steady.mappingId &&
+          steady.anchorUtcMs == 100000);
+    const ClockObservation forward = clock.Observe(105500, 3000);
+    Check(r, "engine-clock.forward-jump", forward.changed &&
+          forward.adjustmentMs == 3500 && forward.changes == 1 &&
+          forward.mappingId != steady.mappingId);
+    const ClockObservation after = clock.Observe(106500, 4000);
+    Check(r, "engine-clock.new-mapping-stable", !after.changed &&
+          after.mappingId == forward.mappingId);
+    const ClockObservation backward = clock.Observe(100000, 5000);
+    Check(r, "engine-clock.backward-jump", backward.changed &&
+          backward.adjustmentMs == -7500 && backward.changes == 2);
+    const ClockObservation monotonicReset = clock.Observe(101000, 4000);
+    Check(r, "engine-clock.monotonic-reset", monotonicReset.changed &&
+          monotonicReset.changes == 3);
+}
+
+void CheckRecipeModel(TestResult& r) {
+    using namespace wintcp;
+    RecipeDef recipe;
+    recipe.id = "watch-app";
+    recipe.name = "Example app";
+    recipe.imagePath = "C:\\Apps\\Example.exe";
+    recipe.enabled = true;
+    std::string error;
+    std::vector<RecipeDef> parsed;
+    const std::string saved = FormatRecipes({recipe});
+    Check(r, "recipe.roundtrip", ParseRecipes(saved, &parsed, &error) &&
+          parsed.size() == 1 && parsed[0].imagePath == recipe.imagePath &&
+          parsed[0].enabled);
+    Check(r, "recipe.revision-changes-on-update",
+          RecipesRevision({recipe}) != RecipesRevision({}) &&
+          RecipesRevision({recipe}) == RecipesRevision(parsed));
+    RecipeDef disabled = recipe;
+    disabled.enabled = false;
+    std::vector<RecipeDef> changed;
+    Check(r, "recipe.change-create-disabled",
+          ApplyRecipeChange({}, "create", FormatRecipes({disabled}),
+                            &changed, &error) && changed.size() == 1 &&
+          !changed[0].enabled && changed[0].revision == 1);
+    Check(r, "recipe.change-reject-duplicate",
+          !ApplyRecipeChange(changed, "create", FormatRecipes({disabled}),
+                             &parsed, &error) && error == "recipe_exists");
+    Check(r, "recipe.change-enable-revision",
+          ApplyRecipeChange(changed, "enable", disabled.id, &parsed, &error) &&
+          parsed.size() == 1 && parsed[0].enabled && parsed[0].revision == 2);
+    Check(r, "recipe.change-remove",
+          ApplyRecipeChange(parsed, "remove", disabled.id, &changed, &error) &&
+          changed.empty());
+    RecipeDef edited = disabled;
+    edited.imagePath = "C:\\Apps\\Changed.exe";
+    edited.revision = 2;
+    RecipeDef unsafe = edited;
+    unsafe.enabled = true;
+    Check(r, "recipe.update-requires-review",
+          ValidateRecipeUpdate({disabled}, {edited}, &error) &&
+          !ValidateRecipeUpdate({disabled}, {unsafe}, &error) &&
+          error == "changed_recipe_requires_review");
+    edited.revision = 1;
+    Check(r, "recipe.update-requires-increment",
+          !ValidateRecipeUpdate({disabled}, {edited}, &error) &&
+          error == "recipe_revision_conflict");
+    Check(r, "recipe.update-new-disabled",
+          !ValidateRecipeUpdate({}, {recipe}, &error) &&
+          error == "new_recipe_must_start_disabled");
+    Check(r, "recipe.unknown-trigger-rejected",
+          !ParseRecipes("WinTCP-Recipes:1\nwatch-app|1|1|arbitrary|60|" +
+                        std::string("416263") + "|433a5c412e657865\n",
+                        &parsed, &error) && error == "unsupported_trigger");
+    Check(r, "recipe.duplicate-rejected",
+          !ParseRecipes(saved + saved.substr(17), &parsed, &error));
+    RecipeDef invalid = recipe;
+    invalid.imagePath = "Example.exe";
+    Check(r, "recipe.requires-full-path", !ValidateRecipe(invalid, &error));
+    NetworkEvent event;
+    event.kind = NetworkEventKind::EndpointObserved;
+    event.transport = "tcp";
+    event.tcpState = "established";
+    event.process.pid = 42;
+    event.process.creationTimeKnown = true;
+    event.process.creationTimeFileTime = 123;
+    event.process.imagePath = recipe.imagePath;
+    event.remote = {"198.51.100.20", 443, 0, true};
+    event.monotonicNs = 1000000000ULL;
+    RecipeEvaluator evaluator;
+    event.firstObservedMidSession = true;
+    Check(r, "recipe.no-baseline-storm", !evaluator.Evaluate(recipe, event).fire);
+    event.firstObservedMidSession = false;
+    const RecipeHit first = evaluator.Evaluate(recipe, event);
+    Check(r, "recipe.snapshot-coverage-honest", first.fire &&
+          first.coverage == "snapshot_tcp_appearance_direction_unknown");
+    const std::string notice = RecipeNotificationJson(recipe, event, first,
+                                                        "epoch:notification-1");
+    Check(r, "recipe.notification-honest", notice.find("direction and connection attempt are not established") != std::string::npos &&
+          notice.find("\"acknowledged\":false") != std::string::npos);
+    event.monotonicNs += 1000000000ULL;
+    const RecipeHit duplicate = evaluator.Evaluate(recipe, event);
+    Check(r, "recipe.cooldown", duplicate.matched && !duplicate.fire &&
+          duplicate.suppressed == 1);
+    const auto checkpoint = evaluator.Checkpoint(event.monotonicNs, 10000);
+    RecipeEvaluator resumed;
+    Check(r, "recipe.cooldown-checkpoint-restores", resumed.Restore(checkpoint,
+        event.monotonicNs + 1000000000ULL, 11000, &error));
+    NetworkEvent resumedEvent = event;
+    resumedEvent.monotonicNs += 1000000000ULL;
+    const auto resumedHit = resumed.Evaluate(recipe, resumedEvent);
+    Check(r, "recipe.restart-retains-cooldown-and-count", !resumedHit.fire &&
+        resumedHit.suppressed == 2);
+    RecipeEvaluator rolledBack;
+    Check(r, "recipe.clock-rollback-conservative", rolledBack.Restore(checkpoint,
+        event.monotonicNs, 9000, &error) && !rolledBack.Evaluate(recipe, event).fire);
+    Check(r, "recipe.bad-checkpoint-atomic", !resumed.Restore(checkpoint + "bad\n",
+        event.monotonicNs, 10000, &error) && resumed.RememberedKeys() == 1);
+    resumed.Reconcile({recipe});
+    Check(r, "recipe.unchanged-revision-preserves-cooldown", resumed.RememberedKeys() == 1);
+    RecipeDef revised = recipe;
+    ++revised.revision;
+    resumed.Reconcile({revised});
+    Check(r, "recipe.changed-revision-clears-checkpoint", resumed.RememberedKeys() == 0);
+    Check(r, "recipe.restore-for-delete", resumed.Restore(checkpoint,
+        event.monotonicNs, 10000, &error));
+    resumed.Reconcile({});
+    Check(r, "recipe.deleted-rule-clears-checkpoint", resumed.RememberedKeys() == 0);
+    RecipeEvaluator elapsed;
+    Check(r, "recipe.expired-checkpoint-does-not-suppress", elapsed.Restore(checkpoint,
+        event.monotonicNs + 90000000000000ULL, 90010000, &error) &&
+        elapsed.RememberedKeys() == 0);
+    event.process.creationTimeFileTime = 124;
+    Check(r, "recipe.pid-reuse", evaluator.Evaluate(recipe, event).fire);
+    event.remote.address = "127.0.0.1";
+    Check(r, "recipe.loopback-excluded", !evaluator.Evaluate(recipe, event).fire);
+    recipe.trigger = RecipeTrigger::NewListener;
+    event.remote.known = false;
+    event.tcpState = "listen";
+    event.local = {"0.0.0.0", 8080, 0, true};
+    const RecipeHit listener = evaluator.Evaluate(recipe, event);
+    Check(r, "recipe.new-listener", listener.fire &&
+          listener.coverage == "snapshot_listener_binding");
+    event.local.port = 8081;
+    Check(r, "recipe.listener-endpoint-dedupe", evaluator.Evaluate(recipe, event).fire);
+    RecipeEvaluator bounded;
+    for (std::uint64_t i = 1; i <= 10005; ++i) {
+        event.process.creationTimeFileTime = i;
+        event.monotonicNs = i * 1000000000ULL;
+        (void)bounded.Evaluate(recipe, event);
+    }
+    Check(r, "recipe.remembered-keys-bounded", bounded.RememberedKeys() == 10000);
+}
+
+void CheckLifecycleFlows(TestResult& r) {
+    using namespace wintcp;
+    const auto observation = [](LifecycleType type, std::uint64_t sequence, std::uint64_t qpc) {
+        TraceObservation item;
+        item.sequence = sequence;
+        item.sourceQpc = qpc;
+        item.decoded.type = type;
+        item.decoded.pid = 42;
+        item.decoded.family = "ipv4";
+        item.decoded.source = {"192.0.2.1", 50000, 0, true};
+        item.decoded.destination = {"198.51.100.2", 443, 0, true};
+        item.decoded.correlationKeyKnown = true;
+        item.decoded.correlationKey = 7;
+        item.process = {42, 1000, true, "C:\\Apps\\Example.exe"};
+        return item;
+    };
+    LifecycleFlowModel model("flows", 1000);
+    Check(r, "lifecycle-flow.buffered-source-not-prematurely-flushed",
+          model.Push(observation(LifecycleType::TcpConnect, 1, 1000), 10000).empty() &&
+          model.Push(observation(LifecycleType::TcpDisconnect, 2, 1100), 10001).empty());
+    const auto first = model.Drain(10300);
+    Check(r, "lifecycle-flow.short-connect-close",
+          first.size() == 2 && first[0].lifecycle.flowId == first[1].lifecycle.flowId &&
+          first[0].lifecycle.kind == NetworkEventKind::ConnectionEstablished &&
+          first[1].lifecycle.kind == NetworkEventKind::ConnectionClosed &&
+          !first[1].lifecycle.midSession && first[0].lifecycle.roleConfidence == "source_semantics");
+    (void)model.Push(observation(LifecycleType::TcpDisconnect, 3, 2100), 11000);
+    (void)model.Push(observation(LifecycleType::TcpConnect, 4, 2000), 11001);
+    const auto reordered = model.Drain(11300);
+    Check(r, "lifecycle-flow.close-before-connect-reordered",
+          reordered.size() == 2 && reordered[0].sequence == 4 && reordered[1].sequence == 3 &&
+          reordered[0].lifecycle.flowId == reordered[1].lifecycle.flowId &&
+          !reordered[1].lifecycle.incomplete);
+    (void)model.Push(observation(LifecycleType::TcpConnect, 5, 3000), 12000);
+    (void)model.Push(observation(LifecycleType::TcpDisconnect, 6, 3100), 12001);
+    const auto reused = model.Drain(12300);
+    Check(r, "lifecycle-flow.tuple-reuse-new-generation",
+          first.size() == 2 && reused.size() == 2 &&
+          first[0].lifecycle.flowId != reused[0].lifecycle.flowId &&
+          first[0].lifecycle.generation != reused[0].lifecycle.generation);
+    const auto late = model.Push(observation(LifecycleType::TcpDisconnect, 7, 2500), 13000);
+    Check(r, "lifecycle-flow.late-orphan-explicit",
+          late.size() == 1 && late[0].lifecycle.late && late[0].lifecycle.incomplete &&
+          late[0].lifecycle.midSession && model.LateRecords() == 1);
+    auto nextProcess = observation(LifecycleType::TcpConnect, 8, 5000);
+    nextProcess.process.creationTimeFileTime = 2000;
+    auto otherProcessClose = observation(LifecycleType::TcpDisconnect, 9, 5100);
+    otherProcessClose.process.creationTimeFileTime = 3000;
+    (void)model.Push(nextProcess, 14000);
+    (void)model.Push(otherProcessClose, 14001);
+    const auto pidReuse = model.Drain(14300);
+    Check(r, "lifecycle-flow.pid-reuse-not-merged",
+          pidReuse.size() == 2 && pidReuse[0].lifecycle.flowId != pidReuse[1].lifecycle.flowId &&
+          pidReuse[1].lifecycle.midSession);
+    (void)model.Push(observation(LifecycleType::UdpSend, 10, 7000), 15000);
+    const auto udp = model.Drain(15300);
+    Check(r, "lifecycle-flow.udp-is-activity",
+          udp.size() == 1 && udp[0].lifecycle.kind == NetworkEventKind::UdpActivity &&
+          udp[0].lifecycle.flowId.empty());
+    Check(r, "lifecycle-flow.source-replay-not-counted-twice",
+          model.Push(observation(LifecycleType::UdpSend, 10, 7000), 15301).empty());
+    LifecycleFlowModel bounded("bounded", 1000, 1, 1);
+    (void)bounded.Push(observation(LifecycleType::TcpConnect, 1, 1000), 1000);
+    const auto forced = bounded.Push(observation(LifecycleType::TcpConnect, 2, 1100), 1100);
+    (void)bounded.Drain(1400);
+    Check(r, "lifecycle-flow.bounded-capacity-visible",
+          forced.size() == 1 && forced[0].lifecycle.incomplete &&
+          bounded.CapacityFlushes() == 1 && bounded.FlowCount() == 1 && bounded.EvictedFlows() == 1);
+    if (!first.empty()) {
+        const auto json = TraceObservationJson(first[0], "flows", 1000);
+        Check(r, "lifecycle-flow.derived-evidence-refers-to-source",
+              json.find("\"derived\":{\"schemaVersion\":1") != std::string::npos &&
+              json.find("\"evidenceIds\":[\"flows:etw-1\"]") != std::string::npos);
+    }
+}
+
+void CheckProcessInstances(TestResult& r) {
+    using namespace wintcp;
+    ProcessInstanceCache cache(3);
+    NetworkProcessIdentity old;
+    old.pid = 42;
+    old.creationTimeFileTime = 1000;
+    old.creationTimeKnown = true;
+    old.imagePath = "C:\\Apps\\Old.exe";
+    NetworkProcessIdentity current = old;
+    current.creationTimeFileTime = 2000;
+    current.imagePath = "C:\\Apps\\New.exe";
+    NetworkProcessIdentity found;
+    Check(r, "process-instance.verified-interval",
+          cache.Remember(old, 100, 200) && cache.Find(42, 150, &found) &&
+          found.creationTimeFileTime == 1000 && !cache.Find(42, 99, &found) &&
+          !cache.Find(42, 201, &found));
+    Check(r, "process-instance.pid-reuse-keeps-historical-owner",
+          cache.Remember(current, 300, 400) && cache.Find(42, 150, &found) &&
+          found.imagePath == old.imagePath && cache.Find(42, 350, &found) &&
+          found.imagePath == current.imagePath && !cache.Find(42, 250, &found));
+    Check(r, "process-instance.live-handle-revalidation",
+          cache.RevalidateLive(old, 210, 240) && cache.Find(42, 230, &found) &&
+          found.creationTimeFileTime == old.creationTimeFileTime);
+    Check(r, "process-instance.earlier-verified-range",
+          cache.Remember(old, 80, 240) && cache.Find(42, 90, &found));
+    NetworkProcessIdentity conflict = old;
+    conflict.creationTimeFileTime = 3000;
+    Check(r, "process-instance.contradiction-invalidates-pid",
+          !cache.Remember(conflict, 220, 320) && !cache.Find(42, 150, &found) &&
+          !cache.Find(42, 350, &found));
+    old.creationTimeKnown = false;
+    Check(r, "process-instance.unverified-identity-refused", !cache.Remember(old, 100, 200));
+    ProcessInstanceCache bounded(2);
+    old.creationTimeKnown = true;
+    current.pid = 43;
+    conflict.pid = 44;
+    Check(r, "process-instance.bounded-eviction",
+          bounded.Remember(old, 100, 200) && bounded.Remember(current, 300, 400) &&
+          bounded.Remember(conflict, 500, 600) && bounded.Size() == 2 &&
+          !bounded.Find(42, 150, &found) && bounded.Find(43, 350, &found));
+    current.imagePath = "C:\\Apps\\Changed.exe";
+    Check(r, "process-instance.conflicting-image-invalidates-instance",
+          !bounded.RevalidateLive(current, 410, 420) &&
+          !bounded.HasInstance(current.pid, current.creationTimeFileTime));
+}
+
+void CheckLifecycleDecoder(TestResult& r) {
+    using namespace wintcp;
+    struct Fields final : EventPropertyReader {
+        std::map<std::wstring, std::vector<unsigned char>> values;
+        bool Read(const wchar_t* name, std::vector<unsigned char>* bytes) override {
+            const auto found = values.find(name);
+            if (found == values.end()) return false;
+            *bytes = found->second;
+            return true;
+        }
+    } fields;
+    fields.values[L"PID"] = {42, 0, 0, 0};
+    fields.values[L"saddr"] = {127, 0, 0, 1};
+    fields.values[L"daddr"] = {198, 51, 100, 20};
+    fields.values[L"sport"] = {0xc0, 0x00};
+    fields.values[L"dport"] = {0x01, 0xbb};
+    fields.values[L"connid"] = {7, 0, 0, 0, 0, 0, 0, 0};
+    EVENT_HEADER header = {};
+    header.ProviderId = kTcpIpProviderGuid;
+    header.ProcessId = 777;
+    header.Flags = EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER;
+    header.EventDescriptor.Version = 2;
+    header.EventDescriptor.Opcode = 12;
+    DecodedLifecycleRecord decoded;
+    std::string error;
+    Check(r, "lifecycle.payload-pid-and-network-order",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Decoded &&
+          decoded.pid == 42 && decoded.type == LifecycleType::TcpConnect &&
+          decoded.source.address == "127.0.0.1" && decoded.source.port == 49152 &&
+          decoded.destination.address == "198.51.100.20" && decoded.destination.port == 443 &&
+          decoded.correlationKeyKnown && decoded.correlationKey == 7);
+    TraceObservation observation;
+    observation.sequence = 7;
+    observation.sourceQpc = 123456;
+    observation.receivedUtcMs = 100000;
+    observation.provider = header.ProviderId;
+    observation.descriptor = header.EventDescriptor;
+    observation.headerFlags = header.Flags;
+    observation.decoded = decoded;
+    const std::string evidence = TraceObservationJson(observation, "fixture", 10000000);
+    Check(r, "lifecycle.raw-evidence-preserves-uncertainty",
+          evidence.find("\"eventId\":\"fixture:etw-7\"") != std::string::npos &&
+          evidence.find("\"normalized\":false") != std::string::npos &&
+          evidence.find("\"pid\":42") != std::string::npos &&
+          evidence.find("\"creationTimeFileTime\":null") != std::string::npos &&
+          evidence.find("\"local\":null,\"remote\":null") != std::string::npos &&
+          evidence.find("\"sourceEndpoint\":{\"address\":\"127.0.0.1\"") != std::string::npos);
+    observation.process.pid = 42;
+    observation.process.creationTimeKnown = true;
+    observation.process.creationTimeFileTime = 1234;
+    observation.process.imagePath = "C:\\Apps\\Example.exe";
+    observation.identityReason = "verified_cached_interval";
+    observation.occurredFileTime = 116444736010000000ULL;
+    observation.timeReason.clear();
+    const std::string attributed = TraceObservationJson(observation, "fixture", 10000000);
+    Check(r, "lifecycle.verified-attribution-and-mapped-time",
+          attributed.find("\"creationTimeFileTime\":\"1234\"") != std::string::npos &&
+          attributed.find("\"identityEvidence\":\"verified_cached_interval\"") != std::string::npos &&
+          attributed.find("\"occurredAtUtc\":\"1970-01-01T00:00:01.000Z\"") != std::string::npos);
+    header.EventDescriptor.Version = 255;
+    Check(r, "lifecycle.reject-unknown-version",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Unsupported &&
+          decoded.pid == 0);
+    header.EventDescriptor.Version = 2;
+    fields.values[L"dport"] = {0xbb};
+    Check(r, "lifecycle.reject-malformed-port",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Malformed &&
+          decoded.pid == 0);
+    fields.values[L"dport"] = {0x01, 0xbb};
+    fields.values[L"connid"] = {7, 0, 0, 0};
+    Check(r, "lifecycle.reject-pointer-width-mismatch",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Malformed);
+    header.Flags = EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_32_BIT_HEADER;
+    Check(r, "lifecycle.decode-32bit-event",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Decoded);
+    header.Flags |= EVENT_HEADER_FLAG_64_BIT_HEADER;
+    Check(r, "lifecycle.reject-ambiguous-architecture",
+          ClassifyLifecycleEvent(header) == LifecycleType::Unsupported);
+    header.Flags = EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER;
+    header.EventDescriptor.Opcode = 28;
+    fields.values[L"connid"] = {7, 0, 0, 0, 0, 0, 0, 0};
+    fields.values[L"saddr"] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+    fields.values[L"daddr"] = {0x20,1,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,1};
+    Check(r, "lifecycle.ipv6-endpoints",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Decoded &&
+          decoded.family == "ipv6" && decoded.source.address == "::1" &&
+          decoded.destination.address == "2001:db8::1");
+    header.ProviderId = kProcessEventProviderGuid;
+    header.EventDescriptor.Version = 4;
+    header.EventDescriptor.Opcode = 3;
+    fields.values[L"ProcessId"] = {84, 0, 0, 0};
+    Check(r, "lifecycle.process-rundown-is-not-start",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Decoded &&
+          decoded.type == LifecycleType::ProcessRundown && decoded.pid == 84 &&
+          !decoded.source.known);
+    Check(r, "lifecycle.reject-null-record",
+          DecodeLifecycleRecord(nullptr, &decoded, &error) == EventDecodeResult::Malformed);
+}
+
+void CheckRestrictionModel(TestResult& r) {
+    using namespace wintcp;
+    RestrictionPlan plan;
+    plan.imagePath = "C:\\Apps\\Example.exe";
+    plan.userSid = "S-1-5-21-1-2-3-1001";
+    std::string error;
+    Check(r, "restriction.valid-exact-app", ValidateRestrictionPlan(plan, &error));
+    const std::string appHash = RestrictionPlanHash(plan);
+    plan.imageFileIdentity = "1:2:3:0:123:4:5";
+    Check(r, "restriction.file-identity-bound-to-plan",
+          RestrictionPlanHash(plan) != appHash && ValidateRestrictionPlan(plan, &error));
+    plan.imageFileIdentity.clear();
+    plan.remoteAddress = "198.51.100.20";
+    plan.remotePort = 443;
+    Check(r, "restriction.literal-peer", ValidateRestrictionPlan(plan, &error) &&
+          RestrictionPlanHash(plan) != appHash);
+    plan.remoteAddress = "example.com";
+    Check(r, "restriction.reject-hostname",
+          !ValidateRestrictionPlan(plan, &error) &&
+          error == "peer_must_be_literal_ip");
+    plan.remoteAddress.clear();
+    Check(r, "restriction.reject-port-without-peer",
+          !ValidateRestrictionPlan(plan, &error) && error == "port_requires_peer");
+    plan.remotePort = 0;
+    plan.imagePath = "C:\\Apps\\..\\Other.exe";
+    Check(r, "restriction.reject-noncanonical-path",
+          !ValidateRestrictionPlan(plan, &error) &&
+          error == "image_path_not_canonical");
+    Check(r, "restriction.monotonic-expiry",
+          !RestrictionExpired(1000, 100000, 59999, 1000, 60) &&
+          RestrictionExpired(1000, 100000, 61000, 1000, 60) &&
+          RestrictionExpired(1000, 100000, 5000, 100000, 60) &&
+          RestrictionExpired(1000, 100000, 999, 1000, 60));
+}
+
+void CheckRestrictionLease(TestResult& r) {
+    using namespace wintcp;
+    struct FakeFilters final : RestrictionFilterBackend {
+        std::uint64_t next = 1;
+        std::vector<std::uint64_t> installed;
+        bool failRemove = false;
+        bool Install(const RestrictionPlan&, std::vector<std::uint64_t>* ids,
+                     std::string* error) override {
+            ids->assign(1, next++);
+            installed.push_back(ids->front());
+            error->clear();
+            return true;
+        }
+        bool Remove(const std::vector<std::uint64_t>& ids,
+                    std::string* error) override {
+            if (failRemove) { *error = "fake_failure"; return false; }
+            for (std::uint64_t id : ids)
+                installed.erase(std::remove(installed.begin(), installed.end(), id),
+                                installed.end());
+            error->clear();
+            return true;
+        }
+        void Close() override { installed.clear(); }
+    } filters;
+    RestrictionLeaseController broker(&filters);
+    RestrictionPlan plan;
+    plan.imagePath = "C:\\Apps\\Example.exe";
+    plan.userSid = "S-1-5-21-1-2-3-1001";
+    plan.durationSeconds = 60;
+    std::string error;
+    broker.Heartbeat({1000, 100000});
+    Check(r, "restriction.preview", broker.Preview(plan, "grant-1", {1000, 100000}, &error));
+    RestrictionPlan changed = plan;
+    changed.durationSeconds = 300;
+    Check(r, "restriction.plan-bound-one-use",
+          !broker.Apply(changed, "grant-1", "lease-1", "manual", {1001, 100001}, &error) &&
+          error == "approval_expired_or_changed" &&
+          !broker.Apply(plan, "grant-1", "lease-1", "manual", {1001, 100001}, &error));
+    Check(r, "restriction.two-independent-leases",
+          broker.Preview(plan, "grant-2", {1002, 100002}, &error) &&
+          broker.Apply(plan, "grant-2", "lease-1", "manual", {1003, 100003}, &error) &&
+          broker.Preview(plan, "grant-3", {1004, 100004}, &error) &&
+          broker.ApplyApproved("grant-3", "lease-2", "recipe", {1005, 100005}, &error) &&
+          filters.installed.size() == 2);
+    Check(r, "restriction.release-only-owned-lease",
+          broker.Release("lease-1", &error) && filters.installed.size() == 1 &&
+          broker.Active().size() == 1);
+    broker.Heartbeat({60000, 150000});
+    broker.Sweep({61005, 151005});
+    Check(r, "restriction.monotonic-expiry",
+          filters.installed.empty() && broker.Active().empty());
+    Check(r, "restriction.approval-timeout",
+          broker.Preview(plan, "grant-4", {70000, 160000}, &error) &&
+          !broker.Apply(plan, "grant-4", "lease-3", "manual", {100001, 190001}, &error) &&
+          error == "engine_heartbeat_missing");
+    broker.Heartbeat({200000, 290000});
+    Check(r, "restriction.heartbeat-close",
+          broker.Preview(plan, "grant-5", {200000, 290000}, &error) &&
+          broker.Apply(plan, "grant-5", "lease-4", "manual", {200001, 290001}, &error));
+    broker.Sweep({210000, 300000});
+    Check(r, "restriction.heartbeat-close-state",
+          broker.Active().empty() && filters.installed.empty());
+    Check(r, "restriction.outcomes-retained",
+          !broker.Changes().empty() && broker.Changes().back().state == "released" &&
+          broker.Changes().back().reason == "engine_heartbeat_lost");
+    bool sawExpiry = false, sawManualRelease = false;
+    std::uint64_t sequence = 0;
+    bool ordered = true;
+    for (const auto& change : broker.Changes()) {
+        ordered = ordered && change.sequence > sequence;
+        sequence = change.sequence;
+        sawExpiry = sawExpiry || change.state == "expired";
+        sawManualRelease = sawManualRelease || change.reason == "manual_release";
+    }
+    Check(r, "restriction.distinct-ordered-outcomes", ordered && sawExpiry && sawManualRelease);
+    FakeFilters rateFilters;
+    RestrictionLeaseController rateBroker(&rateFilters);
+    unsigned created = 0;
+    for (unsigned i = 0; i < 33; ++i) {
+        const RestrictionNow time{1000 + i, 100000 + i};
+        rateBroker.Heartbeat(time);
+        const std::string id = "rate-" + std::to_string(i);
+        if (rateBroker.Preview(plan, id, time, &error) &&
+            rateBroker.ApplyApproved(id, id, "manual", time, &error)) ++created;
+    }
+    Check(r, "restriction.creation-rate-limit", created == 32 &&
+          error == "restriction_creation_rate_limited");
 }
 
 void CheckT08Evaluator(TestResult& r) {
@@ -10772,6 +11559,18 @@ static const unsigned char kClientHello[] = {
     CheckSha256(r);
     CheckExposure(r);
     CheckMonitors(r);
+    CheckNetworkEvents(r);
+    CheckSnapshotEvents(r);
+    CheckEngineConfig(r);
+    CheckEngineStore(r);
+    CheckEngineOperations(r);
+    CheckEngineClock(r);
+    CheckRecipeModel(r);
+    CheckRestrictionModel(r);
+    CheckRestrictionLease(r);
+    CheckLifecycleDecoder(r);
+    CheckProcessInstances(r);
+    CheckLifecycleFlows(r);
     CheckT08Evaluator(r);
     CheckT11Evaluator(r);
     CheckT12Evaluator(r);
