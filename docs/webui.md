@@ -217,7 +217,7 @@ The Processes page lists the process snapshot, not only processes that own a con
 
 The Network connection menu also offers **Block this executable to this peer** when the selected live TCP connection has a known process lifetime and readable image path. The review scopes the rule to that executable, remote IP and remote port; the API revalidates the complete connection tuple and owning process lifetime before offering a one-use create action. This affects every instance of the executable for that peer and leaves existing connections open. When Windows also reports a service short name for that connection, **Block this service to this peer** adds both the executable and service scopes, which can distinguish one service hosted by `svchost.exe`. Scoped IPv6 literals that include a zone identifier are currently refused rather than risking loss of the interface scope.
 
-The Automations page provides scenario-oriented CLI playbooks, a workbench for local WinTCP scripts, and the audit trail. The playbooks are on-demand command examples; their scenario descriptions are not active detectors, and this page does not create or evaluate monitor rules. Scripts execute the adjacent `wintcp.exe` with bounded arguments and output. Sensitive actions require a separate confirmation and can still require administrator rights. For background connection-change logging, use the CLI `monitor start` command described in the [CLI guide](cli.md). The Web UI does not provide a persistent scheduler, cloud service, or remote notification service.
+The Automations page includes **Monitors**, **Engine**, **Restrictions**, **Event history**, scenario-oriented CLI playbooks, a workbench for local WinTCP scripts, and the audit trail. Monitors are persistent exact-executable rules managed by the optional per-user engine; currently supported triggers are sampled TCP endpoint appearances and TCP listeners. They generate entries in the local notification inbox, but do not yet send desktop alerts or automatically apply restrictions. Snapshot sightings can miss short connections and do not establish direction or connection attempts. The playbooks remain on-demand command examples, not active detectors. Scripts execute the adjacent `wintcp.exe` with bounded arguments and output. Sensitive actions require a separate confirmation and can still require administrator rights. For packet-level connection-change logging, use the CLI `monitor start` command described in the [CLI guide](cli.md). This page does not provide a general-purpose task scheduler, cloud service, or remote notification service.
 
 Firewall actions are explicit. The UI shows a preview before a supported rule is applied, records the action in the local audit trail, and does not elevate the process. Review the target and scope before confirming. Connection close is a separate action: it does not create a firewall rule.
 
@@ -269,3 +269,86 @@ is atomic with an external Windows Firewall edit, so changes made after the
 server's final comparison remain a platform race.
 
 For the CLI command set and exit codes, see the [CLI reference](cli.md). For the visual system and interface conventions, see the [Web UI design guide](webui-design.md).
+
+The Automations **Engine** tab reads the optional per-user snapshot engine. It
+shows its actual sample state and a small recent-events page. Start or stop it
+from the Engine or Monitors tab, or use `wintcp.exe engine start|stop`. The Web
+UI starts it as the current user without requesting elevation.
+
+Automations **Restrictions** manages temporary outbound blocks separately from
+permanent Firewall Rules. Start the engine, then click **Start collector (UAC)**
+or explicitly launch `wintcp.exe collector run` from an elevated terminal for
+that same Windows user; opening the dashboard alone never requests elevation.
+Preview an exact
+executable and optional literal peer/port/protocol, review the user SID and
+duration, and apply within 30 seconds. The panel lists active leases, filter
+counts, expiry countdowns, individual release, and release-all. Collector exit
+removes its dynamic filters; existing connections may continue. Active
+monitor recipes are not yet connected to this manual restriction flow.
+Collector controls and restriction mutations return `202` with an operation
+ID; the panel polls the shared engine operation journal for the final result.
+Each submission carries a request ID so a retry cannot apply the same plan
+twice. UAC and WFP calls run on a separate engine worker, allowing monitoring
+and recipe configuration to continue while a collector operation is pending.
+The Restrictions panel also pages through retained outcomes using
+`GET /api/restrictions/history?limit=30&cursor=...`. Reads require the session
+token. The collector keeps at most 1,024 changes; the engine copies them to
+bounded audit segments and checkpoints its cursor. Expiry, manual release,
+failure cleanup, and heartbeat loss have separate reasons. A lost broker or
+evicted change journal produces a coverage gap; an unavailable broker is not
+reported as a verified clean shutdown. Creation is limited to 32 leases per
+minute and 128 concurrent leases.
+Queued collector commands retain request and result audit records without
+storing preview confirmation tokens. Operation results include a separate
+audit status: an audit failure does not hide whether an action completed.
+Release and stop remain available when audit storage fails. A normal collector
+stop releases filters, disables new restrictions, and waits briefly for the
+engine's persisted final cursor before exiting.
+
+Automations **Event history** provides explicit engine, collector/UAC, and
+event-tracking controls. Its token-protected `/api/engine/lifecycle` endpoint
+pages through retained decoded ETW evidence. The engine writes two rotating
+8 MiB segments and checkpoints its source cursor; it does not insert these
+historical observations into the live endpoint table. This experimental view
+preserves raw QPC time, payload PID, source/destination fields, provider/version
+and loss gaps. Verified live-handle lifetime intervals retain creation time and
+executable path after process exit. Events outside a proven interval remain
+unattributed. QPC-to-UTC projections are included while the capture clock stays
+stable; a detected clock discontinuity disables new time-based attribution
+until tracing restarts. The engine also records a
+`source_clock_mapping_unstable` coverage gap before the first affected
+observation in a trace epoch; raw QPC timestamps remain available even when
+UTC projection is unavailable. A bounded 250 ms reorder window correlates TCP
+flow generations and labels late, mid-session, and incomplete chronology. Source
+records remain intact; derived records reference their evidence IDs. UDP stays
+activity evidence. Publication cursors remain monotonic even when source
+sequences reorder. Source-based endpoint roles are explicitly marked and
+these records cannot yet authorize Active recipes.
+`/api/engine`, `/api/engine/capabilities`, and `/api/engine/events` require the
+page's session token even for GET. If the process is absent they return an
+explicit unavailable response. Its current event feed is sampled endpoint
+history only; an appearance is not evidence of an attempted connection.
+The separate token-protected `/api/engine/history` reads retained NDJSON
+segments across engine restarts. Pages are limited to 500 records and a bounded
+response size; cursors identify a file generation and byte offset, and return
+HTTP 410 if rotation evicts that generation. The Engine tab offers sequential
+pages under **Persisted observations**. Corrupt/incomplete records are reported
+as errors rather than silently included as valid events. An unfinished line
+at the active file tail is withheld and flagged as `partialTail: true` until
+its writer completes it.
+Monitor state checkpoints retain remaining cooldowns and suppressed counts in
+the engine's local storage. Restart restores those deadlines without restoring
+privileged authorization. Offline time reduces a cooldown only when monotonic
+and UTC elapsed time agree; clock uncertainty conservatively retains the
+remaining cooldown. Invalid or unwritable checkpoints are reported through
+the engine notification error field. This is not transactional exactly-once
+notification delivery across a crash between checkpoint and inbox writes.
+
+The tab also displays engine snapshot interval and live-ring limits. Saving
+uses a unique request ID and the displayed SHA-256 configuration revision;
+stale edits are refused with HTTP 409. `POST /api/engine/config` returns 202
+and an operation ID, which can be polled through
+`GET /api/engine/operations/{id}`. A successful save persists atomically but
+applies after an explicit engine restart. The config and operation GETs require
+the session token; config POST uses the normal mutation-origin checks. No
+settings change grants elevation or enables a privileged collector.
