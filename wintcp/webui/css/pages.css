@@ -462,6 +462,15 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 }
 
 /* ---- Automations page ---- */
+.engine-status { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+.engine-config-form { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin: 0.75rem 0; }
+.engine-config-form label { display: grid; gap: 0.25rem; min-width: 10rem; font-size: 0.8rem; }
+.engine-config-form input { width: 100%; min-height: 2rem; padding: 0.35rem 0.5rem; color: var(--foreground); background: var(--background); border: 1px solid var(--border); border-radius: var(--radius); }
+.engine-event-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.25rem; }
+.engine-event-row { display: grid; grid-template-columns: minmax(9rem, auto) minmax(8rem, 1fr) minmax(8rem, 1fr) auto; gap: 0.5rem 0.75rem; align-items: center; padding: 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+.engine-event-row > * { min-width: 0; overflow-wrap: anywhere; }
+.engine-event-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 700px) { .engine-event-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 .auto-layout {
   display: flex;
   flex-direction: column;
@@ -1056,3 +1065,8 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 .firewall-rule-profiles legend { padding: 0 0.25rem; }
 .firewall-rule-profile { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.875rem; }
 @media (max-width: 42rem) { .firewall-rule-editor-grid { grid-template-columns: minmax(0, 1fr); } }
+/* ---- Lifecycle evidence ---- */
+.lifecycle-event { display: grid; gap: .5rem; padding: .75rem; border-bottom: 1px solid var(--border); }
+.lifecycle-event header { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+.lifecycle-event p { margin: 0; overflow-wrap: anywhere; }
+.lifecycle-evidence { max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
