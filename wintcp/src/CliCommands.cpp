@@ -93,7 +93,7 @@ const char* kHelp =
     "Library (bookmarks, presets, export, GeoIP):\r\n"
     "  bookmark | preset | export | geoip\r\n"
     "\r\n"
-    "Other: version | doctor | alert | webui | help\r\n"
+    "Other: version | doctor | alert | monitor | engine | webui | help\r\n"
     "\r\n"
     "Exit codes: 0 ok, 1 failure or empty result, 2 bad arguments,\r\n"
     "            3 refused (mutating command without --yes).\r\n"
@@ -871,6 +871,27 @@ bool ParseEventMask(const std::wstring& v, unsigned* mask) {
 // name is not a command, so the caller can report it precisely.
 bool PrintCommandHelp(const std::wstring& cmd) {
     const std::wstring canon = CanonicalCommand(cmd);
+    if (canon == L"collector") {
+        WriteOut("collector - optional elevated helper (experimental)\r\n"
+                 "Usage: wintcp.exe collector start|run|status|stop|events-start|events-stop\r\n"
+                 "Start the same-user engine first. Restrictions require a separate preview and explicit confirmation.\r\n");
+        return true;
+    }
+    if (canon == L"restrict") {
+        WriteOut("restrict - reviewed, time-limited outbound app restriction\r\n"
+                 "Usage: wintcp.exe restrict preview --app PATH [--peer IP] [--port N] [--proto tcp|udp|both] [--minutes 1..1440]\r\n"
+                 "       wintcp.exe restrict apply TOKEN --yes | list | release ID --yes | release-all --yes\r\n"
+                 "Requires an explicitly started same-user elevated collector.\r\n");
+        return true;
+    }
+    if (canon == L"engine") {
+        WriteOut("engine - optional per-user endpoint observation process\r\n"
+                 "Usage: wintcp.exe engine start|run|status|events|stop\r\n"
+                 "Events are snapshot sightings, not connection attempts or failures.\r\n"
+                 "It runs without elevation and keeps its bounded event history\r\n"
+                 "while both UIs are closed. No startup task is installed.\r\n");
+        return true;
+    }
     for (size_t i = 0; i < kCommandHelpCount; ++i) {
         std::string names = kCommandHelps[i].names;
         // Match any alias in the space-separated list.
