@@ -153,8 +153,20 @@ BEGIN
         MENUITEM "&Bookmark this connection",    IDM_CTX_BOOKMARK
         MENUITEM "&Edit bookmark note...",       IDM_CTX_NOTE
     END
+    POPUP "&Monitoring"
+    BEGIN
+        MENUITEM "&Start monitoring engine", IDM_MONITOR_ENGINE_START
+        MENUITEM "S&top monitoring engine...", IDM_MONITOR_ENGINE_STOP
+        MENUITEM "Engine &status...", IDM_HELP_ENGINE_STATUS
+        MENUITEM SEPARATOR
+        MENUITEM "Start &collector (UAC)", IDM_MONITOR_COLLECTOR_START
+        MENUITEM "Stop c&ollector...", IDM_MONITOR_COLLECTOR_STOP
+        MENUITEM "Temporary restriction &status...", IDM_MONITOR_RESTRICTION_STATUS
+        MENUITEM "&Release all temporary restrictions...", IDM_MONITOR_RELEASE_ALL
+    END
     POPUP "&Help"
     BEGIN
+        MENUITEM "Monitoring &engine status...", IDM_HELP_ENGINE_STATUS
         MENUITEM "&Keyboard shortcuts\tF1",  IDM_HELP_SHORTCUTS
         MENUITEM SEPARATOR
         MENUITEM "&About WinTCP...",         IDM_HELP_ABOUT
