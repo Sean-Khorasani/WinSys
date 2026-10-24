@@ -30,6 +30,8 @@
 #include "PromptDialog.h"  // one-line text prompt
 #include "BlockedPeersDialog.h"  // View > Blocked peers...
 #include "EmptyStateActions.h"   // the empty-state button decision
+#include "EngineRuntime.h"       // optional per-user monitoring engine status
+#include "CollectorRuntime.h"
 #include "RowAccessible.h"       // per-row MSAA names over the list
 #include "Elevate.h"             // Reelevate for the traffic case
 #include "ExposureScore.h"       // the exposure badge predicate
@@ -48,6 +50,22 @@ namespace wintcp {
 using namespace mw;
 
 const wchar_t* MainWindow::kClassName = L"WinTcpViewerMainWindow";
+
+namespace {
+std::wstring EngineStatusField(const std::string& json, const char* field) {
+    const std::string marker = std::string("\"") + field + "\":";
+    const size_t begin = json.find(marker);
+    if (begin == std::string::npos) return L"unknown";
+    const size_t value = begin + marker.size();
+    const bool quoted = value < json.size() && json[value] == '"';
+    const size_t start = value + (quoted ? 1 : 0);
+    const size_t end = quoted ? json.find('"', start) :
+        json.find_first_not_of("0123456789", start);
+    const size_t finish = end == std::string::npos ? json.size() : end;
+    if (finish <= start || finish - start > 128) return L"unknown";
+    return Utf8ToWide(json.substr(start, finish - start).c_str());
+}
+}  // namespace
 
 std::shared_ptr<WorkerSink> MainWindow::Sink() const {
     if (sink_ == nullptr) sink_ = std::make_shared<WorkerSink>();
@@ -2375,6 +2393,97 @@ void MainWindow::OnCommand(WORD id, WORD notifyCode, HWND ctl) {
         case IDM_HELP_ABOUT:
             ShowAboutBox();
             break;
+        case IDM_HELP_ENGINE_STATUS: {
+            std::string status;
+            if (EngineRequestStatus(&status)) {
+                const std::wstring text =
+                    L"The optional monitoring engine is running for this Windows session.\n\n"
+                    L"Samples: " + EngineStatusField(status, "samples") +
+                    L"\nEvents retained: " + EngineStatusField(status, "eventsRetained") +
+                    L"\nLast successful sample: " +
+                    EngineStatusField(status, "lastSampleUtc") +
+                    L"\n\nThese are sampled endpoint sightings. They do not prove connection attempts or failures.\n"
+                    L"Use Monitoring > Stop monitoring engine to pause collection.";
+                ::MessageBoxW(hwnd_, text.c_str(), L"WinTCP - Monitoring engine", MB_OK);
+            } else {
+                ::MessageBoxW(hwnd_,
+                    L"The optional monitoring engine is not reachable for this user/session.\n\n"
+                    L"Use Monitoring > Start monitoring engine. Normal endpoint inspection still works.",
+                    L"WinTCP - Monitoring engine", MB_OK | MB_ICONINFORMATION);
+            }
+            break;
+        }
+        case IDM_MONITOR_ENGINE_START:
+        case IDM_MONITOR_ENGINE_STOP: {
+            const bool start = id == IDM_MONITOR_ENGINE_START;
+            if (!start && ::MessageBoxW(hwnd_,
+                L"Pause background monitoring? Saved recipes remain available.\n"
+                L"Use Release all temporary restrictions to end restrictions immediately.",
+                L"WinTCP - Stop monitoring", MB_YESNO | MB_ICONQUESTION) != IDYES) break;
+            std::string error;
+            const bool ok = start ? EngineStart(&error) : EngineStop(&error);
+            const std::wstring message = ok ? (start ? L"Monitoring engine is running." :
+                L"Monitoring engine stop requested.") : L"Could not change engine state: " +
+                Utf8ToWide(error.c_str());
+            ::MessageBoxW(hwnd_, message.c_str(), L"WinTCP - Monitoring",
+                MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+            break;
+        }
+        case IDM_MONITOR_COLLECTOR_START:
+        case IDM_MONITOR_COLLECTOR_STOP: {
+            const bool start = id == IDM_MONITOR_COLLECTOR_START;
+            if (!start && ::MessageBoxW(hwnd_,
+                L"Stop the optional collector and release its temporary restrictions?",
+                L"WinTCP - Stop collector", MB_YESNO | MB_ICONQUESTION) != IDYES) break;
+            const std::string request = "gui-" + std::to_string(::GetCurrentProcessId()) +
+                '-' + std::to_string(::GetTickCount64());
+            std::string reply;
+            if (!EngineSubmitCollector(request, start ? "start" : "stop", "", &reply) ||
+                reply.find("\"code\":") != std::string::npos) {
+                ::MessageBoxW(hwnd_, L"Start the monitoring engine first, then retry this action.",
+                    L"WinTCP - Collector", MB_OK | MB_ICONWARNING);
+                break;
+            }
+            const std::string marker = "\"operationId\":\"";
+            const auto first = reply.find(marker);
+            const auto begin = first == std::string::npos ? first : first + marker.size();
+            const auto end = begin == std::string::npos ? begin : reply.find('"', begin);
+            if (end != std::string::npos) monitorOperationId_ = reply.substr(begin, end - begin);
+            ::MessageBoxW(hwnd_, start
+                ? L"Collector start requested. Windows may ask for administrator approval.\n\nUse Temporary restriction status to check the result."
+                : L"Collector stop requested. Its final lease outcomes will be retained when the audit store is available.\n\nUse Temporary restriction status to check the result.",
+                L"WinTCP - Collector", MB_OK | MB_ICONINFORMATION);
+            break;
+        }
+        case IDM_MONITOR_RESTRICTION_STATUS: {
+            std::string status;
+            std::wstring message;
+            if (CollectorStatus(&status)) {
+                message = L"Collector running.\nActive temporary leases: " +
+                    EngineStatusField(status, "activeLeases") +
+                    L"\nRestrictions ready: " +
+                    (status.find("\"restrictionsAvailable\":true") != std::string::npos
+                        ? std::wstring(L"Yes") : std::wstring(L"No")) +
+                    L"\n\nReview individual scopes and outcomes in the Web UI Restrictions panel.";
+            } else message = L"Collector is unavailable for this user/session.";
+            if (!monitorOperationId_.empty() && EngineRequestOperation(monitorOperationId_, &status))
+                message += L"\n\nLast request: " + EngineStatusField(status, "status") +
+                    (status.find("\"error\":null") == std::string::npos
+                        ? L"\nReason: " + EngineStatusField(status, "code") : std::wstring());
+            ::MessageBoxW(hwnd_, message.c_str(), L"WinTCP - Temporary restrictions", MB_OK);
+            break;
+        }
+        case IDM_MONITOR_RELEASE_ALL: {
+            if (::MessageBoxW(hwnd_, L"Release every temporary restriction owned by this collector?",
+                L"WinTCP - Release temporary restrictions", MB_YESNO | MB_ICONQUESTION) != IDYES) break;
+            std::string reply;
+            const bool ok = CollectorRestrictionReleaseAll(&reply) &&
+                reply.find("\"code\":") == std::string::npos;
+            ::MessageBoxW(hwnd_, ok ? L"Temporary restrictions released." :
+                L"Collector is unavailable or release could not be confirmed.",
+                L"WinTCP - Temporary restrictions", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+            break;
+        }
         case IDM_HELP_SHORTCUTS:
             ShowShortcutsSheet();
             break;
