@@ -556,6 +556,7 @@ bool AnyTrafficColVisible() const { return cols_.AnyTrafficVisible(); }
     // TakeChangeEvents is destructive, so there is exactly one drain and both
     // consumers get the batch. See WriteChangeLog().
     ChangeLogWindow changeLog_;
+    std::string monitorOperationId_;
 
     // the tree control that REPLACES the list in tree mode, over
     // the same rows (ProcessTreeFill). Hidden until the mode is on; the
