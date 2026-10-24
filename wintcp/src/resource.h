@@ -58,6 +58,13 @@
 // The shortcuts sheet, and the About box split out so F1 can open
 // the sheet while the About dialog keeps its own command id.
 #define IDM_HELP_SHORTCUTS      40021
+#define IDM_HELP_ENGINE_STATUS  40069
+#define IDM_MONITOR_ENGINE_START 40070
+#define IDM_MONITOR_ENGINE_STOP  40071
+#define IDM_MONITOR_COLLECTOR_START 40072
+#define IDM_MONITOR_COLLECTOR_STOP 40073
+#define IDM_MONITOR_RESTRICTION_STATUS 40074
+#define IDM_MONITOR_RELEASE_ALL 40075
 #define IDM_VIEW_GEOIP          40022
 // The firewall viewer. Reads the rules `blocks` counts. 40065 because
 // 40023 is IDM_FILE_PRESET_SAVE - the View ids are not a contiguous block, and
