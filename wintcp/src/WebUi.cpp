@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "BlockConn.h"
+#include "CollectorRuntime.h"
 #include "Commands.h"
 #include "ConnectionStore.h"
 #include "DnsResolver.h"
@@ -55,6 +56,7 @@
 #include "WebStatic.h"
 #include "Version.h"
 #include "WebUi.h"
+#include "EngineRuntime.h"
 
 namespace wintcp {
 namespace {
@@ -1209,7 +1211,8 @@ std::string ConnectionsJson(ServerContext& context, const std::wstring& filter) 
     return out.str();
 }
 
-bool ParseForm(const std::string& body, std::map<std::string, std::string>* fields);
+bool ParseForm(const std::string& body, std::map<std::string, std::string>* fields,
+               bool recipeText = false);
 
 // Read a REG_SZ under an absolute registry path. Returns false when the key or
 // value is absent, which the callers turn into null plus a reason rather than a
@@ -2399,7 +2402,8 @@ const BlockedRule* FindFirewallRule(const std::vector<BlockedRule>& rules,
     return found;
 }
 
-bool DecodeFormValue(const std::string& raw, std::string* out) {
+bool DecodeFormValue(const std::string& raw, std::string* out,
+                     bool allowNewline = false) {
     if (out == nullptr) return false;
     out->clear();
     for (size_t i = 0; i < raw.size(); ++i) {
@@ -2419,14 +2423,17 @@ bool DecodeFormValue(const std::string& raw, std::string* out) {
             c = static_cast<unsigned char>((hi << 4) | lo);
             i += 2;
         }
-        if (c < 0x20 || c == 0x7f) return false;
+        if ((c < 0x20 && !(allowNewline && c == '\n')) || c == 0x7f)
+            return false;
         out->push_back(static_cast<char>(c));
     }
     return true;
 }
 
-bool ParseForm(const std::string& body, std::map<std::string, std::string>* fields) {
-    if (fields == nullptr || body.size() > 4096) return false;
+bool ParseForm(const std::string& body, std::map<std::string, std::string>* fields,
+               bool recipeText) {
+    if (fields == nullptr || body.size() >
+        (recipeText ? kMaxBodyBytes : 4096)) return false;
     fields->clear();
     size_t start = 0;
     while (start <= body.size()) {
@@ -2437,7 +2444,8 @@ bool ParseForm(const std::string& body, std::map<std::string, std::string>* fiel
         if (eq == std::string::npos) return false;
         std::string key, value;
         if (!DecodeFormValue(pair.substr(0, eq), &key) ||
-            !DecodeFormValue(pair.substr(eq + 1), &value) || key.empty() ||
+            !DecodeFormValue(pair.substr(eq + 1), &value,
+                             recipeText && key == "recipesText") || key.empty() ||
             fields->find(key) != fields->end()) return false;
         fields->emplace(std::move(key), std::move(value));
         if (amp == std::string::npos) break;
@@ -3084,6 +3092,520 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
     }
     if (path == "/api/health") {
         response.body = "{\"ok\":true,\"bind\":\"127.0.0.1\",\"version\":\"1\"}";
+        return response;
+    }
+    if (path.rfind("/api/engine/recipes/", 0) == 0 &&
+        path.size() > std::string("/api/engine/recipes//test").size() &&
+        path.substr(path.size() - 5) == "/test") {
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        if (request.method != "POST") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        const std::string prefix = "/api/engine/recipes/";
+        const std::string id = path.substr(prefix.size(),
+            path.size() - prefix.size() - 5);
+        if (id.empty() || id.size() > 64 ||
+            id.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") !=
+                std::string::npos || !request.body.empty()) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_request\"}";
+            return response;
+        }
+        if (!EngineTestRecipe(id, &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable\"}";
+        } else if (response.body.find("\"code\":\"recipe_not_found\"") !=
+                   std::string::npos) response.status = 404;
+        else if (!IsValidJsonObject(response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"simulation_invalid_json\"}";
+        }
+        return response;
+    }
+    if (path.rfind("/api/engine/notifications/", 0) == 0 &&
+        path.size() > std::string("/api/engine/notifications//acknowledge").size() &&
+        path.substr(path.size() - std::string("/acknowledge").size()) ==
+            "/acknowledge") {
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        if (request.method != "POST") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = "{\"code\":\"form_required\"}";
+            return response;
+        }
+        const std::string prefix = "/api/engine/notifications/";
+        const std::string id = path.substr(prefix.size(),
+            path.size() - prefix.size() - std::string("/acknowledge").size());
+        std::map<std::string, std::string> fields;
+        if (!ParseForm(request.body, &fields) || fields.size() != 1 ||
+            fields.find("requestId") == fields.end() || id.size() > 80 ||
+            id.find_first_not_of("0123456789abcdef:notification-") !=
+                std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_request\"}";
+            return response;
+        }
+        if (!EngineAcknowledgeNotification(fields["requestId"], id,
+                                           &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable\"}";
+        } else if (response.body.find("\"code\":\"request_id_reused\"") !=
+                   std::string::npos) response.status = 409;
+        else if (response.body.find("\"code\":\"bad_request\"") !=
+                 std::string::npos) response.status = 400;
+        else if (response.body.find("\"code\":") != std::string::npos)
+            response.status = 503;
+        else response.status = 202;
+        return response;
+    }
+    if (path == "/api/collector/control") {
+        if (query != std::string::npos || request.method != "POST") {
+            response.status = query != std::string::npos ? 400 : 405;
+            response.body = "{\"code\":\"invalid_collector_control\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = "{\"code\":\"form_required\"}";
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        if (!ParseForm(request.body, &fields) || fields.size() != 2 ||
+            !fields.count("requestId") ||
+            (fields["action"] != "start" && fields["action"] != "stop" &&
+             fields["action"] != "events-start" && fields["action"] != "events-stop")) {
+            response.status = 400;
+            response.body = "{\"code\":\"invalid_collector_action\"}";
+            return response;
+        }
+        if (!EngineSubmitCollector(fields["requestId"], fields["action"], "",
+                                   &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable_or_invalid_request\"}";
+        } else response.status = response.body.find("\"code\":") == std::string::npos
+            ? 202 : response.body.find("request_id_reused") != std::string::npos ? 409 : 400;
+        return response;
+    }
+    if (path == "/api/restrictions" || path == "/api/restrictions/preview" ||
+        path == "/api/restrictions/apply" ||
+        path == "/api/restrictions/release" ||
+        path == "/api/restrictions/release-all") {
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        if (path == "/api/restrictions") {
+            if (request.method != "GET" && request.method != "HEAD") {
+                response.status = 405;
+                response.body = "{\"code\":\"method_not_allowed\"}";
+                return response;
+            }
+            const auto token = request.headers.find("x-wintcp-token");
+            if (token == request.headers.end() ||
+                !SecureEquals(token->second, context.token)) {
+                response.status = 403;
+                response.body = "{\"code\":\"session_token_required\"}";
+                return response;
+            }
+            if (!CollectorRestrictionList(&response.body)) {
+                response.status = 503;
+                response.body = "{\"code\":\"collector_unavailable\"}";
+            }
+            return response;
+        }
+        if (request.method != "POST") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = "{\"code\":\"form_required\"}";
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        if (!ParseForm(request.body, &fields) || !fields.count("requestId")) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_form\"}";
+            return response;
+        }
+        std::string action, payload;
+        if (path == "/api/restrictions/preview" && fields.size() == 6 &&
+            fields.count("imagePath") && fields.count("remoteAddress") &&
+            fields.count("remotePort") && fields.count("protocol") &&
+            fields.count("minutes")) {
+            uint64_t port = 0, minutes = 0;
+            if (ParseUint64Strict(fields["remotePort"], &port) && port <= 65535 &&
+                ParseUint64Strict(fields["minutes"], &minutes) &&
+                minutes >= 1 && minutes <= 1440) {
+                action = "preview";
+                payload = fields["imagePath"] + '\n' + fields["remoteAddress"] +
+                    '\n' + std::to_string(port) + '\n' + fields["protocol"] +
+                    '\n' + std::to_string(minutes);
+            } else {
+                response.status = 400;
+                response.body = "{\"code\":\"bad_restriction_scope\"}";
+                return response;
+            }
+        } else if (path == "/api/restrictions/apply" && fields.size() == 2 &&
+                   fields.count("confirmationToken") &&
+                   fields["confirmationToken"].size() == 32 &&
+                   fields["confirmationToken"].find_first_not_of(
+                       "0123456789abcdef") == std::string::npos) {
+            action = "apply";
+            payload = fields["confirmationToken"];
+        } else if (path == "/api/restrictions/release" && fields.size() == 2 &&
+                   fields.count("id") && fields["id"].size() == 32 &&
+                   fields["id"].find_first_not_of("0123456789abcdef") ==
+                       std::string::npos) {
+            action = "release";
+            payload = fields["id"];
+        } else if (path == "/api/restrictions/release-all" &&
+                   fields.size() == 2 && fields.count("confirm") &&
+                   fields["confirm"] == "release-all") {
+            action = "release-all";
+        } else {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_form\"}";
+            return response;
+        }
+        if (!CollectorOperationValid(action, payload)) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_restriction_scope\"}";
+        } else if (!EngineSubmitCollector(fields["requestId"], action, payload,
+                                          &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable_or_invalid_request\"}";
+        } else response.status = response.body.find("\"code\":") == std::string::npos
+            ? 202 : response.body.find("request_id_reused") != std::string::npos ? 409 : 400;
+        return response;
+    }
+    if (path == "/api/engine/control") {
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        if (request.method != "POST") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = "{\"code\":\"form_required\"}";
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        if (!ParseForm(request.body, &fields) || fields.size() != 1 ||
+            (fields["action"] != "start" && fields["action"] != "stop")) {
+            response.status = 400;
+            response.body = "{\"code\":\"invalid_engine_action\"}";
+            return response;
+        }
+        std::string error;
+        const bool started = fields["action"] == "start";
+        const bool ok = started ? EngineStart(&error) : EngineStop(&error);
+        response.status = ok ? 200 : 503;
+        response.body = ok
+            ? (started ? "{\"schemaVersion\":1,\"running\":true}"
+                       : "{\"schemaVersion\":1,\"running\":false}")
+            : "{\"schemaVersion\":1,\"code\":\"" + error + "\"}";
+        return response;
+    }
+    if (path == "/api/engine/recipes") {
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        if (request.method == "GET" || request.method == "HEAD") {
+            const auto token = request.headers.find("x-wintcp-token");
+            if (token == request.headers.end() ||
+                !SecureEquals(token->second, context.token)) {
+                response.status = 403;
+                response.body = "{\"code\":\"session_token_required\"}";
+            } else if (!EngineRequestRecipes(&response.body)) {
+                response.status = 503;
+                response.body = "{\"code\":\"engine_unavailable\"}";
+            }
+            return response;
+        }
+        if (request.method != "POST") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = "{\"code\":\"form_required\"}";
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        std::vector<RecipeDef> recipes;
+        std::string parseError;
+        if (!ParseForm(request.body, &fields, true) || fields.size() != 3 ||
+            !ParseRecipes(fields["recipesText"], &recipes, &parseError)) {
+            response.status = 400;
+            response.body = "{\"code\":\"invalid_recipes\"}";
+            return response;
+        }
+        const std::string& requestId = fields["requestId"];
+        const std::string& expected = fields["expectedRevision"];
+        if (requestId.empty() || requestId.size() > 64 || expected.size() != 64 ||
+            requestId.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") !=
+                std::string::npos ||
+            expected.find_first_not_of("0123456789abcdef") != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"invalid_request_identity\"}";
+            return response;
+        }
+        if (!EngineSubmitRecipes(requestId, expected, recipes, &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable\"}";
+        } else if (response.body.find("\"code\":\"revision_conflict\"") !=
+                   std::string::npos ||
+                   response.body.find("\"code\":\"recipe_revision_conflict\"") !=
+                   std::string::npos ||
+                   response.body.find("\"code\":\"request_id_reused\"") !=
+                   std::string::npos) response.status = 409;
+        else if (response.body.find("\"code\":\"bad_request\"") !=
+                 std::string::npos ||
+                 response.body.find("\"code\":\"changed_recipe_requires_review\"") !=
+                 std::string::npos ||
+                 response.body.find("\"code\":\"new_recipe_must_start_disabled\"") !=
+                 std::string::npos) response.status = 400;
+        else if (response.body.find("\"code\":") != std::string::npos)
+            response.status = 503;
+        else response.status = 202;
+        return response;
+    }
+    if (path == "/api/engine/config" ||
+        path.rfind("/api/engine/operations/", 0) == 0) {
+        const bool operationRead = path.rfind("/api/engine/operations/", 0) == 0;
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        if (request.method == "GET" || request.method == "HEAD") {
+            const auto token = request.headers.find("x-wintcp-token");
+            if (token == request.headers.end() ||
+                !SecureEquals(token->second, context.token)) {
+                response.status = 403;
+                response.body = "{\"code\":\"session_token_required\"}";
+                return response;
+            }
+            const std::string id = operationRead
+                ? path.substr(std::string("/api/engine/operations/").size()) : "";
+            if (operationRead && (id.empty() || id.size() > 128 ||
+                id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") !=
+                    std::string::npos)) {
+                response.status = 400;
+                response.body = "{\"code\":\"bad_operation_id\"}";
+                return response;
+            }
+            const bool available = operationRead
+                ? EngineRequestOperation(id, &response.body)
+                : EngineRequestConfig(&response.body);
+            if (!available) {
+                response.status = 503;
+                response.body = "{\"code\":\"engine_unavailable\"}";
+            } else if (response.body.find("\"code\":\"operation_expired\"") !=
+                       std::string::npos) response.status = 410;
+            else if (response.body.find("\"code\":\"config_unavailable\"") !=
+                     std::string::npos) response.status = 503;
+            return response;
+        }
+        if (operationRead || request.method != "POST") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = "{\"code\":\"form_required\"}";
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        std::uint64_t interval = 0, records = 0, bytes = 0;
+        if (!ParseForm(request.body, &fields) || fields.size() != 5 ||
+            !ParseUint64Strict(fields["snapshotIntervalMs"], &interval) ||
+            !ParseUint64Strict(fields["maxEventRecords"], &records) ||
+            !ParseUint64Strict(fields["maxEventBytes"], &bytes) ||
+            interval < 250 || interval > 60000 ||
+            records < 1 || records > 50000 ||
+            bytes < 1024 * 1024 || bytes > 64ULL * 1024 * 1024) {
+            response.status = 400;
+            response.body = "{\"code\":\"invalid_engine_config\"}";
+            return response;
+        }
+        const std::string requestId = fields["requestId"];
+        const std::string expected = fields["expectedRevision"];
+        if (requestId.empty() || requestId.size() > 64 || expected.size() != 64 ||
+            requestId.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") !=
+                std::string::npos ||
+            expected.find_first_not_of("0123456789abcdef") != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"invalid_request_identity\"}";
+            return response;
+        }
+        EngineConfig next;
+        next.snapshotIntervalMs = static_cast<unsigned>(interval);
+        next.maxEventRecords = static_cast<std::size_t>(records);
+        next.maxEventBytes = static_cast<std::size_t>(bytes);
+        if (!EngineSubmitConfig(requestId, expected, next, &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable\"}";
+        } else if (response.body.find("\"code\":\"revision_conflict\"") !=
+                   std::string::npos ||
+                   response.body.find("\"code\":\"request_id_reused\"") !=
+                   std::string::npos) response.status = 409;
+        else if (response.body.find("\"code\":\"bad_request\"") !=
+                 std::string::npos) response.status = 400;
+        else if (response.body.find("\"code\":") != std::string::npos)
+            response.status = 503;
+        else response.status = 202;
+        return response;
+    }
+    if (path == "/api/engine" || path == "/api/engine/capabilities" ||
+        path == "/api/engine/events" || path == "/api/engine/history" ||
+        path == "/api/engine/lifecycle" ||
+        path == "/api/restrictions/history" ||
+        path == "/api/engine/notifications") {
+        if (request.method != "GET" && request.method != "HEAD") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        const auto token = request.headers.find("x-wintcp-token");
+        if (token == request.headers.end() ||
+            !SecureEquals(token->second, context.token)) {
+            response.status = 403;
+            response.body = "{\"code\":\"session_token_required\"}";
+            return response;
+        }
+        std::string cursor;
+        unsigned limit = 100;
+        if ((path == "/api/engine/events" || path == "/api/engine/history" ||
+             path == "/api/engine/lifecycle" ||
+             path == "/api/restrictions/history" ||
+             path == "/api/engine/notifications") &&
+            query != std::string::npos) {
+            std::map<std::string, std::string> parameters;
+            if (!ParseForm(request.target.substr(query + 1), &parameters) ||
+                parameters.size() > 2) {
+                response.status = 400;
+                response.body = "{\"code\":\"bad_query\"}";
+                return response;
+            }
+            for (const auto& parameter : parameters) {
+                if (parameter.first == "cursor") {
+                    cursor = parameter.second;
+                } else if (parameter.first == "limit") {
+                    if (parameter.second.empty() || parameter.second.size() > 3) {
+                        response.status = 400;
+                        response.body = "{\"code\":\"bad_limit\"}";
+                        return response;
+                    }
+                    unsigned parsed = 0;
+                    for (char digit : parameter.second) {
+                        if (digit < '0' || digit > '9') {
+                            response.status = 400;
+                            response.body = "{\"code\":\"bad_limit\"}";
+                            return response;
+                        }
+                        parsed = parsed * 10 + static_cast<unsigned>(digit - '0');
+                    }
+                    if (parsed == 0 || parsed > 500) {
+                        response.status = 400;
+                        response.body = "{\"code\":\"bad_limit\"}";
+                        return response;
+                    }
+                    limit = parsed;
+                } else {
+                    response.status = 400;
+                    response.body = "{\"code\":\"bad_query\"}";
+                    return response;
+                }
+            }
+        } else if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        const bool available = path == "/api/engine/events"
+            ? EngineRequestEvents(cursor, limit, &response.body)
+            : path == "/api/engine/lifecycle"
+                ? EngineRequestLifecycleHistory(cursor, limit, &response.body)
+            : path == "/api/restrictions/history"
+                ? EngineRequestRestrictionHistory(cursor, limit, &response.body)
+            : path == "/api/engine/history"
+                ? EngineRequestHistory(cursor, limit, &response.body)
+                : path == "/api/engine/notifications"
+                    ? EngineRequestNotifications(cursor, limit, &response.body)
+                : EngineRequestStatus(&response.body);
+        if (!available) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable\",\"message\":\"Start the optional per-user engine with wintcp.exe engine start\"}";
+        } else if (response.body.find("\"code\":\"cursor_expired\"") !=
+                   std::string::npos) {
+            response.status = 410;
+        } else if ((path == "/api/engine/history" ||
+                    path == "/api/engine/lifecycle" ||
+                    path == "/api/restrictions/history" ||
+                    path == "/api/engine/notifications") &&
+                   response.body.find("\"code\":") != std::string::npos) {
+            response.status = 503;
+        } else if ((path == "/api/engine/history" ||
+                    path == "/api/engine/notifications") &&
+                   !IsValidJsonObject(response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"history_invalid_json\"}";
+        }
         return response;
     }
     if (path == "/api/connections") {
