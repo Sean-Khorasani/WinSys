@@ -32,6 +32,8 @@
 #include <vector>
 
 #include "CliCommands.h"
+#include "EngineRuntime.h"
+#include "CollectorRuntime.h"
 #include "Utils.h"
 
 namespace wintcp {
@@ -71,6 +73,14 @@ int RunCli(int argc, wchar_t** argv) {
 
     // Global help outranks everything, wherever it appears first.
     const std::wstring first = args[1] != nullptr ? args[1] : L"";
+    if (first == L"engine")
+        return RunEngineCommand(n, args.data());
+    if (first == L"collector")
+        return RunCollectorCommand(n, args.data());
+    if (first == L"restrict")
+        return RunRestrictCommand(n, args.data());
+    if (first == L"recipe")
+        return RunRecipeCommand(n, args.data());
     if (IsGlobalHelp(first)) {
         // `wintcp --help [cmd]` behaves like `wintcp help [cmd]`.
         std::vector<wchar_t*> helpArgs;
