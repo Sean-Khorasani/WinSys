@@ -144,3 +144,15 @@ alert --on-rst --on-closed ;expect=0
 webui --help
 monitor list
 help monitor
+help engine
+help collector
+help restrict
+engine --help
+collector --help
+collector events-unknown ;expect=2
+restrict --help
+restrict apply 00000000000000000000000000000000 ;expect=3
+restrict release-all ;expect=3
+recipe --help
+recipe remove example ;expect=3
+recipe unsupported ;expect=2
