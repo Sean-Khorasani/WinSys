@@ -55,6 +55,10 @@ Usage: wintcp.exe <command> [switches]
 | Other | `version` | Report what is available on this system, and why anything is not. |
 | | `doctor` | Environment diagnostics for this run: elevation, handle/GDI/USER counts, traffic source, GeoIP, firewall rules and capture availability. Exits `0`; degraded capability is reported as text. `--format json` for scripts. |
 | | `webui serve` | Start the optional loopback-only browser dashboard and local monitor runner. See the [Web UI guide](webui.md) for its limits and security model. |
+| | `engine start|status|events|stop` | Explicitly manage the optional unprivileged per-user snapshot engine. |
+| | `collector start|run|status|stop` | Explicitly manage the optional elevated helper; it never starts automatically. |
+| | `restrict preview|apply|list|release|release-all` | Review and manage time-limited outbound WFP blocks owned by the helper. |
+| | `recipe list|show|test|create|enable|disable|remove` | Manage and simulate exact-executable Passive TCP-snapshot monitors in the running engine; `remove` requires `--yes`. |
 | | `help` | Overview or per-command help. |
 
 The act verbs (`kill`, `close`, `block`, `unblock`, `capture`) require `--yes` and support `--dry-run`. `wintcp.exe help` lists `blocks` alongside them; unlike the others it only reads.
@@ -722,3 +726,107 @@ all five are still shown — even after you hide one of the five manually.
 Both sub-commands want `--db FILE`: without it they exit `2`, and a file that will not load exits `1` carrying the parser's reason. Neither ever fetches anything — obtaining a database, and keeping it current, is covered in [GeoIP database](../README.md#geoip-database).
 
 Record layouts of 24, 28 and 32 bits are all supported (28 is what essentially every real MaxMind database uses). Any other declared size is refused by name, including `record_size = 4`, which is the 32-bit layout stated in bytes rather than bits.
+
+## `engine` (early snapshot history)
+
+`wintcp.exe engine start` launches an optional unprivileged process for the
+current user and session. `status` reports the actual snapshot capability and
+sample count; `events` prints a bounded page of sampled endpoint observations;
+`stop` exits it. `run` keeps it in the foreground. The normal `list` command
+works with the engine stopped, and no startup task is installed. The process
+retains its bounded event ring while the native GUI and Web UI are closed;
+live cursors expire when the engine restarts. The engine also writes bounded
+NDJSON event segments under `%LOCALAPPDATA%\WinTCP\Engine` (up to 64 MiB in
+two rotating segments). These contain sensitive endpoint/process observations;
+the current `events` command still reads the live ring, not old segments.
+The engine now evaluates saved Passive recipes against sampled TCP endpoint
+appearances and retains a bounded notification inbox. It does not yet deliver
+desktop alerts or apply temporary restrictions. The Web UI can start/stop the
+engine and manage these recipes without administrator rights.
+
+On first start, the engine creates
+`%LOCALAPPDATA%\WinTCP\Engine\config.txt` with versioned defaults. Its
+`snapshotIntervalMs`, `maxEventRecords`, and `maxEventBytes` settings are read
+at startup, not changed in a running process. Invalid, unknown, duplicate,
+or out-of-range settings refuse startup with an error; they are never treated
+as an empty policy. The directory and newly created file are restricted to
+the current user and SYSTEM. Do not put secrets in this configuration file.
+
+Snapshot events mean a row was observed or disappeared during a sample. They
+do not prove a connection attempt, failure, denial, or UDP handshake. The
+engine orders events by monotonic time and tags them with a UTC mapping ID.
+A wall-clock jump creates a new mapping and a `clock_adjusted` coverage-gap
+record; UTC display times are never used to reorder an existing flow.
+The Web UI's token-protected `/api/engine` and `/api/engine/events` endpoints read
+the same process. Event-based collection, incident recording, Active recipe
+enforcement, and comparison sessions remain unimplemented. Manual temporary
+restrictions use the separate explicitly approved collector workflow below.
+
+## `collector` (experimental helper lifecycle)
+
+`wintcp.exe collector run` is an explicitly launched, elevated helper for the
+same Windows user and logon session as a running engine. It does not start with
+the CLI, GUI, Web UI, or engine and does not request elevation on its own. Run
+it from an already elevated terminal after starting the engine, or use
+`wintcp.exe collector start` to request UAC explicitly. `status` and
+`stop` may be issued from the matching user's ordinary terminal. The collector
+uses a local SID/session-restricted pipe and releases its dynamic WFP session
+on exit or when the paired engine's heartbeat is lost. Starting it alone does
+not install filters or enable Active recipes. A different administrator account cannot
+pair with the original user's engine.
+Normal stop first releases its leases and gives the engine up to five seconds
+to persist the final change cursor. It still stops if the audit store is
+unavailable, reporting `collector_stopped_audit_incomplete` rather than
+pretending every final outcome was retained.
+
+`collector events-start` explicitly enables the experimental lifecycle trace
+inside the running helper; `collector events-stop` stops only its owned trace.
+The trace uses a unique system-logger GUID/name and never stops another tool's
+session. `collector status` includes decoded, queue-loss, schema-rejection,
+ETW-loss, and retained-history counters. Capture callbacks copy bounded raw
+records; a separate worker decodes named TDH properties. Starting the helper
+alone does not enable tracing. Process attribution and normalized flow history
+are not complete yet, so normalized lifecycle capabilities remain unavailable
+and this capture cannot authorize Active recipes. Raw decoded evidence is now
+retained by the engine and can be inspected in the Web UI Event history tab.
+
+`restrict preview --app "C:\Apps\Example.exe" --minutes 15` validates and shows
+the exact executable, user SID, scope, and a one-use confirmation token. Copy
+that token into `restrict apply TOKEN --yes` within 30 seconds to create a
+lease. Optional `--peer` accepts a literal IPv4/IPv6 address; `--port` needs
+`--peer`; `--proto` is `tcp`, `udp`, or `both`. `restrict list` shows this
+collector's active leases and filter IDs. `restrict release ID --yes` removes
+one lease; `restrict release-all --yes` ends every temporary restriction owned
+by this collector. The helper's dynamic WFP session also removes its filters
+if the helper exits or crashes. These commands do not alter permanent Windows
+Firewall rules. All current and future matching app instances for this user
+may be affected; existing flows may continue. A manual preview is not a
+confirmed connection-attempt observation, and Active recipe automation remains
+unimplemented. No elevated WFP operation has yet been integration-tested here.
+
+## `recipe` (Passive snapshot monitors)
+
+Start the engine first with `wintcp.exe engine start`. Recipe creation saves a
+disabled definition; enable it explicitly after reviewing the exact full
+executable path. These rules observe sampled TCP established endpoints or TCP
+listeners, not connection attempts or UDP activity. No administrator rights
+or blocking authority are involved.
+
+```text
+wintcp.exe recipe list
+wintcp.exe recipe show watch-app
+wintcp.exe recipe test watch-app
+wintcp.exe recipe create watch-app "Watch app networking" "C:\Apps\Example.exe" outbound_activity 60
+wintcp.exe recipe create watch-listener "Watch listener" "C:\Apps\Example.exe" new_listener 300
+wintcp.exe recipe enable watch-app
+wintcp.exe recipe disable watch-app
+wintcp.exe recipe remove watch-app --yes
+```
+
+Commands use the shared engine and fail if it is unavailable. `remove` without
+`--yes` exits 3; malformed arguments exit 2. The recipe remains saved when the
+engine stops and resumes when it starts again. `test` replays up to 500 recent
+retained snapshot events without emitting notifications or applying actions;
+its result is a simulation, not proof of a future connection attempt.
+Notification acknowledgment is
+available in the Web UI; the CLI does not yet expose an inbox command.
