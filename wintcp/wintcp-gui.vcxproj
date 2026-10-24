@@ -63,7 +63,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateManifest>false</GenerateManifest>
       <EnableControlFlowGuard>true</EnableControlFlowGuard>
-      <AdditionalDependencies>iphlpapi.lib;ws2_32.lib;comctl32.lib;psapi.lib;user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>iphlpapi.lib;ws2_32.lib;fwpuclnt.lib;comctl32.lib;psapi.lib;user32.lib;gdi32.lib;comdlg32.lib;shell32.lib;advapi32.lib;crypt32.lib;wintrust.lib;pdh.lib;ole32.lib;oleaut32.lib;bcrypt.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>comdlg32.dll;crypt32.dll;ole32.dll;oleaut32.dll;pdh.dll;shell32.dll</DelayLoadDLLs>
       <AdditionalOptions>/MANIFEST:NO %(AdditionalOptions)</AdditionalOptions>
       <EnableCOMDATFolding Condition="'$(Configuration)'=='Release'">true</EnableCOMDATFolding>
@@ -97,6 +97,22 @@
          unreferenced TU; the Debug configurations (/OPT:NOREF) failed with
          LNK2019 on MonitorDef::Validate and friends. Do not re-add it. -->
     <ClCompile Include="src\WebUi.cpp" />
+    <ClCompile Include="src\EngineRuntime.cpp" />
+    <ClCompile Include="src\EngineConfig.cpp" />
+    <ClCompile Include="src\EngineStore.cpp" />
+    <ClCompile Include="src\EngineOperations.cpp" />
+    <ClCompile Include="src\EngineClock.cpp" />
+    <ClCompile Include="src\RecipeModel.cpp" />
+    <ClCompile Include="src\RestrictionModel.cpp" />
+    <ClCompile Include="src\RestrictionLease.cpp" />
+    <ClCompile Include="src\CollectorRuntime.cpp" />
+    <ClCompile Include="src\EventDecoder.cpp" />
+    <ClCompile Include="src\ConnectionEventCollector.cpp" />
+    <ClCompile Include="src\ProcessInstanceCache.cpp" />
+    <ClCompile Include="src\LifecycleFlowModel.cpp" />
+    <ClCompile Include="src\RestrictionWfp.cpp" />
+    <ClCompile Include="src\NetworkEvents.cpp" />
+    <ClCompile Include="src\SnapshotEvents.cpp" />
     <ClCompile Include="src\WebMetrics.cpp" />
     <ClCompile Include="src\DnsResolver.cpp" />
     <ClCompile Include="src\DnsCache.cpp" />
