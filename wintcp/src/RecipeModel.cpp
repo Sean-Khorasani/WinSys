@@ -13,6 +13,8 @@ namespace {
 constexpr std::size_t kMaxRecipes = 100;
 constexpr std::size_t kMaxConfigBytes = 256 * 1024;
 constexpr std::uint64_t kCrossSourceWindowNs = 120000000000ULL;
+constexpr char kRecipeHeaderV1[] = "WinTCP-Recipes:1\n";
+constexpr char kRecipeHeaderV2[] = "WinTCP-Recipes:2\n";
 
 std::string Hex(const std::string& text) {
     static const char kDigits[] = "0123456789abcdef";
@@ -104,6 +106,48 @@ const char* RecipeTriggerName(RecipeTrigger trigger) {
     return "unsupported";
 }
 
+bool RecipeScheduleMatchesLocalTime(const RecipeSchedule& schedule,
+                                    unsigned weekdaySundayZero,
+                                    unsigned minuteOfDay) {
+    if (schedule.type == RecipeScheduleType::Always) return true;
+    if (schedule.type != RecipeScheduleType::WeeklyWindow ||
+        weekdaySundayZero > 6 || minuteOfDay > 1439 ||
+        schedule.startMinute > 1439 || schedule.endMinute > 1439 ||
+        schedule.startMinute == schedule.endMinute || schedule.daysMask == 0 ||
+        schedule.daysMask > 0x7f) return false;
+    const auto selected = [&schedule](unsigned day) {
+        return (schedule.daysMask & (1u << day)) != 0;
+    };
+    if (schedule.startMinute < schedule.endMinute)
+        return selected(weekdaySundayZero) &&
+            minuteOfDay >= schedule.startMinute &&
+            minuteOfDay < schedule.endMinute;
+    if (minuteOfDay >= schedule.startMinute)
+        return selected(weekdaySundayZero);
+    if (minuteOfDay < schedule.endMinute)
+        return selected((weekdaySundayZero + 6) % 7);
+    return false;
+}
+
+namespace {
+bool ValidateRecipeSchedule(const RecipeSchedule& schedule) {
+    if (schedule.type == RecipeScheduleType::Always)
+        return schedule.daysMask == 0 && schedule.startMinute == 0 &&
+            schedule.endMinute == 0 && schedule.timeZoneId.empty();
+    if (schedule.type != RecipeScheduleType::WeeklyWindow ||
+        schedule.daysMask == 0 || schedule.daysMask > 0x7f ||
+        schedule.startMinute > 1439 || schedule.endMinute > 1439 ||
+        schedule.startMinute == schedule.endMinute ||
+        schedule.timeZoneId.empty() || schedule.timeZoneId.size() > 128)
+        return false;
+    for (unsigned char c : schedule.timeZoneId)
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-'))
+            return false;
+    return true;
+}
+}  // namespace
+
 bool RecipeActionEventEligible(const RecipeDef& recipe,
                                const NetworkEvent& event,
                                bool sameUser) {
@@ -146,18 +190,26 @@ bool ValidateRecipe(const RecipeDef& recipe, std::string* error) {
         return fail("invalid_limit");
     if (std::string(RecipeTriggerName(recipe.trigger)) == "unsupported")
         return fail("unsupported_trigger");
+    if (!ValidateRecipeSchedule(recipe.schedule))
+        return fail("invalid_schedule");
     if (error != nullptr) error->clear();
     return true;
 }
 
 std::string FormatRecipes(const std::vector<RecipeDef>& recipes) {
-    std::string out = "WinTCP-Recipes:1\n";
+    std::string out = kRecipeHeaderV2;
     for (const RecipeDef& recipe : recipes)
         out += recipe.id + '|' + std::to_string(recipe.revision) + '|' +
             (recipe.enabled ? "1" : "0") + '|' +
             RecipeTriggerName(recipe.trigger) + '|' +
             std::to_string(recipe.cooldownSeconds) + '|' +
-            Hex(recipe.name) + '|' + Hex(recipe.imagePath) + '\n';
+            Hex(recipe.name) + '|' + Hex(recipe.imagePath) + '|' +
+            (recipe.schedule.type == RecipeScheduleType::Always
+                ? "always" : "weekly_window") + '|' +
+            std::to_string(recipe.schedule.daysMask) + '|' +
+            std::to_string(recipe.schedule.startMinute) + '|' +
+            std::to_string(recipe.schedule.endMinute) + '|' +
+            Hex(recipe.schedule.timeZoneId) + '\n';
     return out;
 }
 
@@ -170,8 +222,10 @@ std::string RecipesRevision(const std::vector<RecipeDef>& recipes) {
 
 bool ParseRecipes(const std::string& text, std::vector<RecipeDef>* recipes,
                   std::string* error) {
+    const bool version1 = text.rfind(kRecipeHeaderV1, 0) == 0;
+    const bool version2 = text.rfind(kRecipeHeaderV2, 0) == 0;
     if (recipes == nullptr || text.size() > kMaxConfigBytes ||
-        text.rfind("WinTCP-Recipes:1\n", 0) != 0) {
+        (!version1 && !version2)) {
         if (error != nullptr) *error = "invalid_recipe_header";
         return false;
     }
@@ -196,7 +250,8 @@ bool ParseRecipes(const std::string& text, std::vector<RecipeDef>* recipes,
         }
         std::uint64_t revision = 0, cooldown = 0;
         RecipeDef recipe;
-        if (fields.size() != 7 || !Decimal(fields[1], &revision) ||
+        if (fields.size() != (version1 ? 7u : 12u) ||
+            !Decimal(fields[1], &revision) ||
             !Decimal(fields[4], &cooldown) || cooldown > 86400 ||
             (fields[2] != "0" && fields[2] != "1") ||
             !Unhex(fields[5], &recipe.name) ||
@@ -216,6 +271,27 @@ bool ParseRecipes(const std::string& text, std::vector<RecipeDef>* recipes,
             if (error != nullptr) *error = "unsupported_trigger";
             return false;
         }
+        if (version2) {
+            std::uint64_t days = 0, startMinute = 0, endMinute = 0;
+            if (!Decimal(fields[8], &days) || days > 0x7f ||
+                !Decimal(fields[9], &startMinute) || startMinute > 1439 ||
+                !Decimal(fields[10], &endMinute) || endMinute > 1439 ||
+                !Unhex(fields[11], &recipe.schedule.timeZoneId)) {
+                if (error != nullptr) *error = "invalid_recipe_schedule";
+                return false;
+            }
+            if (fields[7] == "always")
+                recipe.schedule.type = RecipeScheduleType::Always;
+            else if (fields[7] == "weekly_window")
+                recipe.schedule.type = RecipeScheduleType::WeeklyWindow;
+            else {
+                if (error != nullptr) *error = "unsupported_recipe_schedule";
+                return false;
+            }
+            recipe.schedule.daysMask = static_cast<std::uint8_t>(days);
+            recipe.schedule.startMinute = static_cast<std::uint16_t>(startMinute);
+            recipe.schedule.endMinute = static_cast<std::uint16_t>(endMinute);
+        }
         if (!ValidateRecipe(recipe, error) || !ids.insert(recipe.id).second) {
             if (error != nullptr && error->empty()) *error = "duplicate_recipe";
             return false;
@@ -229,6 +305,13 @@ bool ParseRecipes(const std::string& text, std::vector<RecipeDef>* recipes,
 }
 
 std::string RecipeJson(const RecipeDef& recipe) {
+    const std::string schedule = recipe.schedule.type == RecipeScheduleType::Always
+        ? "{\"type\":\"always\"}"
+        : "{\"type\":\"weekly_window\",\"daysMask\":" +
+            std::to_string(recipe.schedule.daysMask) +
+            ",\"startMinute\":" + std::to_string(recipe.schedule.startMinute) +
+            ",\"endMinute\":" + std::to_string(recipe.schedule.endMinute) +
+            ",\"timeZoneId\":" + Quote(recipe.schedule.timeZoneId) + "}";
     return "{\"schemaVersion\":1,\"id\":" + Quote(recipe.id) +
         ",\"revision\":\"" + std::to_string(recipe.revision) +
         "\",\"name\":" + Quote(recipe.name) +
@@ -236,7 +319,8 @@ std::string RecipeJson(const RecipeDef& recipe) {
         ",\"mode\":\"passive\",\"target\":{\"imagePaths\":[" +
         Quote(recipe.imagePath) + "],\"includeChildren\":false}," +
         "\"trigger\":{\"type\":" + Quote(RecipeTriggerName(recipe.trigger)) +
-        "},\"schedule\":{\"type\":\"always\"},\"actions\":[{\"type\":\"notify\"}]," +
+        "},\"schedule\":" + schedule +
+        ",\"actions\":[{\"type\":\"notify\"}]," +
         "\"cooldownSeconds\":" + std::to_string(recipe.cooldownSeconds) + "}";
 }
 
@@ -316,7 +400,12 @@ bool ValidateRecipeUpdate(const std::vector<RecipeDef>& current,
         }
         const bool sensitive = before->imagePath != after.imagePath ||
             before->trigger != after.trigger ||
-            before->cooldownSeconds != after.cooldownSeconds;
+            before->cooldownSeconds != after.cooldownSeconds ||
+            before->schedule.type != after.schedule.type ||
+            before->schedule.daysMask != after.schedule.daysMask ||
+            before->schedule.startMinute != after.schedule.startMinute ||
+            before->schedule.endMinute != after.schedule.endMinute ||
+            before->schedule.timeZoneId != after.schedule.timeZoneId;
         const bool changed = sensitive || before->name != after.name ||
             before->enabled != after.enabled;
         if (changed) {
@@ -395,7 +484,8 @@ RecipeHit RecipeEvaluator::Evaluate(const RecipeDef& recipe,
                                      const NetworkEvent& event) {
     RecipeHit hit;
     const bool snapshot = event.kind == NetworkEventKind::EndpointObserved;
-    if (!recipe.enabled || event.process.imagePath.empty() ||
+    if (!recipe.enabled || event.process.pid == 0 ||
+        event.process.imagePath.empty() ||
         !SamePath(recipe.imagePath, event.process.imagePath)) return hit;
     if (recipe.trigger == RecipeTrigger::OutboundActivity) {
         if (snapshot) {
@@ -423,10 +513,15 @@ RecipeHit RecipeEvaluator::Evaluate(const RecipeDef& recipe,
         hit.coverage = "snapshot_listener_binding";
     } else return hit;
     hit.matched = true;
+    const bool processInstanceKnown = event.process.creationTimeKnown &&
+        event.process.creationTimeFileTime != 0;
     std::string key = recipe.id + ':' + std::to_string(recipe.revision) + ':' +
         std::to_string(event.process.pid) + ':' +
-        (event.process.creationTimeKnown
-            ? std::to_string(event.process.creationTimeFileTime) : "unverified");
+        (processInstanceKnown
+            ? std::to_string(event.process.creationTimeFileTime)
+            : "event:" + (event.eventId.empty()
+                ? event.source + ':' + std::to_string(event.monotonicNs)
+                : event.eventId));
     if (recipe.trigger == RecipeTrigger::NewListener)
         key += ':' + event.local.address + ':' + std::to_string(event.local.port);
     hit.cooldownKey = key;
@@ -442,7 +537,7 @@ RecipeHit RecipeEvaluator::Evaluate(const RecipeDef& recipe,
         event.direction == "outbound" && event.local.known && event.remote.known &&
         event.local.port != 0 && event.remote.port != 0;
     if (recipe.trigger == RecipeTrigger::OutboundActivity &&
-        (snapshotFlow || etwFlow) && event.process.creationTimeKnown) {
+        (snapshotFlow || etwFlow) && processInstanceKnown) {
         const auto endpointPart = [](const NetworkEndpoint& endpoint) {
             std::string address = endpoint.address;
             for (char& c : address) c = LowerAscii(c);
