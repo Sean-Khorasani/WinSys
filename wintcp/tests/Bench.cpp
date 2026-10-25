@@ -43,6 +43,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "EngineStore.h"
 #include "EngineOperations.h"
 #include "EngineClock.h"
+#include "CollectorLossModel.h"
 #include "RecipeModel.h"
 #include "RestrictionModel.h"
 #include "RestrictionLease.h"
@@ -2329,6 +2330,57 @@ void CheckEngineClock(TestResult& r) {
     const ClockObservation slowCadence = slowClock.Observe(145000, 46000, 10000);
     Check(r, "engine-clock.threshold-scales-with-sampling-cadence",
           !slowCadence.samplingGap);
+}
+
+void CheckCollectorLossModel(TestResult& r) {
+    CollectorLossTracker tracker;
+    CollectorLossSnapshot first;
+    first.eventEpoch = "0123456789abcdef0123456789abcdef";
+    first.totals[static_cast<std::size_t>(CollectorLossCounter::QueueLost)] = 3;
+    first.totals[static_cast<std::size_t>(CollectorLossCounter::BuffersLost)] = 2;
+    auto deltas = tracker.Preview(first);
+    Check(r, "collector-loss.first-snapshot-reports-existing-loss",
+        deltas.size() == 2 && deltas[0].amount == 3 && deltas[1].amount == 2);
+    Check(r, "collector-loss.preview-does-not-advance-baseline",
+        tracker.Preview(first).size() == 2 && !tracker.Initialized());
+    tracker.Commit(first);
+    Check(r, "collector-loss.same-cumulative-status-is-deduplicated",
+        tracker.Preview(first).empty());
+
+    CollectorLossSnapshot increased = first;
+    increased.totals[static_cast<std::size_t>(CollectorLossCounter::QueueLost)] = 7;
+    deltas = tracker.Preview(increased);
+    Check(r, "collector-loss.increase-emits-only-new-loss",
+        deltas.size() == 1 && deltas[0].previous == 3 && deltas[0].total == 7 &&
+        deltas[0].amount == 4 && !deltas[0].reset);
+
+    const std::string checkpoint = [&] {
+        tracker.Commit(increased);
+        return tracker.Checkpoint();
+    }();
+    CollectorLossTracker restored;
+    std::string error;
+    Check(r, "collector-loss.checkpoint-restores-baseline",
+        restored.Restore(checkpoint, &error) && error.empty() &&
+        restored.Preview(increased).empty());
+    Check(r, "collector-loss.checkpoint-rejects-malformed-values",
+        !restored.Restore("WinTCP-Collector-Loss:1\n" + first.eventEpoch +
+            "\n1\n2x\n0\n0\n0\n0\n", &error) &&
+        error == "collector_loss_checkpoint_invalid");
+
+    CollectorLossSnapshot newEpoch;
+    newEpoch.eventEpoch = "fedcba9876543210fedcba9876543210";
+    newEpoch.totals[static_cast<std::size_t>(CollectorLossCounter::EventsLost)] = 5;
+    deltas = restored.Preview(newEpoch);
+    Check(r, "collector-loss.new-event-epoch-starts-fresh-baseline",
+        deltas.size() == 1 && deltas[0].previous == 0 && deltas[0].amount == 5);
+
+    CollectorLossSnapshot reset = increased;
+    reset.totals[static_cast<std::size_t>(CollectorLossCounter::QueueLost)] = 1;
+    deltas = restored.Preview(reset);
+    Check(r, "collector-loss.same-epoch-counter-reset-is-explicit",
+        deltas.size() == 1 && deltas[0].reset && deltas[0].amount == 0 &&
+        deltas[0].previous == 7 && deltas[0].total == 1);
 }
 
 void CheckQpcClockMapper(TestResult& r) {
@@ -12012,6 +12064,7 @@ static const unsigned char kClientHello[] = {
     CheckEngineStore(r);
     CheckEngineOperations(r);
     CheckEngineClock(r);
+    CheckCollectorLossModel(r);
     CheckQpcClockMapper(r);
     CheckRecipeModel(r);
     CheckRestrictionModel(r);
