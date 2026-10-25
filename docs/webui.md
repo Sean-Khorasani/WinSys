@@ -303,6 +303,10 @@ broker rechecks the executable's file identity and verified WFP filters before
 reporting success. The notice is recorded in the inbox with the resulting lease
 ID and a direct link to its triggering retained event. This is post-observation
 mitigation, not prevention of the first attempt.
+Inbox links resolve Passive event IDs and Active trigger IDs in the shared,
+durable event history. The event history is bounded and rotated; when a linked
+record has expired, the page reports that it is no longer retained instead of
+showing unrelated evidence.
 The current UI exposes a one-action budget per arm; the broker also enforces
 the grant lifetime and cumulative-duration limits. Disarm, recipe edit/disable/
 delete, heartbeat loss, broker exit, and restart invalidate the grant and
