@@ -276,6 +276,9 @@ The Automations **Engine** tab reads the optional per-user snapshot engine. It
 shows its actual sample state and a small recent-events page. Start or stop it
 from the Engine or Monitors tab, or use `wintcp.exe engine start|stop`. The Web
 UI starts it as the current user without requesting elevation.
+Stopping waits until the engine has drained its workers and released its
+single-instance lock before reporting success, so a Start immediately after a
+successful Stop does not race the previous engine's shutdown.
 
 The Monitors list shows whether each rule is disabled, starting, running, or
 degraded, its current cooldown state, and the latest trigger recorded in this
