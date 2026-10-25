@@ -237,6 +237,7 @@
     <ClCompile Include="src\ConnectionEventCollector.cpp" />
     <ClCompile Include="src\ProcessInstanceCache.cpp" />
     <ClCompile Include="src\LifecycleFlowModel.cpp" />
+    <ClCompile Include="src\IncidentRecorderModel.cpp" />
     <ClCompile Include="src\RestrictionWfp.cpp" />
     <ClCompile Include="src\NetworkEvents.cpp" />
     <ClCompile Include="src\SnapshotEvents.cpp" />
@@ -337,6 +338,7 @@
     <ClInclude Include="src\ConnectionEventCollector.h" />
     <ClInclude Include="src\ProcessInstanceCache.h" />
     <ClInclude Include="src\LifecycleFlowModel.h" />
+    <ClInclude Include="src\IncidentRecorderModel.h" />
     <ClInclude Include="src\RestrictionWfp.h" />
     <ClInclude Include="src\NetworkEvents.h" />
     <ClInclude Include="src\SnapshotEvents.h" />
