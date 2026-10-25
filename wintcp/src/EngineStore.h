@@ -17,6 +17,7 @@ namespace wintcp {
 struct EngineStorePage {
     std::vector<std::string> items;  // validated, serialized JSON records
     std::string nextCursor;
+    bool hasMore = false;
     bool cursorExpired = false;
     bool partialTail = false;
     std::string error;
