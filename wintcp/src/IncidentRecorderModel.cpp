@@ -57,10 +57,6 @@ bool IncidentRecorderModel::MakeRoom(std::size_t bytes) {
 
 void IncidentRecorderModel::EndActive() {
     active_.active = false;
-    for (const SizedRecord& record : activeRecords_)
-        if (record.record.use_count() == 1)
-            storedBytes_ -= record.bytes;
-    activeRecords_.clear();
 }
 
 bool IncidentRecorderModel::Observe(IncidentRecord record) {
@@ -119,6 +115,10 @@ bool IncidentRecorderModel::Trigger(IncidentTrigger trigger, bool related) {
 
     if (active_.active && related &&
         trigger.monotonicNs <= active_.postDeadlineMonotonicNs) {
+        if (std::any_of(active_.triggers.begin(), active_.triggers.end(),
+                [&trigger](const IncidentTrigger& existing) {
+                    return existing.id == trigger.id;
+                })) return true;
         if (active_.triggers.size() >= kMaxTriggersPerIncident) {
             active_.triggersTruncated = true;
             if (active_.lostTriggers !=
@@ -188,6 +188,13 @@ void IncidentRecorderModel::Close(std::uint64_t monotonicNs) {
     }
 }
 
+void IncidentRecorderModel::Stop(std::uint64_t monotonicNs) {
+    if (!active_.active) return;
+    active_.endMonotonicNs = monotonicNs;
+    active_.postWindowIncomplete = true;
+    EndActive();
+}
+
 IncidentSnapshot IncidentRecorderModel::Snapshot() const {
     IncidentSnapshot result = active_;
     result.lostRecords = lostRecords_;
@@ -195,6 +202,36 @@ IncidentSnapshot IncidentRecorderModel::Snapshot() const {
     for (const SizedRecord& item : activeRecords_)
         result.records.push_back(*item.record);
     return result;
+}
+
+IncidentSnapshot IncidentRecorderModel::Summary() const {
+    IncidentSnapshot result = active_;
+    result.lostRecords = lostRecords_;
+    return result;
+}
+
+IncidentRecordPage IncidentRecorderModel::ReadPage(std::size_t offset,
+    std::size_t limit, std::size_t maxBytes) const {
+    IncidentRecordPage page;
+    page.incident = Summary();
+    if (limit == 0 || limit > 100 || maxBytes == 0 || offset > activeRecords_.size()) {
+        page.error = "invalid_incident_page";
+        return page;
+    }
+    std::size_t responseBytes = 0;
+    for (std::size_t i = offset;
+         i < activeRecords_.size() && page.incident.records.size() < limit; ++i) {
+        const SizedRecord& item = activeRecords_[i];
+        if (item.bytes > maxBytes - (std::min)(responseBytes, maxBytes)) {
+            if (page.incident.records.empty()) page.error = "incident_record_too_large";
+            break;
+        }
+        responseBytes += item.bytes;
+        page.incident.records.push_back(*item.record);
+    }
+    page.nextOffset = offset + page.incident.records.size();
+    page.hasMore = page.nextOffset < activeRecords_.size();
+    return page;
 }
 
 IncidentSnapshot IncidentRecorderModel::TakeSnapshot() {
