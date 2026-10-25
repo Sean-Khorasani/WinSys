@@ -29,6 +29,8 @@ struct IncidentSnapshot {
     std::string id;
     std::uint64_t startMonotonicNs = 0;
     std::uint64_t firstTriggerMonotonicNs = 0;
+    std::uint64_t prehistoryWindowNs = 0;
+    std::uint64_t prehistoryRetainedNs = 0;
     std::uint64_t postDeadlineMonotonicNs = 0;
     std::uint64_t endMonotonicNs = 0;
     bool active = false;
