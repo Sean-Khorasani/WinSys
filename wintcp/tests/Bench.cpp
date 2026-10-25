@@ -43,7 +43,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "EngineStore.h"
 #include "EngineOperations.h"
 #include "EngineIdentity.h"
-#include "BoundedQueueBudget.h"
+#include "BoundedEventQueue.h"
 #include "EngineClock.h"
 #include "CollectorLossModel.h"
 #include "RecipeModel.h"
@@ -74,9 +74,11 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include <cstdio>
 #include <limits>
 #include <cstring>
+#include <future>
 #include <set>
 #include <stdexcept>   // std::runtime_error for the guarded.* containment checks
 #include <string>
+#include <thread>
 #include <vector>
 
 // Alerts.h is included from inside namespace wintcp (below), so a
@@ -2308,30 +2310,71 @@ void CheckEngineIdentity(TestResult& r) {
           !SameEnginePeer(sid, 7, L"S-1-5-21-100-200-300-1002", 8));
 }
 
-void CheckBoundedQueueBudget(TestResult& r) {
+void CheckBoundedEventQueue(TestResult& r) {
     using namespace wintcp;
-    BoundedQueueBudget queue(2, 10);
-    Check(r, "queue-budget.accept-within-capacity", queue.CanAccept(5));
-    if (queue.CanAccept(5)) queue.Accepted(5);
-    if (queue.CanAccept(5)) queue.Accepted(5);
-    Check(r, "queue-budget.rejects-record-cap",
-          !queue.CanAccept(1) && queue.Records() == 2);
-    queue.RecordDrop();
-    queue.Removed(5);
-    Check(r, "queue-budget.drain-restores-record-slot",
-          queue.CanAccept(5) && queue.Records() == 1 && queue.Bytes() == 5);
-    if (queue.CanAccept(5)) queue.Accepted(5);
-    Check(r, "queue-budget.rejects-byte-cap",
-          !queue.CanAccept(1) && queue.Lost() == 1);
-    queue.RecordDrop();
-    Check(r, "queue-budget.reports-rejected-records", queue.Lost() == 2);
+    BoundedEventQueue<unsigned> queue(2, 10);
+    Check(r, "event-queue.accepts-within-capacity",
+          queue.TryPush(1, 5) && queue.TryPush(2, 5));
+    Check(r, "event-queue.rejects-record-cap-and-counts-loss",
+          !queue.TryPush(3, 1) && queue.Size() == 2 && queue.Lost() == 1);
+    unsigned record = 0;
+    Check(r, "event-queue.dequeue-releases-capacity",
+          queue.TryPop(&record) && record == 1 && queue.Size() == 1 &&
+          queue.Bytes() == 5 && queue.TryPush(3, 5));
+    Check(r, "event-queue.drained-record-order",
+          queue.TryPop(&record) && record == 2 && queue.TryPop(&record) &&
+          record == 3 && !queue.TryPop(&record));
+
+    BoundedEventQueue<unsigned> byteBounded(3, 10);
+    const bool firstBytePush = byteBounded.TryPush(1, 6);
+    const bool byteOverflow = !byteBounded.TryPush(2, 5);
+    const bool exactByteFill = byteBounded.TryPush(3, 4);
+    const bool byteOverflowCounted = !byteBounded.TryPush(4, 1) &&
+        byteBounded.Lost() == 2 && byteBounded.Bytes() == 10;
+    Check(r, "event-queue.rejects-byte-cap-and-counts-loss",
+          firstBytePush && byteOverflow && exactByteFill && byteOverflowCounted);
+    byteBounded.RecordDrop();
+    Check(r, "event-queue.invalid-payload-loss-counted", byteBounded.Lost() == 3);
+
+    CollectorLossTracker tracker;
+    CollectorLossSnapshot snapshot;
+    snapshot.eventEpoch = "0123456789abcdef0123456789abcdef";
+    snapshot.totals[static_cast<std::size_t>(CollectorLossCounter::QueueLost)] =
+        byteBounded.Lost();
+    const auto loss = tracker.Preview(snapshot);
+    Check(r, "event-queue.loss-becomes-coverage-metadata",
+          loss.size() == 1 && loss[0].counter == CollectorLossCounter::QueueLost &&
+          loss[0].amount == 3 &&
+          std::string(CollectorLossCounterReason(loss[0].counter)) ==
+              "collector_queue_records_lost");
+
+    BoundedEventQueue<unsigned> wakeQueue(1, 4);
+    std::promise<bool> consumed;
+    std::future<bool> consumedResult = consumed.get_future();
+    std::thread consumer([&wakeQueue, &consumed] {
+        wakeQueue.WaitForDataFor(std::chrono::milliseconds(1000), [] { return false; });
+        unsigned value = 0;
+        consumed.set_value(wakeQueue.TryPop(&value) && value == 42);
+    });
+    const bool wakeEnqueued = wakeQueue.TryPush(42, 4);
+    const bool wokePromptly = consumedResult.wait_for(std::chrono::milliseconds(500)) ==
+        std::future_status::ready;
+    if (!wokePromptly) consumedResult.wait();
+    const bool consumedValue = consumedResult.get();
+    consumer.join();
+    Check(r, "event-queue.consumer-wakes-for-new-record",
+          wakeEnqueued && wokePromptly && consumedValue);
+
+    const bool pendingBeforeShutdown = queue.TryPush(4, 5) && queue.TryPush(5, 5);
     queue.DropPending();
-    Check(r, "queue-budget.shutdown-counts-discarded-records",
-          queue.Lost() == 4 && queue.Records() == 0 && queue.Bytes() == 0);
-    Check(r, "queue-budget.capacity-recovers-after-discard", queue.CanAccept(10));
+    Check(r, "event-queue.shutdown-counts-discarded-records",
+          pendingBeforeShutdown && queue.Lost() == 3 && queue.Size() == 0 &&
+          queue.Bytes() == 0);
+    Check(r, "event-queue.capacity-recovers-after-discard",
+          queue.TryPush(4, 10));
     queue.Reset();
-    Check(r, "queue-budget.reset-starts-new-collector-epoch",
-          queue.Lost() == 0 && queue.CanAccept(10));
+    Check(r, "event-queue.reset-starts-new-trace-epoch",
+          queue.Lost() == 0 && queue.Size() == 0 && queue.TryPush(5, 10));
 }
 
 void CheckEngineClock(TestResult& r) {
@@ -12105,7 +12148,7 @@ static const unsigned char kClientHello[] = {
     CheckEngineStore(r);
     CheckEngineOperations(r);
     CheckEngineIdentity(r);
-    CheckBoundedQueueBudget(r);
+    CheckBoundedEventQueue(r);
     CheckEngineClock(r);
     CheckCollectorLossModel(r);
     CheckQpcClockMapper(r);
