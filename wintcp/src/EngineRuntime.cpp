@@ -12,6 +12,7 @@
 #include <shlobj.h>
 
 #include "EngineRuntime.h"
+#include "EngineIdentity.h"
 
 #include <algorithm>
 #include <atomic>
@@ -404,8 +405,9 @@ bool SameClient(HANDLE pipe, const Identity& own) {
     Identity peer;
     bool same = false;
     if (::OpenThreadToken(::GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
-        same = TokenIdentity(token, &peer) && peer.session == own.session &&
-               ::EqualSid(peer.sid.data(), const_cast<unsigned char*>(own.sid.data())) != FALSE;
+        same = TokenIdentity(token, &peer) &&
+               SameEnginePeer(own.sidText, own.session,
+                              peer.sidText, peer.session);
         ::CloseHandle(token);
     }
     ::RevertToSelf();
