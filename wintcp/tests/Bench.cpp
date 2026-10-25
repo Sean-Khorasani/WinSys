@@ -42,6 +42,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "EngineConfig.h"
 #include "EngineStore.h"
 #include "EngineOperations.h"
+#include "EngineIdentity.h"
 #include "EngineClock.h"
 #include "CollectorLossModel.h"
 #include "RecipeModel.h"
@@ -2291,6 +2292,19 @@ void CheckEngineOperations(TestResult& r) {
               .disposition == OperationDisposition::Created &&
           journal.Size() == 1000 &&
           journal.Find(lastGeneralId, 9000001) == nullptr);
+}
+
+void CheckEngineIdentity(TestResult& r) {
+    using namespace wintcp;
+    const std::wstring sid = L"S-1-5-21-100-200-300-1001";
+    Check(r, "engine-identity.same-user-session",
+          SameEnginePeer(sid, 7, sid, 7));
+    Check(r, "engine-identity.rejects-different-session",
+          !SameEnginePeer(sid, 7, sid, 8));
+    Check(r, "engine-identity.rejects-different-user",
+          !SameEnginePeer(sid, 7, L"S-1-5-21-100-200-300-1002", 7));
+    Check(r, "engine-identity.rejects-both-different",
+          !SameEnginePeer(sid, 7, L"S-1-5-21-100-200-300-1002", 8));
 }
 
 void CheckEngineClock(TestResult& r) {
@@ -12063,6 +12077,7 @@ static const unsigned char kClientHello[] = {
     CheckEngineConfig(r);
     CheckEngineStore(r);
     CheckEngineOperations(r);
+    CheckEngineIdentity(r);
     CheckEngineClock(r);
     CheckCollectorLossModel(r);
     CheckQpcClockMapper(r);
