@@ -115,6 +115,7 @@
     <ClCompile Include="src\ProcessInstanceCache.cpp" />
     <ClCompile Include="src\LifecycleFlowModel.cpp" />
     <ClCompile Include="src\IncidentRecorderModel.cpp" />
+    <ClCompile Include="src\IncidentArchive.cpp" />
     <ClCompile Include="src\RestrictionWfp.cpp" />
     <ClCompile Include="src\NetworkEvents.cpp" />
     <ClCompile Include="src\SnapshotEvents.cpp" />
