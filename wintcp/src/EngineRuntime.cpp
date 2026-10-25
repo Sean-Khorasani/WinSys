@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -483,15 +485,42 @@ ClockSample SampleClock() {
     return sample;
 }
 
+struct RecipeCooldownRecovery {
+    std::string key;
+    std::uint64_t remainingNs = 0;
+    std::uint64_t savedMonotonicNs = 0;
+    std::uint64_t savedUtcMs = 0;
+};
+
 struct State {
     std::mutex mutex;
     std::mutex historyMutex;
     std::mutex recipesMutex;
+    // Snapshot and lifecycle ingestion both mutate the same evaluator and
+    // persist its checkpoint. Serialize that transaction so an older snapshot
+    // checkpoint cannot overwrite newer ETW cooldown state.
+    std::mutex recipeCommitMutex;
+    std::mutex notificationMutex;
+    std::mutex eventEvidenceMutex;
+    std::mutex actionGrantsMutex;
+    std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> armedActionRecipes;
+    std::set<std::string> pendingActionRecipes;
+    std::uint64_t reactiveActionQueueLost = 0;
+    std::uint64_t reactiveActionFailures = 0;
+    std::string reactiveActionLastFailure;
     NetworkEventJournal journal{16384, 64 * 1024 * 1024};
     EngineStore eventStore;
     EngineStore notificationStore;
     EngineStore auditStore;
     EngineStore lifecycleStore;
+    std::set<std::string> notificationEvidenceKeys;
+    std::deque<std::string> notificationEvidenceOrder;
+    std::deque<RecipeCooldownRecovery> cooldownRecoveries;
+    std::set<std::string> recipesWithRestrictionHistory;
+    std::set<std::string> persistedEventIds;
+    std::deque<std::string> persistedEventOrder;
+    std::set<std::string> persistedLifecycleIds;
+    std::deque<std::string> persistedLifecycleOrder;
     std::set<std::string> acknowledgedNotifications;
     std::vector<RecipeDef> recipes;
     RecipeEvaluator recipeEvaluator;
@@ -520,6 +549,7 @@ struct State {
     std::condition_variable operationsReady;
     EngineOperations operations;
     bool collectorConnected = false;
+    bool collectorStopConfirmed = false;
     bool restrictionsAvailable = false;
     std::string collectorReason = "collector_not_connected";
     std::string collectorLastSampleUtc;
@@ -530,6 +560,9 @@ struct State {
     bool lifecycleNeedsDrain = false;
     std::uint64_t lifecyclePersisted = 0;
     std::uint64_t lifecycleLost = 0;
+    std::uint64_t lifecycleTcpNormalized = 0;
+    std::uint64_t lifecycleUdpNormalized = 0;
+    std::uint64_t lifecycleProcessNormalized = 0;
     std::string lifecycleError;
 };
 
@@ -540,6 +573,360 @@ bool SafeId(const std::string& id, std::size_t maxLength) {
             (c < '0' || c > '9') && c != '-' && c != '_') return false;
     }
     return true;
+}
+
+bool SimpleJsonField(const std::string& json, const std::string& key,
+                     std::string* value) {
+    if (value == nullptr) return false;
+    const std::string marker = "\"" + key + "\":\"";
+    const std::size_t start = json.find(marker);
+    if (start == std::string::npos) return false;
+    const std::size_t begin = start + marker.size();
+    const std::size_t end = json.find('"', begin);
+    if (end == std::string::npos) return false;
+    *value = json.substr(begin, end - begin);
+    return value->find('\\') == std::string::npos;
+}
+
+bool ParseUnsignedField(const std::string& text, std::uint64_t* value) {
+    if (value == nullptr || text.empty()) return false;
+    std::uint64_t parsed = 0;
+    for (char c : text) {
+        if (c < '0' || c > '9') return false;
+        const std::uint64_t digit = static_cast<std::uint64_t>(c - '0');
+        if (parsed > ((std::numeric_limits<std::uint64_t>::max)() - digit) / 10)
+            return false;
+        parsed = parsed * 10 + digit;
+    }
+    *value = parsed;
+    return true;
+}
+
+std::string NotificationEvidenceKey(const std::string& recipeId,
+                                    const std::string& revision,
+                                    const std::string& eventId);
+bool AppendRecipeNotices(State* state, const std::vector<std::string>& notices,
+                         const std::vector<std::string>& keys,
+                         std::size_t* attempted, std::size_t* written,
+                         std::string* error);
+
+std::string RecordRestrictionNotification(State* state,
+                                          const std::string& resultJson,
+                                          const std::string& triggerEventId = {}) {
+    std::string owner, leaseId;
+    if (!SimpleJsonField(resultJson, "owner", &owner) ||
+        !SimpleJsonField(resultJson, "id", &leaseId) ||
+        owner.rfind("recipe:", 0) != 0 || !SafeId(leaseId, 64)) return {};
+    const std::string recipeId = owner.substr(7);
+    RecipeDef recipe;
+    std::string notificationId;
+    {
+        std::lock_guard<std::mutex> lock(state->recipesMutex);
+        const auto found = std::find_if(state->recipes.begin(), state->recipes.end(),
+            [&recipeId](const RecipeDef& item) { return item.id == recipeId; });
+        if (found == state->recipes.end()) return {};
+        recipe = *found;
+        notificationId = state->epoch + ":notification-" +
+            std::to_string(++state->notificationSequence);
+    }
+    const ClockSample clock = SampleClock();
+    const bool activeAction = resultJson.find("\"activeRecipeAction\":true") !=
+        std::string::npos;
+    const std::string record = "{\"schemaVersion\":1,\"id\":" +
+        NetworkJsonQuote(notificationId) + ",\"recipeId\":" +
+        NetworkJsonQuote(recipe.id) + ",\"recipeRevision\":\"" +
+        std::to_string(recipe.revision) + "\",\"eventId\":" +
+        NetworkJsonQuote(leaseId) + ",\"occurredAtUtc\":" +
+        NetworkJsonQuote(clock.utc) +
+        ",\"triggerEventId\":" + (activeAction && !triggerEventId.empty()
+            ? NetworkJsonQuote(triggerEventId) : "null") +
+        ",\"reason\":" + NetworkJsonQuote(activeAction ?
+            "active_recipe_action_verified" : "while_armed_restriction_verified") +
+        ",\"coverage\":\"restriction_verified\",\"message\":" +
+        NetworkJsonQuote(activeAction ?
+            "A reviewed automatic recipe action installed and verified a temporary outbound restriction for " +
+                recipe.name + " (" + recipe.imagePath + "). Lease " + leaseId +
+                " expires automatically; inspect Restrictions for current status." :
+            "A reviewed preemptive outbound restriction was verified at apply time for " +
+            recipe.name + " (" + recipe.imagePath + "). Lease " + leaseId +
+            " expires automatically or can be disarmed; inspect Restrictions for current status.") +
+        ",\"restrictionLeaseId\":" + NetworkJsonQuote(leaseId) +
+        ",\"acknowledged\":false,\"deliveryStatus\":\"inbox\",\"suppressed\":\"0\"}";
+    const std::string key = NotificationEvidenceKey(recipe.id,
+        std::to_string(recipe.revision), leaseId);
+    std::size_t attempted = 0, written = 0;
+    std::string error;
+    const bool saved = AppendRecipeNotices(state, {record}, {key},
+        &attempted, &written, &error);
+    if (saved && attempted == written) {
+        std::lock_guard<std::mutex> notificationLock(state->notificationMutex);
+        state->recipesWithRestrictionHistory.insert(recipe.id);
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->notificationsWritten += written;
+        if (!saved || written < attempted) {
+            state->notificationsLost += attempted - written;
+            if (error.empty()) error = "restriction_notification_write_failed";
+            state->notificationError = error;
+        } else {
+            state->notificationError.clear();
+        }
+    }
+    return (saved && (attempted == 0 || written == attempted))
+        ? notificationId : std::string();
+}
+
+std::string NotificationEvidenceKey(const std::string& recipeId,
+                                    const std::string& revision,
+                                    const std::string& eventId) {
+    return recipeId + ':' + revision + ':' + eventId;
+}
+
+bool RememberNotificationEvidence(State* state, const std::string& key) {
+    if (key.empty() || state->notificationEvidenceKeys.count(key) != 0) return false;
+    constexpr std::size_t kRememberedNotifications = 50000;
+    while (state->notificationEvidenceOrder.size() >= kRememberedNotifications) {
+        state->notificationEvidenceKeys.erase(state->notificationEvidenceOrder.front());
+        state->notificationEvidenceOrder.pop_front();
+    }
+    state->notificationEvidenceKeys.insert(key);
+    state->notificationEvidenceOrder.push_back(key);
+    return true;
+}
+
+bool AppendRecipeNotices(State* state, const std::vector<std::string>& notices,
+                         const std::vector<std::string>& keys,
+                         std::size_t* attempted, std::size_t* written,
+                         std::string* error) {
+    if (attempted == nullptr || written == nullptr || error == nullptr ||
+        notices.size() != keys.size()) return false;
+    *attempted = 0;
+    *written = 0;
+    error->clear();
+    std::lock_guard<std::mutex> dedupLock(state->notificationMutex);
+    std::vector<std::string> pendingNotices;
+    std::vector<std::string> pendingKeys;
+    for (std::size_t i = 0; i < notices.size(); ++i) {
+        if (state->notificationEvidenceKeys.count(keys[i]) != 0) continue;
+        pendingNotices.push_back(notices[i]);
+        pendingKeys.push_back(keys[i]);
+    }
+    *attempted = pendingNotices.size();
+    bool saved = false;
+    {
+        std::lock_guard<std::mutex> historyLock(state->historyMutex);
+        saved = state->notificationStore.Append(pendingNotices, written, error);
+    }
+    for (std::size_t i = 0; i < *written && i < pendingKeys.size(); ++i)
+        (void)RememberNotificationEvidence(state, pendingKeys[i]);
+    return saved;
+}
+
+bool LoadNotificationEvidenceKeys(State* state) {
+    std::string cursor;
+    std::lock_guard<std::mutex> dedupLock(state->notificationMutex);
+    for (unsigned pageNumber = 0; pageNumber < 500; ++pageNumber) {
+        const EngineStorePage page = state->notificationStore.Read(cursor, 500, 220000);
+        if (page.cursorExpired || !page.error.empty()) return false;
+        for (const std::string& item : page.items) {
+            std::string recipeId, revision, eventId;
+            if (!SimpleJsonField(item, "recipeId", &recipeId) ||
+                !SimpleJsonField(item, "recipeRevision", &revision) ||
+                !SimpleJsonField(item, "eventId", &eventId) ||
+                recipeId.empty() || revision.empty() || eventId.empty()) continue;
+            (void)RememberNotificationEvidence(state,
+                NotificationEvidenceKey(recipeId, revision, eventId));
+            if (item.find("\"reason\":\"while_armed_restriction_verified\"") !=
+                    std::string::npos ||
+                item.find("\"reason\":\"active_recipe_action_verified\"") !=
+                    std::string::npos)
+                state->recipesWithRestrictionHistory.insert(recipeId);
+            if (item.find("\"recoveryCooldownKey\":") != std::string::npos) {
+                RecipeCooldownRecovery recovery;
+                std::string remaining, savedMonotonic, savedUtc;
+                if (!SimpleJsonField(item, "recoveryCooldownKey", &recovery.key) ||
+                    !SimpleJsonField(item, "recoveryCooldownRemainingNs", &remaining) ||
+                    !SimpleJsonField(item, "recoverySavedMonotonicNs", &savedMonotonic) ||
+                    !SimpleJsonField(item, "recoverySavedUtcMs", &savedUtc) ||
+                    !ParseUnsignedField(remaining, &recovery.remainingNs) ||
+                    !ParseUnsignedField(savedMonotonic, &recovery.savedMonotonicNs) ||
+                    !ParseUnsignedField(savedUtc, &recovery.savedUtcMs) ||
+                    recovery.key.empty() || recovery.key.size() > 1024 ||
+                    recovery.savedUtcMs == 0)
+                    return false;
+                constexpr std::size_t kMaxCooldownRecoveries = 10000;
+                while (state->cooldownRecoveries.size() >= kMaxCooldownRecoveries)
+                    state->cooldownRecoveries.pop_front();
+                state->cooldownRecoveries.push_back(std::move(recovery));
+            }
+        }
+        if (page.items.empty() || page.nextCursor == cursor) return true;
+        cursor = page.nextCursor;
+    }
+    return false;
+}
+
+void RememberPersistedEvent(State* state, const std::string& eventId) {
+    if (eventId.empty() || state->persistedEventIds.count(eventId) != 0) return;
+    constexpr std::size_t kRememberedEvents = 100000;
+    while (state->persistedEventOrder.size() >= kRememberedEvents) {
+        state->persistedEventIds.erase(state->persistedEventOrder.front());
+        state->persistedEventOrder.pop_front();
+    }
+    state->persistedEventIds.insert(eventId);
+    state->persistedEventOrder.push_back(eventId);
+}
+
+bool LoadPersistedEventIds(State* state) {
+    std::string cursor;
+    std::lock_guard<std::mutex> eventLock(state->eventEvidenceMutex);
+    for (unsigned pageNumber = 0; pageNumber < 500; ++pageNumber) {
+        const EngineStorePage page = state->eventStore.Read(cursor, 500, 220000);
+        if (page.cursorExpired || !page.error.empty()) return false;
+        for (const std::string& item : page.items) {
+            std::string eventId;
+            if (SimpleJsonField(item, "eventId", &eventId) && !eventId.empty())
+                RememberPersistedEvent(state, eventId);
+        }
+        if (page.items.empty() || page.nextCursor == cursor) return true;
+        cursor = page.nextCursor;
+    }
+    return false;
+}
+
+void RememberPersistedLifecycleId(State* state, const std::string& eventId) {
+    if (eventId.empty() || state->persistedLifecycleIds.count(eventId) != 0) return;
+    constexpr std::size_t kRememberedLifecycleRecords = 100000;
+    while (state->persistedLifecycleOrder.size() >= kRememberedLifecycleRecords) {
+        state->persistedLifecycleIds.erase(state->persistedLifecycleOrder.front());
+        state->persistedLifecycleOrder.pop_front();
+    }
+    state->persistedLifecycleIds.insert(eventId);
+    state->persistedLifecycleOrder.push_back(eventId);
+}
+
+bool LoadPersistedLifecycleIds(State* state) {
+    std::string cursor;
+    for (unsigned pageNumber = 0; pageNumber < 500; ++pageNumber) {
+        const EngineStorePage page = state->lifecycleStore.Read(cursor, 500, 220000);
+        if (page.cursorExpired || !page.error.empty()) return false;
+        for (const std::string& item : page.items) {
+            std::string eventId;
+            if (SimpleJsonField(item, "eventId", &eventId) && !eventId.empty())
+                RememberPersistedLifecycleId(state, eventId);
+        }
+        if (page.items.empty() || page.nextCursor == cursor) return true;
+        cursor = page.nextCursor;
+    }
+    return false;
+}
+
+bool RecipeOwnerCanArm(State* state, const std::string& payload) {
+    std::vector<std::string> fields;
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t end = payload.find('\n', start);
+        fields.push_back(payload.substr(start, end == std::string::npos
+            ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    if ((fields.size() != 6 && fields.size() != 11) ||
+        fields[5].rfind("recipe:", 0) != 0) return true;
+    const std::string id = fields[5].substr(7);
+    if (!SafeId(id, 64)) return false;
+    std::lock_guard<std::mutex> lock(state->recipesMutex);
+    const auto found = std::find_if(state->recipes.begin(), state->recipes.end(),
+        [&id](const RecipeDef& item) { return item.id == id; });
+    const bool armAction = fields.size() == 11;
+    std::uint64_t requestedRevision = 0;
+    if (armAction) {
+        try { requestedRevision = std::stoull(fields[6]); }
+        catch (...) { return false; }
+    }
+    return found != state->recipes.end() && found->enabled &&
+        found->trigger == RecipeTrigger::OutboundActivity &&
+        found->imagePath == fields[0] &&
+        (!armAction || requestedRevision == found->revision);
+}
+
+bool ProcessOwnedByEngineUser(std::uint32_t pid) {
+    if (pid == 0) return false;
+    HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    HANDLE targetToken = nullptr, engineToken = nullptr;
+    bool sameUser = false;
+    if (process != nullptr &&
+        ::OpenProcessToken(process, TOKEN_QUERY, &targetToken) &&
+        ::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &engineToken)) {
+        DWORD targetBytes = 0, engineBytes = 0;
+        (void)::GetTokenInformation(targetToken, TokenUser, nullptr, 0, &targetBytes);
+        (void)::GetTokenInformation(engineToken, TokenUser, nullptr, 0, &engineBytes);
+        if (targetBytes >= sizeof(TOKEN_USER) && targetBytes <= 65536 &&
+            engineBytes >= sizeof(TOKEN_USER) && engineBytes <= 65536) {
+            std::vector<unsigned char> target(targetBytes), engine(engineBytes);
+            if (::GetTokenInformation(targetToken, TokenUser, target.data(),
+                    targetBytes, &targetBytes) &&
+                ::GetTokenInformation(engineToken, TokenUser, engine.data(),
+                    engineBytes, &engineBytes)) {
+                const auto* targetUser = reinterpret_cast<const TOKEN_USER*>(target.data());
+                const auto* engineUser = reinterpret_cast<const TOKEN_USER*>(engine.data());
+                sameUser = ::EqualSid(targetUser->User.Sid, engineUser->User.Sid) != FALSE;
+            }
+        }
+    }
+    if (targetToken != nullptr) ::CloseHandle(targetToken);
+    if (engineToken != nullptr) ::CloseHandle(engineToken);
+    if (process != nullptr) ::CloseHandle(process);
+    return sameUser;
+}
+
+void QueueReactiveAction(State* state, const RecipeDef& recipe,
+                         const NetworkEvent& event) {
+    const std::string owner = "recipe:" + recipe.id;
+    {
+        std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+        const auto armed = state->armedActionRecipes.find(owner);
+        if (armed == state->armedActionRecipes.end() ||
+            armed->second.first != recipe.revision ||
+            SampleClock().utcMs >= armed->second.second ||
+            state->pendingActionRecipes.find(owner) !=
+                state->pendingActionRecipes.end()) return;
+    }
+    // Reject unrelated/incomplete evidence before opening a process handle.
+    // The current-user check is separate and is repeated against the actual
+    // token only after a still-live grant has been found.
+    if (!RecipeActionEventEligible(recipe, event, true) ||
+        !ProcessOwnedByEngineUser(event.process.pid)) return;
+    {
+        std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+        const auto armed = state->armedActionRecipes.find(owner);
+        if (armed == state->armedActionRecipes.end() ||
+            armed->second.first != recipe.revision ||
+            SampleClock().utcMs >= armed->second.second ||
+            !state->pendingActionRecipes.insert(owner).second) return;
+    }
+    const std::string body = owner + '\n' + std::to_string(recipe.revision) + '\n' +
+        event.eventId + '\n' + event.remote.address + '\n' +
+        std::to_string(event.remote.port) + '\n' + event.transport;
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> lock(state->operationsMutex);
+        const std::string requestId = "reactive" + std::to_string(
+            state->operations.Size()) + std::to_string(::GetTickCount64());
+        const OperationSubmission submitted = state->operations.Submit(requestId,
+            "", body, ::GetTickCount64(), "collector.trigger-reactive");
+        queued = submitted.disposition == OperationDisposition::Created ||
+            submitted.disposition == OperationDisposition::Duplicate;
+    }
+    if (queued) state->operationsReady.notify_all();
+    else {
+        std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+        state->pendingActionRecipes.erase(owner);
+        if (state->reactiveActionQueueLost !=
+            (std::numeric_limits<std::uint64_t>::max)())
+            ++state->reactiveActionQueueLost;
+    }
 }
 
 bool RevisionSyntax(const std::string& revision) {
@@ -563,12 +950,76 @@ std::string ConfigJson(const EngineConfig& config,
         "}";
 }
 
-std::string RecipesJson(const std::vector<RecipeDef>& recipes) {
+std::string RecipesJson(State* state) {
+    const std::uint64_t nowNs = ::GetTickCount64() * 1000000ULL;
+    bool degraded = false, starting = false;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        starting = state->sampleCount == 0;
+        degraded = !state->sampleError.empty();
+    }
+    std::vector<std::pair<RecipeDef, RecipeRuntimeStatus>> rows;
+    std::vector<RecipeDef> definitions;
+    {
+        std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
+        rows.reserve(state->recipes.size());
+        definitions.reserve(state->recipes.size());
+        for (const RecipeDef& recipe : state->recipes) {
+            definitions.push_back(recipe);
+            rows.emplace_back(recipe, state->recipeEvaluator.Status(
+                recipe.id, recipe.revision));
+        }
+    }
+    std::set<std::string> restrictionsPreviouslyApplied;
+    {
+        std::lock_guard<std::mutex> notificationLock(state->notificationMutex);
+        restrictionsPreviouslyApplied = state->recipesWithRestrictionHistory;
+    }
+    std::set<std::string> actionGrants;
+    std::uint64_t actionQueueLost = 0, actionFailures = 0;
+    std::string actionLastFailure;
+    {
+        std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+        const std::uint64_t nowUtc = SampleClock().utcMs;
+        for (const auto& grant : state->armedActionRecipes)
+            if (grant.second.second > nowUtc) actionGrants.insert(grant.first);
+        actionQueueLost = state->reactiveActionQueueLost;
+        actionFailures = state->reactiveActionFailures;
+        actionLastFailure = state->reactiveActionLastFailure;
+    }
     std::string result = "{\"schemaVersion\":1,\"revision\":\"" +
-        RecipesRevision(recipes) + "\",\"items\":[";
-    for (const RecipeDef& recipe : recipes) {
+        RecipesRevision(definitions) + "\",\"activeActionQueueLosses\":\"" +
+        std::to_string(actionQueueLost) + "\",\"activeActionFailures\":\"" +
+        std::to_string(actionFailures) + "\",\"activeActionLastFailure\":" +
+        (actionLastFailure.empty() ? "null" : NetworkJsonQuote(actionLastFailure)) +
+        ",\"items\":[";
+    for (const auto& row : rows) {
+        const RecipeDef& recipe = row.first;
         if (result.back() != '[') result += ',';
-        result += RecipeJson(recipe);
+        const RecipeRuntimeStatus& runtime = row.second;
+        const bool cooldown = recipe.enabled && runtime.revision == recipe.revision &&
+            runtime.cooldownUntilMonotonicNs > nowNs;
+        const std::string stateName = !recipe.enabled ? "disabled" :
+            degraded ? "degraded" : starting ? "starting" : "running";
+        const std::string condition = !recipe.enabled ? "clear" :
+            cooldown ? "cooldown" : "clear";
+        std::string item = RecipeJson(recipe);
+        if (!item.empty() && item.back() == '}') item.pop_back();
+        result += item + ",\"runtime\":{\"state\":" +
+            NetworkJsonQuote(stateName) + ",\"condition\":" +
+            NetworkJsonQuote(condition) + ",\"lastTriggeredAtUtc\":" +
+            (runtime.lastOccurredAtUtc.empty() ? "null" :
+                NetworkJsonQuote(runtime.lastOccurredAtUtc)) +
+            ",\"lastEventId\":" + (runtime.lastEventId.empty() ? "null" :
+                NetworkJsonQuote(runtime.lastEventId)) +
+            ",\"lastReason\":" + (runtime.lastReason.empty() ? "null" :
+                NetworkJsonQuote(runtime.lastReason)) +
+            ",\"suppressed\":\"" + std::to_string(runtime.suppressed) +
+            "\",\"activeActionGrant\":" +
+            (actionGrants.count("recipe:" + recipe.id) != 0 ? "true" : "false") +
+            ",\"restrictionPreviouslyApplied\":" +
+            (restrictionsPreviouslyApplied.count(recipe.id) != 0
+                ? "true" : "false") + "}}";
     }
     return result + "]}";
 }
@@ -844,12 +1295,97 @@ void OperationLoop(State* state, const std::wstring& sid,
             const bool requested = AuditCollectorCommand(state, id, action,
                 "requested", "queued_command", "", &auditError);
             const bool release = action == "stop" || action == "release" ||
-                action == "release-all" || action == "events-stop";
-            if (!requested && !release) error = "audit_unavailable";
+                action == "release-all" || action == "release-owner" ||
+                action == "events-stop";
+            if ((action == "preview" || action == "arm-reactive") &&
+                !RecipeOwnerCanArm(state, configText))
+                error = "recipe_not_enabled_or_target_changed";
+            else if (!requested && !release) error = "audit_unavailable";
             else (void)CollectorExecuteOperation(action, configText,
                     &resultJson, &error, [state] {
                         return ::WaitForSingleObject(state->stopEvent, 0) != WAIT_TIMEOUT;
                     });
+            if (error.empty() && (action == "start" || action == "stop")) {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                const bool running = action == "start";
+                state->collectorConnected = running;
+                state->collectorStopConfirmed = !running;
+                if (!running) {
+                    state->lifecycleEnabled = false;
+                    state->restrictionsAvailable = false;
+                    state->collectorReason = "collector_not_connected";
+                }
+            }
+            if (error.empty() && action == "apply" &&
+                resultJson.find("\"owner\":\"recipe:") != std::string::npos) {
+                const std::string noticeId =
+                    RecordRestrictionNotification(state, resultJson);
+                if (resultJson.size() > 1 && resultJson.back() == '}') {
+                    resultJson.pop_back();
+                    resultJson += ",\"notificationStatus\":" +
+                        NetworkJsonQuote(noticeId.empty() ? "not_recorded" : "recorded") +
+                        (noticeId.empty() ? "}" :
+                            ",\"notificationId\":" + NetworkJsonQuote(noticeId) + "}");
+                }
+            }
+            if (action == "arm-reactive" && error.empty()) {
+                std::vector<std::string> fields;
+                std::size_t start = 0;
+                for (;;) {
+                    const std::size_t end = configText.find('\n', start);
+                    fields.push_back(configText.substr(start, end == std::string::npos
+                        ? std::string::npos : end - start));
+                    if (end == std::string::npos) break;
+                    start = end + 1;
+                }
+                std::string owner;
+                if (fields.size() == 11 && SimpleJsonField(resultJson, "owner", &owner)) {
+                    try {
+                        std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+                        const std::uint64_t revision = std::stoull(fields[6]);
+                        const std::uint64_t grantMinutes = std::stoull(fields[7]);
+                        state->armedActionRecipes[owner] = {revision,
+                            SampleClock().utcMs + grantMinutes * 60000ULL};
+                    } catch (...) { error = "invalid_grant_result"; }
+                } else error = "invalid_grant_result";
+            }
+            if (action == "release-owner" && error.empty()) {
+                std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+                state->armedActionRecipes.erase(configText);
+                state->pendingActionRecipes.erase(configText);
+            }
+            if (action == "trigger-reactive") {
+                const std::size_t ownerEnd = configText.find('\n');
+                const std::size_t revisionEnd = ownerEnd == std::string::npos
+                    ? ownerEnd : configText.find('\n', ownerEnd + 1);
+                const std::size_t eventEnd = revisionEnd == std::string::npos
+                    ? revisionEnd : configText.find('\n', revisionEnd + 1);
+                const std::string owner = ownerEnd == std::string::npos
+                    ? std::string() : configText.substr(0, ownerEnd);
+                const std::string triggerEventId = revisionEnd == std::string::npos
+                    ? std::string() : configText.substr(revisionEnd + 1,
+                        eventEnd == std::string::npos ? std::string::npos :
+                            eventEnd - revisionEnd - 1);
+                if (ownerEnd != std::string::npos) {
+                    std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+                    state->pendingActionRecipes.erase(owner);
+                }
+                if (error.empty() && resultJson.find("\"activeRecipeAction\":true") !=
+                    std::string::npos) {
+                    const std::string notificationId =
+                        RecordRestrictionNotification(state, resultJson, triggerEventId);
+                    if (notificationId.empty()) error = "active_action_notification_unrecorded";
+                    std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+                    state->armedActionRecipes.erase(owner);
+                }
+                if (!error.empty()) {
+                    std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+                    if (state->reactiveActionFailures !=
+                        (std::numeric_limits<std::uint64_t>::max)())
+                        ++state->reactiveActionFailures;
+                    state->reactiveActionLastFailure = error;
+                }
+            }
             std::string completedError;
             // Never persist approval bearer tokens returned by preview.
             const bool completed = AuditCollectorCommand(state, id, action,
@@ -861,6 +1397,11 @@ void OperationLoop(State* state, const std::wstring& sid,
             if (error.empty() && (action == "events-start" || action == "events-stop")) {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 state->lifecycleNeedsDrain = true;
+            }
+            if (error.empty() && action == "events-stop") {
+                std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+                state->armedActionRecipes.clear();
+                state->pendingActionRecipes.clear();
             }
         } else if (kind == "ack") {
             std::lock_guard<std::mutex> historyLock(state->historyMutex);
@@ -887,6 +1428,7 @@ void OperationLoop(State* state, const std::wstring& sid,
             }
         } else if (kind == "recipes") {
             std::vector<RecipeDef> before, after;
+            std::vector<std::string> invalidatedOwners;
             if (!LoadRecipeFile(directory, security, &before, &error, false)) {
                 error = "recipes_unavailable";
             } else if (RecipesRevision(before) != expectedRevision) {
@@ -895,15 +1437,65 @@ void OperationLoop(State* state, const std::wstring& sid,
                 error = "invalid_recipes";
             } else if (!ValidateRecipeUpdate(before, after, &error)) {
                 // The worker revalidates the complete transition before save.
-            } else if (!SaveEngineText(directory, L"recipes", configText,
-                                       security, &error)) {
-                error = "recipes_save_failed";
             } else {
+                invalidatedOwners = RecipeOwnersToInvalidate(before, after);
+                // Cleanup is safe and idempotent even when WFP is degraded.
+                // Availability gates new restrictions, not release. Refresh
+                // helper status for every invalidated owner: the cached flag
+                // can remain true briefly after a clean helper stop, while a
+                // restarted helper may be ready before the next status poll.
+                bool collectorConnected = false;
+                if (!invalidatedOwners.empty()) {
+                    bool previouslyConnected = false;
+                    bool stopConfirmed = false;
+                    {
+                        std::lock_guard<std::mutex> lock(state->mutex);
+                        previouslyConnected = state->collectorConnected;
+                        stopConfirmed = state->collectorStopConfirmed;
+                    }
+                    std::string collectorStatus;
+                    const bool statusAvailable = CollectorStatus(&collectorStatus);
+                    collectorConnected = statusAvailable
+                        ? collectorStatus.find("\"running\":true") !=
+                            std::string::npos
+                        : previouslyConnected && !stopConfirmed;
+                    if (statusAvailable) {
+                        std::lock_guard<std::mutex> lock(state->mutex);
+                        state->collectorConnected = collectorConnected;
+                        if (collectorConnected)
+                            state->collectorStopConfirmed = false;
+                    }
+                }
+                if (collectorConnected) {
+                    for (const std::string& owner : invalidatedOwners) {
+                        std::string cleanupResult, cleanupError;
+                        if (!CollectorExecuteOperation("release-owner",
+                                owner, &cleanupResult,
+                                &cleanupError)) {
+                            error = "recipe_owned_release_failed";
+                            break;
+                        }
+                    }
+                }
+            }
+            if (error.empty() && !SaveEngineText(directory, L"recipes", configText,
+                                       security, &error)) {
+                if (error.empty()) error = "recipes_save_failed";
+            } else if (error.empty()) {
                 resultRevision = RecipesRevision(after);
-                std::lock_guard<std::mutex> lock(state->recipesMutex);
-                state->recipeEvaluator.Reconcile(after);
-                state->recipes = std::move(after);
-                state->recipeCooldownDirty = true;
+                {
+                    std::lock_guard<std::mutex> lock(state->recipesMutex);
+                    state->recipeEvaluator.Reconcile(after);
+                    state->recipes = std::move(after);
+                    state->recipeCooldownDirty = true;
+                }
+                if (!invalidatedOwners.empty()) {
+                    std::lock_guard<std::mutex> actionLock(state->actionGrantsMutex);
+                    for (const std::string& owner : invalidatedOwners) {
+                        state->armedActionRecipes.erase(owner);
+                        state->pendingActionRecipes.erase(owner);
+                    }
+                }
             }
         } else if (!LoadEngineConfig(sid, &current, &error, nullptr, false)) {
             error = "config_unavailable";
@@ -940,6 +1532,7 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
     SnapshotSource source;
     SnapshotEventAdapter adapter(state->epoch);
     EngineClock clock(state->epoch);
+    std::uint64_t samplingGapSequence = 0;
     SnapshotOptions options;
     options.resolveProcesses = true;
     while (::WaitForSingleObject(state->stopEvent, 0) == WAIT_TIMEOUT) {
@@ -947,13 +1540,39 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
         const bool success = source.Build(options, &snapshot);
         const ClockSample sampled = SampleClock();
         const ClockObservation mapping = clock.Observe(sampled.utcMs,
-                                                        sampled.monotonicMs);
+            sampled.monotonicMs, state->config.snapshotIntervalMs);
         const std::string& utc = sampled.utc;
         const std::uint64_t monoNs = sampled.monotonicMs * 1000000ULL;
         std::vector<NetworkEvent> events;
-        if (success) events = adapter.Observe(snapshot.rows, utc, monoNs);
+        if (mapping.samplingGap) {
+            // Snapshot polling cannot date endpoint transitions that occurred
+            // during a long pause. Drop the old comparison baseline so the
+            // next sample is explicitly non-alerting for pre-existing flows.
+            adapter.Reset();
+            NetworkEvent gap;
+            gap.eventId = state->epoch + ":sampling-gap-" +
+                std::to_string(++samplingGapSequence);
+            gap.sourceSequence = "gap-" + std::to_string(samplingGapSequence);
+            gap.source = "snapshot";
+            gap.kind = NetworkEventKind::CoverageGap;
+            gap.occurredAtUtc = utc;
+            gap.receivedAtUtc = utc;
+            gap.monotonicNs = monoNs;
+            gap.timebaseId = mapping.mappingId;
+            gap.lossReason = "sampling_gap";
+            gap.confidence = "observed";
+            events.push_back(std::move(gap));
+        }
+        if (success) {
+            std::vector<NetworkEvent> observed =
+                adapter.Observe(snapshot.rows, utc, monoNs);
+            events.insert(events.end(),
+                std::make_move_iterator(observed.begin()),
+                std::make_move_iterator(observed.end()));
+        }
         const bool limitGap = success && events.size() == 1 &&
-            events[0].kind == NetworkEventKind::CoverageGap;
+            events[0].kind == NetworkEventKind::CoverageGap &&
+            events[0].lossReason == "flow_limit_exceeded";
         if (mapping.changed) {
             NetworkEvent changed;
             changed.eventId = state->epoch + ":clock-" +
@@ -990,7 +1609,9 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
             persistentLines.push_back(NetworkEventJson(event));
         }
         std::vector<std::string> notices;
+        std::vector<std::string> noticeKeys;
         std::string cooldownCheckpoint;
+        std::unique_lock<std::mutex> recipeCommitLock(state->recipeCommitMutex);
         {
             std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
             for (const NetworkEvent& event : events) {
@@ -1002,7 +1623,9 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
                     const std::string id = state->epoch + ":notification-" +
                         std::to_string(++state->notificationSequence);
                     notices.push_back(RecipeNotificationJson(recipe, event,
-                                                               hit, id));
+                        hit, id, monoNs, sampled.utcMs));
+                    noticeKeys.push_back(NotificationEvidenceKey(recipe.id,
+                        std::to_string(recipe.revision), event.eventId));
                 }
             }
             if (state->recipeCooldownDirty) {
@@ -1011,18 +1634,11 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
             }
         }
         std::size_t written = 0;
+        std::size_t noticeAttempts = 0;
         std::size_t noticesWritten = 0;
         std::string storeError;
         std::string noticeError;
         std::string cooldownError;
-        if (!cooldownCheckpoint.empty() &&
-            !SaveEngineText(directory, L"recipe-cooldowns", cooldownCheckpoint,
-                            security, &cooldownError))
-            cooldownError = "cooldown_checkpoint_save_failed";
-        if (!cooldownError.empty()) {
-            std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
-            state->recipeCooldownDirty = true;
-        }
         bool saved = false;
         bool noticesSaved = false;
         std::uint64_t rollovers = 0;
@@ -1030,23 +1646,40 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
             std::lock_guard<std::mutex> historyLock(state->historyMutex);
             saved = state->eventStore.Append(persistentLines, &written,
                                              &storeError);
-            noticesSaved = state->notificationStore.Append(notices,
-                                                           &noticesWritten,
-                                                           &noticeError);
             rollovers = state->eventStore.Rollovers();
         }
+        noticesSaved = AppendRecipeNotices(state, notices, noticeKeys,
+            &noticeAttempts, &noticesWritten, &noticeError);
+        if (!noticesSaved || noticeAttempts > noticesWritten) {
+            std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
+            state->recipeCooldownDirty = true;
+        } else if (!cooldownCheckpoint.empty() &&
+            !SaveEngineText(directory, L"recipe-cooldowns", cooldownCheckpoint,
+                            security, &cooldownError))
+            cooldownError = "cooldown_checkpoint_save_failed";
+        if (!cooldownError.empty()) {
+            std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
+            state->recipeCooldownDirty = true;
+        }
+        recipeCommitLock.unlock();
         {
             std::lock_guard<std::mutex> lock(state->mutex);
-            if (saved) state->persistedEvents += written;
+            if (saved) {
+                state->persistedEvents += written;
+                // A successful non-empty append proves the store is writable
+                // again. Keep historical loss counters, but do not leave the
+                // live storage capability degraded forever after recovery.
+                if (!persistentLines.empty()) state->storageError.clear();
+            }
             else {
                 state->storageLost += persistentLines.size() -
                     (storeError == "store_flush_failed" ? 0 : written);
                 state->storageError = storeError;
             }
             state->storageRollovers = rollovers;
-            if (noticesSaved) state->notificationsWritten += noticesWritten;
-            else {
-                state->notificationsLost += notices.size() - noticesWritten;
+            state->notificationsWritten += noticesWritten;
+            if (!noticesSaved || noticeAttempts > noticesWritten) {
+                state->notificationsLost += noticeAttempts - noticesWritten;
                 state->notificationError = noticeError;
             }
             if (!cooldownError.empty()) state->notificationError = cooldownError;
@@ -1204,6 +1837,7 @@ void CollectorProbe(State* state, const std::wstring& directory,
             if (connected) {
                 lastSeen = clock.monotonicMs;
                 state->collectorConnected = true;
+                state->collectorStopConfirmed = false;
                 state->lifecycleEnabled = status.find("\"events\":{\"running\":true") !=
                     std::string::npos;
                 const std::string eventEpoch = QuotedStatusField(status, "eventEpoch");
@@ -1263,7 +1897,9 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
         draining = draining || enabled;
         CollectorChangesPage page;
         std::vector<std::string> lines;
+        std::vector<NetworkEvent> normalizedEvents;
         std::string error;
+        std::string normalizationError;
         const auto gap = [&](const char* reason, std::uint64_t lost) {
             return "{\"schemaVersion\":1,\"eventId\":\"" + state->epoch +
                 ":lifecycle-gap-" + std::to_string(++gapSequence) +
@@ -1278,8 +1914,17 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
         if (!dirty) {
             if (!checkpointError.empty()) lines.push_back(gap("checkpoint_unavailable", 0));
             if (!CollectorLifecycleEvents(cursor, &page)) {
-                error = "lifecycle_collector_unavailable";
-                if (!disconnectedReported) lines.push_back(gap("collector_unreachable", 0));
+                bool stoppedCleanly = false;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    stoppedCleanly = state->collectorStopConfirmed;
+                }
+                if (stoppedCleanly) {
+                    if (!disconnectedReported) lines.push_back(gap("collector_stopped", 0));
+                } else {
+                    error = "lifecycle_collector_unavailable";
+                    if (!disconnectedReported) lines.push_back(gap("collector_unreachable", 0));
+                }
                 disconnectedReported = true;
                 draining = false;
             } else {
@@ -1298,6 +1943,18 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
                             nextClockGapReported = true;
                         }
                         lines.push_back(item);
+                        if (item.find("\"derived\":null") == std::string::npos) {
+                            NetworkEvent event;
+                            std::string parseError;
+                            if (ParseLifecycleDerivedEvent(item, &event, &parseError)) {
+                                const ClockSample received = SampleClock();
+                                event.monotonicNs = received.monotonicMs * 1000000ULL;
+                                event.timebaseId = state->epoch + ":engine-monotonic";
+                                normalizedEvents.push_back(std::move(event));
+                            } else if (normalizationError.empty()) {
+                                normalizationError = parseError;
+                            }
+                        }
                     }
                     nextCursor = page.nextCursor;
                     more = page.items.size() == 32;
@@ -1305,26 +1962,169 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
                 }
             }
         }
-        std::size_t written = 0;
+        std::vector<std::string> newLifecycleLines;
+        std::vector<std::string> newLifecycleIds;
+        for (const std::string& line : lines) {
+            std::string eventId;
+            if (SimpleJsonField(line, "eventId", &eventId) && !eventId.empty()) {
+                if (state->persistedLifecycleIds.count(eventId) != 0) continue;
+                newLifecycleIds.push_back(eventId);
+            } else {
+                newLifecycleIds.emplace_back();
+            }
+            newLifecycleLines.push_back(line);
+        }
+        lines.swap(newLifecycleLines);
+        std::size_t written = 0, normalizedWritten = 0;
         std::string storageError;
-        if (!lines.empty()) {
-            std::lock_guard<std::mutex> lock(state->historyMutex);
-            if (state->lifecycleStore.Append(lines, &written, &storageError) &&
-                written == lines.size()) {
+        std::vector<std::string> normalizedLines, normalizedIds;
+        {
+            std::lock_guard<std::mutex> eventLock(state->eventEvidenceMutex);
+            std::set<std::string> pageIds;
+            for (const NetworkEvent& event : normalizedEvents) {
+                if (state->persistedEventIds.count(event.eventId) != 0 ||
+                    !pageIds.insert(event.eventId).second) continue;
+                normalizedLines.push_back(NetworkEventJson(event));
+                normalizedIds.push_back(event.eventId);
+            }
+        }
+        bool normalizedSaved = true;
+        if (!normalizedLines.empty()) {
+            {
+                std::lock_guard<std::mutex> historyLock(state->historyMutex);
+                normalizedSaved = state->eventStore.Append(normalizedLines,
+                    &normalizedWritten, &storageError);
+            }
+            {
+                std::lock_guard<std::mutex> eventLock(state->eventEvidenceMutex);
+                for (std::size_t i = 0; i < normalizedWritten && i < normalizedIds.size(); ++i)
+                    RememberPersistedEvent(state, normalizedIds[i]);
+            }
+            if (!normalizedSaved && storageError.empty())
+                storageError = "normalized_event_store_failed";
+        }
+        bool batchStored = normalizedSaved && normalizedWritten == normalizedLines.size();
+        if (batchStored && !lines.empty()) {
+            std::lock_guard<std::mutex> historyLock(state->historyMutex);
+            if (!state->lifecycleStore.Append(lines, &written, &storageError) ||
+                written != lines.size()) {
+                batchStored = false;
+                if (storageError.empty()) storageError = "lifecycle_partial_write";
+            }
+            for (std::size_t i = 0; i < written && i < newLifecycleIds.size(); ++i)
+                RememberPersistedLifecycleId(state, newLifecycleIds[i]);
+        }
+        if (batchStored && storageError.empty()) {
+            std::unique_lock<std::mutex> recipeCommitLock(state->recipeCommitMutex);
+            std::vector<NetworkEvent> accepted;
+            for (NetworkEvent& event : normalizedEvents) {
+                bool added = false;
+                {
+                    std::lock_guard<std::mutex> eventLock(state->mutex);
+                    added = state->journal.Append(event);
+                }
+                if (added) accepted.push_back(event);
+            }
+            std::vector<std::string> notices, noticeKeys;
+            std::vector<std::pair<RecipeDef, NetworkEvent>> reactiveCandidates;
+            std::string cooldownCheckpoint;
+            RecipeEvaluator evaluatorBefore;
+            const ClockSample sample = SampleClock();
+            const std::uint64_t monotonicNs = sample.monotonicMs * 1000000ULL;
+            {
+                std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
+                evaluatorBefore = state->recipeEvaluator;
+                for (const NetworkEvent& event : normalizedEvents) {
+                    for (const RecipeDef& recipe : state->recipes) {
+                        const RecipeHit hit = state->recipeEvaluator.Evaluate(recipe, event);
+                        if (hit.matched) state->recipeCooldownDirty = true;
+                        // A Passive cooldown governs inbox delivery only. An
+                        // already approved, strictly eligible lifecycle event
+                        // must still reach the broker even when that recipe's
+                        // notification was recently suppressed.
+                        if (RecipeActionCandidateEligible(hit, recipe, event))
+                            reactiveCandidates.emplace_back(recipe, event);
+                        if (!hit.fire) continue;
+                        const std::string noticeId = state->epoch + ":notification-" +
+                            std::to_string(++state->notificationSequence);
+                        notices.push_back(RecipeNotificationJson(recipe, event,
+                            hit, noticeId, monotonicNs, sample.utcMs));
+                        noticeKeys.push_back(NotificationEvidenceKey(recipe.id,
+                            std::to_string(recipe.revision), event.eventId));
+                    }
+                }
+                if (state->recipeCooldownDirty) {
+                    cooldownCheckpoint = state->recipeEvaluator.Checkpoint(
+                        monotonicNs, sample.utcMs);
+                    state->recipeCooldownDirty = false;
+                }
+            }
+            std::size_t noticeAttempts = 0, noticesWritten = 0;
+            std::string noticeError;
+            const bool noticesSaved = AppendRecipeNotices(state, notices, noticeKeys,
+                &noticeAttempts, &noticesWritten, &noticeError);
+            bool cooldownSaved = true;
+            if (noticesSaved && noticeAttempts == noticesWritten &&
+                !cooldownCheckpoint.empty()) {
+                cooldownSaved = SaveEngineText(directory, L"recipe-cooldowns",
+                    cooldownCheckpoint, security, &storageError);
+            }
+            if (!noticesSaved || noticeAttempts > noticesWritten || !cooldownSaved) {
+                std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
+                state->recipeEvaluator = std::move(evaluatorBefore);
+                state->recipeCooldownDirty = true;
+                batchStored = false;
+            }
+            recipeCommitLock.unlock();
+            if (batchStored) {
+                for (const auto& candidate : reactiveCandidates)
+                    QueueReactiveAction(state, candidate.first, candidate.second);
+            }
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->lifecycleTcpNormalized += static_cast<std::uint64_t>(
+                    std::count_if(accepted.begin(), accepted.end(), [](const NetworkEvent& event) {
+                        return event.transport == "tcp";
+                    }));
+                state->lifecycleUdpNormalized += static_cast<std::uint64_t>(
+                    std::count_if(accepted.begin(), accepted.end(), [](const NetworkEvent& event) {
+                        return event.transport == "udp";
+                    }));
+                state->lifecycleProcessNormalized += static_cast<std::uint64_t>(
+                    std::count_if(accepted.begin(), accepted.end(), [](const NetworkEvent& event) {
+                        return event.kind == NetworkEventKind::ProcessStarted ||
+                            event.kind == NetworkEventKind::ProcessExited;
+                    }));
+                state->persistedEvents += normalizedWritten;
+                state->notificationsWritten += noticesWritten;
+                if (!noticesSaved || noticeAttempts > noticesWritten) {
+                    state->notificationsLost += noticeAttempts - noticesWritten;
+                    state->notificationError = noticeError;
+                }
+                if (!cooldownSaved)
+                    state->notificationError = "cooldown_checkpoint_save_failed";
+                if (!normalizationError.empty())
+                    state->lifecycleError = normalizationError;
+            }
+            if (batchStored) {
+                const bool cursorChanged = cursor != nextCursor;
                 cursor = nextCursor;
                 clockGapReported = nextClockGapReported;
-                dirty = true;
+                dirty = dirty || cursorChanged;
                 checkpointError.clear();
-            } else if (storageError.empty()) storageError = "lifecycle_partial_write";
-        } else if (cursor != nextCursor) { cursor = nextCursor; dirty = true; }
-        if (dirty && SaveEngineText(directory, L"lifecycle-cursor",
+                if (written == lines.size()) {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    state->lifecycleLost += page.lostRecords;
+                }
+            }
+        }
+        if (batchStored && dirty && SaveEngineText(directory, L"lifecycle-cursor",
             "WinTCP-Lifecycle-Cursor:1\n" + cursor + '\n', security, &storageError)) dirty = false;
         if (!storageError.empty()) error = storageError;
         {
             std::lock_guard<std::mutex> lock(state->mutex);
-            state->lifecycleError = error;
+            if (!error.empty() || normalizationError.empty()) state->lifecycleError = error;
             state->lifecyclePersisted += written;
-            if (written == lines.size()) state->lifecycleLost += page.lostRecords;
         }
         if (::WaitForSingleObject(state->stopEvent, more && error.empty() ? 10 : 1000) != WAIT_TIMEOUT)
             return;
@@ -1385,9 +2185,21 @@ std::string StatusJson(State* state) {
             capability.id == "events.udpActivity" || capability.id == "events.processLifecycle") {
             capability.supported = true;
             capability.enabled = state->lifecycleEnabled;
-            capability.reason = "normalization_pending";
-            capability.coverage = state->lifecycleEnabled ? "raw_evidence_only" : "none";
-            capability.sourceVersion = "tdh-classic-v1";
+            // Availability means the collector is actively publishing this
+            // source, not that a matching event has already happened. Requiring
+            // a first event here would make pre-arming a reactive recipe
+            // impossible on a fresh trace session.
+            capability.available = state->lifecycleEnabled && state->collectorConnected;
+            capability.reason = capability.available ? "" : !state->lifecycleError.empty()
+                ? state->lifecycleError : state->lifecycleEnabled
+                    ? "awaiting_normalized_event" : state->collectorConnected
+                        ? "events_not_running" : "collector_not_connected";
+            capability.coverage = capability.available ? capability.id == "events.tcpLifecycle"
+                ? "normalized_tcp_lifecycle" : capability.id == "events.udpActivity"
+                    ? "normalized_udp_activity" : "normalized_process_lifecycle" : "none";
+            capability.sourceVersion = "tdh-classic-v1+flow-normalization-v1";
+            capability.lostRecords = state->lifecycleLost;
+            capability.lastSampleUtc = state->collectorLastSampleUtc;
         }
         capabilities += ',' + NetworkCapabilityJson(capability);
     }
@@ -1427,6 +2239,9 @@ std::string StatusJson(State* state) {
            ",\"lifecycle\":{\"enabled\":" + std::string(state->lifecycleEnabled ? "true" : "false") +
            ",\"persistedRecords\":\"" + std::to_string(state->lifecyclePersisted) +
            "\",\"lostRecords\":\"" + std::to_string(state->lifecycleLost) +
+           "\",\"normalizedTcp\":\"" + std::to_string(state->lifecycleTcpNormalized) +
+           "\",\"normalizedUdp\":\"" + std::to_string(state->lifecycleUdpNormalized) +
+           "\",\"normalizedProcess\":\"" + std::to_string(state->lifecycleProcessNormalized) +
            "\",\"error\":" + (state->lifecycleError.empty() ? "null" :
                NetworkJsonQuote(state->lifecycleError)) + "}" +
            ",\"restrictionAudit\":{\"cursor\":\"" + state->restrictionAuditCursor +
@@ -1461,9 +2276,21 @@ std::string EventsJson(State* state, const std::string& cursor, unsigned limit) 
     result += "],\"nextCursor\":\"" + nextCursor +
               "\",\"evictedRecords\":\"" +
               std::to_string(page.evictedRecords) +
-              "\",\"coverage\":{\"source\":\"snapshot\",\"intervalMs\":" +
+              "\",\"coverage\":{\"source\":\"snapshot+etw_lifecycle\",\"intervalMs\":" +
               std::to_string(state->config.snapshotIntervalMs) + ",\"loss\":" +
-              (state->sampleError.empty() ? "false" : "true") + "}}";
+              (state->sampleError.empty() && state->lifecycleError.empty() &&
+               state->lifecycleLost == 0 && page.evictedRecords == 0 ? "false" : "true") +
+              ",\"lifecycleEnabled\":" +
+              (state->lifecycleEnabled ? "true" : "false") +
+              ",\"lifecyclePersisted\":\"" +
+              std::to_string(state->lifecyclePersisted) +
+              "\",\"lifecycleLost\":\"" +
+              std::to_string(state->lifecycleLost) +
+              "\",\"reason\":" + NetworkJsonQuote(!state->sampleError.empty()
+                  ? state->sampleError : !state->lifecycleError.empty()
+                      ? state->lifecycleError : state->lifecycleLost != 0
+                          ? "source_records_unavailable" : page.evictedRecords != 0
+                              ? "journal_records_evicted" : "") + "}}";
     return result;
 }
 
@@ -1556,6 +2383,15 @@ std::string HistoryJson(State* state, const std::string& cursor, unsigned limit,
     return result;
 }
 
+void RemovePrivateNotificationField(std::string* item, const char* field) {
+    if (item == nullptr || field == nullptr) return;
+    const std::string marker = ",\"" + std::string(field) + "\":\"";
+    const std::size_t at = item->find(marker);
+    if (at == std::string::npos) return;
+    const std::size_t end = item->find('"', at + marker.size());
+    if (end != std::string::npos) item->erase(at, end - at + 1);
+}
+
 std::string NotificationsJson(State* state, const std::string& cursor,
                               unsigned limit) {
     EngineStorePage page;
@@ -1564,6 +2400,20 @@ std::string NotificationsJson(State* state, const std::string& cursor,
         page = state->notificationStore.Read(cursor, limit, 220000);
         const std::string prefix = "{\"schemaVersion\":1,\"id\":\"";
         for (std::string& item : page.items) {
+            // Recovery metadata is local durable bookkeeping, not a UI/API
+            // field. In particular, the cooldown key contains process identity.
+            RemovePrivateNotificationField(&item, "recoveryCooldownKey");
+            RemovePrivateNotificationField(&item, "recoveryCooldownRemainingNs");
+            RemovePrivateNotificationField(&item, "recoverySavedMonotonicNs");
+            RemovePrivateNotificationField(&item, "recoverySavedUtcMs");
+            // Older releases wrote durable inbox records with "pending" even
+            // though no separate toast adapter existed. Normalize the read
+            // contract without rewriting the user's append-only history.
+            const std::string oldDelivery = "\"deliveryStatus\":\"pending\"";
+            const std::size_t deliveryAt = item.find(oldDelivery);
+            if (deliveryAt != std::string::npos)
+                item.replace(deliveryAt, oldDelivery.size(),
+                    "\"deliveryStatus\":\"inbox\"");
             if (item.rfind(prefix, 0) != 0) continue;
             const std::size_t end = item.find('"', prefix.size());
             if (end == std::string::npos) continue;
@@ -1691,6 +2541,20 @@ int Run(State* state, const Identity& own) {
         ::CloseHandle(single);
         return 1;
     }
+    if (!LoadPersistedEventIds(state)) {
+        Print("engine event evidence index: unavailable or invalid");
+        ::LocalFree(descriptor);
+        ::ReleaseMutex(single);
+        ::CloseHandle(single);
+        return 1;
+    }
+    if (!LoadPersistedLifecycleIds(state)) {
+        Print("engine lifecycle evidence index: unavailable or invalid");
+        ::LocalFree(descriptor);
+        ::ReleaseMutex(single);
+        ::CloseHandle(single);
+        return 1;
+    }
     if (!LoadRecipeFile(storageDirectory, &security, &state->recipes,
                         &configError)) {
         Print("engine recipes: " + configError);
@@ -1702,6 +2566,13 @@ int Run(State* state, const Identity& own) {
     if (!LoadAcks(storageDirectory, &security,
                   &state->acknowledgedNotifications, &configError)) {
         Print("engine notification acks: " + configError);
+        ::LocalFree(descriptor);
+        ::ReleaseMutex(single);
+        ::CloseHandle(single);
+        return 1;
+    }
+    if (!LoadNotificationEvidenceKeys(state)) {
+        Print("engine notification evidence index: unavailable or invalid");
         ::LocalFree(descriptor);
         ::ReleaseMutex(single);
         ::CloseHandle(single);
@@ -1723,10 +2594,43 @@ int Run(State* state, const Identity& own) {
     }
     state->operations.SetEpoch(state->epoch);
     const ClockSample cooldownClock = SampleClock();
-    if (!LoadRecipeCooldowns(storageDirectory, &state->recipeEvaluator,
-            cooldownClock.monotonicMs * 1000000ULL, cooldownClock.utcMs, &configError))
+    const bool cooldownCheckpointLoaded = LoadRecipeCooldowns(storageDirectory,
+        &state->recipeEvaluator, cooldownClock.monotonicMs * 1000000ULL,
+        cooldownClock.utcMs, &configError);
+    if (!cooldownCheckpointLoaded)
         state->notificationError = configError;
     state->recipeEvaluator.Reconcile(state->recipes);
+    bool cooldownRecoveryApplied = false;
+    bool cooldownRecoveryFailed = false;
+    for (const RecipeCooldownRecovery& recovery : state->cooldownRecoveries) {
+        const bool currentRecipe = std::any_of(state->recipes.begin(),
+            state->recipes.end(), [&recovery](const RecipeDef& recipe) {
+                const std::string prefix = recipe.id + ':' +
+                    std::to_string(recipe.revision) + ':';
+                return recovery.key.rfind(prefix, 0) == 0;
+            });
+        if (!currentRecipe) continue;
+        if (!state->recipeEvaluator.RecoverFiredCooldown(recovery.key,
+                recovery.remainingNs, recovery.savedMonotonicNs,
+                recovery.savedUtcMs, cooldownClock.monotonicMs * 1000000ULL,
+                cooldownClock.utcMs)) {
+            state->notificationError = "cooldown_recovery_invalid";
+            cooldownRecoveryFailed = true;
+            break;
+        }
+        cooldownRecoveryApplied = cooldownRecoveryApplied ||
+            recovery.remainingNs != 0;
+    }
+    if (cooldownRecoveryApplied && cooldownCheckpointLoaded &&
+        !cooldownRecoveryFailed) {
+        const std::string recoveredCheckpoint = state->recipeEvaluator.Checkpoint(
+            cooldownClock.monotonicMs * 1000000ULL, cooldownClock.utcMs);
+        if (!SaveEngineText(storageDirectory, L"recipe-cooldowns",
+                            recoveredCheckpoint, &security, &configError))
+            state->notificationError = "cooldown_recovery_checkpoint_save_failed";
+        else
+            state->notificationError.clear();
+    }
     std::thread sampler(SampleLoop, state, storageDirectory, &security);
     std::thread operationWorker(OperationLoop, state, own.sidText,
                                 storageDirectory, &security, EngineOperationQueue::General);
@@ -1780,8 +2684,7 @@ int Run(State* state, const Identity& own) {
                                 std::string::npos)
                             reply = HistoryJson(state, cursor, limit, message[1] == 16, message[1] == 17);
                     } else if (message[1] == 8 && message.size() == 2 + kChallengeBytes) {
-                        std::lock_guard<std::mutex> lock(state->recipesMutex);
-                        reply = RecipesJson(state->recipes);
+                        reply = RecipesJson(state);
                     } else if (message[1] == 9 &&
                                message.size() > 2 + kChallengeBytes &&
                                message.size() <= kMaxFrame) {
