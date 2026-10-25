@@ -75,7 +75,7 @@ async function runCollectorLossUiTests(page) {
     await page.getByRole("tab", { name: "Event history" }).click();
     await page.getByText(/Collector loss counters have not been sampled|Last-known \(collector disconnected\)/)
       .waitFor({ timeout: 5000 });
-    const text = await page.locator(".tab-panel-body").innerText();
+    const text = await page.locator("#panel-lifecycle > .tab-panel-body").innerText();
     const explainsState = text.includes("start or reconnect the elevated collector") ||
       (text.includes("Last-known (collector disconnected)") && text.includes("queue drops"));
     check("Event history explains unavailable or last-known collector-loss status",
