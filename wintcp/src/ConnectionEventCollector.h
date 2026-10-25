@@ -8,6 +8,7 @@
 #include <deque>
 #include <mutex>
 #include <memory>
+#include <map>
 
 namespace wintcp {
 class LifecycleFlowModel;
@@ -24,19 +25,53 @@ struct ConnectionCollectorStatus {
     ULONG traceResult = ERROR_SUCCESS;
     std::uint64_t attributed = 0;
     bool clockStable = true;
+    std::uint64_t clockMappingGeneration = 0;
+    std::uint64_t clockRecoveries = 0;
     std::uint64_t lateRecords = 0, flowEvicted = 0, reorderFlushes = 0;
     std::uint64_t published = 0;
+};
+
+struct QpcClockUpdate {
+    bool sampleAccepted = false;
+    bool mappingChanged = false;
+    bool recovered = false;
+    bool stable = false;
+    std::uint64_t generation = 0;
+};
+
+// Piecewise QPC-to-FILETIME mapping. A discontinuity starts a new generation;
+// identity attribution resumes only after two consistent reliable samples.
+class QpcClockMapper {
+public:
+    bool Reset(std::uint64_t qpc, std::uint64_t fileTime,
+               std::uint64_t frequency);
+    QpcClockUpdate Observe(std::uint64_t qpc, std::uint64_t fileTime,
+                           bool reliable);
+    bool Project(std::uint64_t qpc, std::uint64_t* fileTime) const;
+    bool Stable() const { return stable_; }
+    std::uint64_t Generation() const { return generation_; }
+    std::uint64_t Recoveries() const { return recoveries_; }
+private:
+    std::uint64_t frequency_ = 0;
+    std::uint64_t anchorQpc_ = 0;
+    std::uint64_t anchorFileTime_ = 0;
+    std::uint64_t generation_ = 0;
+    std::uint64_t recoveries_ = 0;
+    unsigned consistentSamples_ = 0;
+    bool stable_ = false;
 };
 
 std::string TraceObservationJson(const TraceObservation& observation,
                                  const std::string& epoch,
                                  std::uint64_t qpcFrequency);
+GUID LifecycleSessionOwnerGuid(const std::wstring& ownerScope);
+bool LifecycleSessionOwnerMatches(const GUID& observed, const GUID& expected);
 
 // Broker-only coordinator. Exactly one instance feeds all engine consumers;
 // no recipe/UI starts a global kernel logger. Callbacks only copy bounded data.
 class ConnectionEventCollector {
 public:
-    ConnectionEventCollector();
+    explicit ConnectionEventCollector(std::wstring ownerScope);
     ~ConnectionEventCollector();
     ConnectionEventCollector(const ConnectionEventCollector&) = delete;
     ConnectionEventCollector& operator=(const ConnectionEventCollector&) = delete;
@@ -75,6 +110,7 @@ private:
     HANDLE traceThread_ = nullptr;
     HANDLE decoderThread_ = nullptr;
     std::wstring sessionName_;
+    std::wstring ownerScope_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<std::uint64_t> nextSequence_{0}, decoded_{0}, queueLost_{0}, rejected_{0};
@@ -83,8 +119,17 @@ private:
     std::atomic<std::uint64_t> qpcFrequency_{0};
     std::atomic<std::uint64_t> attributed_{0};
     std::atomic<bool> clockStable_{true};
-    std::uint64_t anchorQpc_ = 0, anchorFileTime_ = 0;
+    std::atomic<std::uint64_t> clockMappingGeneration_{0}, clockRecoveries_{0};
+    QpcClockMapper clockMapper_;
     ProcessInstanceCache identities_;
+    struct ProcessImageHint {
+        std::uint64_t startQpc = 0;
+        std::uint64_t endQpc = 0;
+        std::uint64_t key = 0;
+        bool keyKnown = false;
+        std::string imageName;
+    };
+    std::map<std::uint32_t, ProcessImageHint> processImageHints_;
     std::string epoch_;
     std::unique_ptr<LifecycleFlowModel> normalizer_;
     std::atomic<std::uint64_t> published_{0}, lateRecords_{0}, flowEvicted_{0}, reorderFlushes_{0};
