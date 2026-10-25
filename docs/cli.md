@@ -799,6 +799,12 @@ On a clean stop, WinTCP stops the ETW session, consumes the final trace buffers,
 drains its bounded decode queue, and flushes pending normalized flows before
 reporting completion. Loss counters remain visible when bounded queues or ETW
 buffers overflow.
+The raw callback-to-decoder queue is bounded to 16,384 records and 8 MiB.
+When either cap is reached, the incoming record is dropped and increments
+`queueLost`; a record whose payload cannot be copied is counted the same way.
+This counter is distinct from ETW's event/buffer loss counters and appears in
+`collector status` and as a coverage-gap event in shared engine history. A
+rejected record does not block the callback while the decoder catches up.
 The trace name and owner GUID are scoped to the helper's Windows SID and logon
 session. On start, WinTCP queries only that exact name and recovers a leftover
 session only when its owner GUID matches; a same-name session with a different
