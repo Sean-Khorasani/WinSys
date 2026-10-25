@@ -946,6 +946,8 @@ export async function renderAutomations(page, store) {
 
   async function renderLifecycle() {
     const status = h("p", { class: "muted text-sm", role: "status" });
+    const lossStatus = h("p", { class: "muted text-sm", role: "status" },
+      "Checking collector loss counters…");
     const history = h("div", { class: "engine-events" });
     let linkedEventId = store.get().automationEvidenceEventId || "";
     const linkedEventStatus = linkedEventId ? h("p", { class: "badge badge-info" },
@@ -953,6 +955,22 @@ export async function renderAutomations(page, store) {
     const buttons = [];
     let cursor = "";
     const seen = new Set();
+    async function refreshLossStatus() {
+      try {
+        const engine = await api.get("/api/engine", { signal: requests.signal });
+        if (disposed) return;
+        const loss = engine.collectorEventLoss;
+        if (!loss?.eventEpoch) {
+          lossStatus.textContent = "Collector loss counters have not been sampled yet; start or reconnect the elevated collector, then refresh status.";
+          return;
+        }
+        const freshness = loss.available ? "Current" : "Last-known (collector disconnected)";
+        const tracking = loss.eventTracking ? "trace running" : "trace stopped";
+        lossStatus.textContent = `${freshness} collector session · ${tracking} · queue drops ${loss.queueLost} · schema rejects ${loss.schemaRejected} · ETW events lost ${loss.eventsLost} · ETW buffers lost ${loss.buffersLost} · collector history evictions ${loss.historyEvicted} · flow evictions ${loss.flowEvicted}. Counters are cumulative for this trace session; sampled ${loss.lastSampleUtc || "time unknown"}.`;
+      } catch (error) {
+        if (!disposed) lossStatus.textContent = error.message || "Collector loss counters unavailable.";
+      }
+    }
     async function control(action) {
       buttons.forEach((button) => { button.disabled = true; });
       status.textContent = action === "start" ? "Waiting for Windows approval…" : "Updating event collection…";
@@ -960,6 +978,7 @@ export async function renderAutomations(page, store) {
         if (action === "engine-start") {
           await api.postForm("/api/engine/control", { action: "start" });
           status.textContent = "Monitoring engine running. Start the optional collector to enable event tracking.";
+          await refreshLossStatus();
           return;
         }
         const submitted = await api.postForm("/api/collector/control", {
@@ -977,6 +996,7 @@ export async function renderAutomations(page, store) {
                 : "Collector running. Enable event tracking when ready.";
             if (operation.audit?.recorded === false)
               status.textContent += " Command audit could not be fully retained.";
+            await refreshLossStatus();
             return;
           }
           await new Promise((resolve) => setTimeout(resolve, 400));
@@ -998,6 +1018,7 @@ export async function renderAutomations(page, store) {
       onclick: async () => {
         load.disabled = true;
         try {
+          await refreshLossStatus();
           const linkedSearch = !!linkedEventId;
           clear(history);
           if (linkedEventId) seen.clear();
@@ -1069,6 +1090,9 @@ export async function renderAutomations(page, store) {
         } finally { if (!disposed) load.disabled = false; }
       },
     }, linkedEventId ? "Find linked evidence" : "Load retained events");
+    const refreshLoss = h("button", { class: "btn btn-quiet", type: "button",
+      onclick: () => { void refreshLossStatus(); } }, "Refresh loss status");
+    void refreshLossStatus();
     return h("div", { class: "tab-panel-body" },
       card({}, cardHeader({}, cardTitle({}, "Event-based connection evidence"),
         cardDescription({}, "Optional metadata collection can retain activity between endpoint snapshots.")),
@@ -1078,7 +1102,8 @@ export async function renderAutomations(page, store) {
             controlButton("Start engine", "engine-start"),
             controlButton("Start collector (UAC)", "start"),
             controlButton("Enable event tracking", "events-start"),
-            controlButton("Stop event tracking", "events-stop")), status)),
+            controlButton("Stop event tracking", "events-stop"), refreshLoss), status,
+          lossStatus)),
       card({}, cardHeader({}, cardTitle({}, "Retained lifecycle history")),
         cardContent({}, linkedEventStatus, history), cardFooter({}, load)));
   }
