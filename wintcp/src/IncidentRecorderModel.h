@@ -32,6 +32,7 @@ struct IncidentSnapshot {
     std::uint64_t postDeadlineMonotonicNs = 0;
     std::uint64_t endMonotonicNs = 0;
     bool active = false;
+    bool postWindowIncomplete = false;
     bool prehistoryIncomplete = false;
     bool recordsTruncated = false;
     bool triggersTruncated = false;
@@ -39,6 +40,13 @@ struct IncidentSnapshot {
     std::uint64_t lostRecords = 0;
     std::vector<IncidentTrigger> triggers;
     std::vector<IncidentRecord> records;
+};
+
+struct IncidentRecordPage {
+    IncidentSnapshot incident;
+    std::size_t nextOffset = 0;
+    bool hasMore = false;
+    std::string error;
 };
 
 // Bounded pure model for I1's pre/post-trigger window. Engine integration,
@@ -59,13 +67,20 @@ public:
     // Related triggers merge into the current incident while it is collecting.
     bool Trigger(IncidentTrigger trigger, bool related = true);
     void Close(std::uint64_t monotonicNs);
+    void Stop(std::uint64_t monotonicNs);
     IncidentSnapshot Snapshot() const;
+    IncidentSnapshot Summary() const;
+    IncidentRecordPage ReadPage(std::size_t offset, std::size_t limit,
+                                std::size_t maxBytes) const;
     // Transfers one finalized incident to the caller before another is armed.
     IncidentSnapshot TakeSnapshot();
 
     std::size_t StoredBytes() const { return storedBytes_; }
     std::size_t HistoryCount() const { return history_.size(); }
+    std::size_t IncidentRecordCount() const { return activeRecords_.size(); }
     std::uint64_t LostRecords() const { return lostRecords_; }
+    bool IsActive() const { return active_.active; }
+    bool HasIncident() const { return !active_.id.empty(); }
 
 private:
     using SharedRecord = std::shared_ptr<const IncidentRecord>;
