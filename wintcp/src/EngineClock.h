@@ -10,7 +10,9 @@ namespace wintcp {
 struct ClockObservation {
     std::string mappingId;
     bool changed = false;
+    bool samplingGap = false;
     std::int64_t adjustmentMs = 0;
+    std::uint64_t elapsedMonotonicMs = 0;
     std::uint64_t anchorUtcMs = 0;
     std::uint64_t anchorMonotonicMs = 0;
     std::uint64_t changes = 0;
@@ -22,7 +24,8 @@ class EngineClock {
 public:
     explicit EngineClock(std::string epoch);
     ClockObservation Observe(std::uint64_t utcMs,
-                             std::uint64_t monotonicMs);
+                             std::uint64_t monotonicMs,
+                             std::uint64_t expectedIntervalMs = 0);
 
 private:
     std::string epoch_;
