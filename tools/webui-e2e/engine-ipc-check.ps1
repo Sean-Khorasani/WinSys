@@ -66,6 +66,36 @@ function Assert-EngineResponsive([string]$Case) {
     Write-Output "PASS: engine remains responsive after $Case"
 }
 
+# Connect through the machine-name pipe path to exercise the server's
+# PIPE_REJECT_REMOTE_CLIENTS option. Only Access Denied is evidence of that
+# rejection; an unavailable network redirector is an inconclusive test failure.
+$remotePipe = [System.IO.Pipes.NamedPipeClientStream]::new(
+    $env:COMPUTERNAME, $pipeName,
+    [System.IO.Pipes.PipeDirection]::InOut,
+    [System.IO.Pipes.PipeOptions]::None)
+$accessDenied = $false
+try {
+    $remotePipe.Connect(3000)
+} catch {
+    $exception = $_.Exception
+    while ($exception -ne $null) {
+        if ($exception -is [System.UnauthorizedAccessException] -or
+            ($exception -is [System.ComponentModel.Win32Exception] -and
+             $exception.NativeErrorCode -eq 5)) {
+            $accessDenied = $true
+            break
+        }
+        $exception = $exception.InnerException
+    }
+} finally {
+    $remotePipe.Dispose()
+}
+if (-not $accessDenied) {
+    throw "Machine-name named-pipe connection was not explicitly rejected with Access Denied."
+}
+Write-Output "PASS: remote named-pipe client rejected with Access Denied"
+Assert-EngineResponsive "remote named-pipe rejection"
+
 # A bad greeting version must be rejected before a challenge is issued.
 $pipe = Connect-EnginePipe
 try {
