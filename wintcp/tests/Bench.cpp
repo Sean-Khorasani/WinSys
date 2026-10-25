@@ -53,6 +53,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "ConnectionEventCollector.h"
 #include "ProcessInstanceCache.h"
 #include "LifecycleFlowModel.h"
+#include "IncidentRecorderModel.h"
 #include "SnapshotEvents.h"
 #include "WebProcesses.h"
 
@@ -3073,6 +3074,69 @@ void CheckLifecycleFlows(TestResult& r) {
               json.find("\"derived\":{\"schemaVersion\":1") != std::string::npos &&
               json.find("\"evidenceIds\":[\"flows:etw-1\"]") != std::string::npos);
     }
+}
+
+void CheckIncidentRecorderModel(TestResult& r) {
+    using namespace wintcp;
+    IncidentRecorderModel recorder(2048, 20, 10, 25);
+    const auto observe = [&recorder](std::uint64_t time, const char* id,
+                                     const char* payload = "{\"kind\":\"event\"}") {
+        return recorder.Observe({time, id, payload});
+    };
+    const bool historyReady = observe(5, "e1") && observe(15, "e2") &&
+                              observe(25, "e3");
+    const bool triggerStarted = recorder.Trigger({30, "incident-1", "manual"});
+    auto pre = recorder.Snapshot();
+    Check(r, "incident.pretrigger-window-retained",
+          historyReady && triggerStarted && pre.active &&
+          !pre.prehistoryIncomplete && pre.records.size() == 2 &&
+          pre.records[0].eventId == "e2" && pre.records[1].eventId == "e3");
+
+    const bool merged = recorder.Trigger({35, "related-1", "recipe"});
+    const bool unrelatedRejected = !recorder.Trigger(
+        {36, "unrelated", "manual"}, false);
+    const bool postObserved = observe(40, "e4");
+    auto mergedSnapshot = recorder.Snapshot();
+    recorder.Close(45);
+    const auto completed = recorder.TakeSnapshot();
+    Check(r, "incident.related-trigger-merges-with-capped-deadline",
+          merged && unrelatedRejected && postObserved && mergedSnapshot.active &&
+          mergedSnapshot.triggers.size() == 2 &&
+          mergedSnapshot.postDeadlineMonotonicNs == 45 &&
+          mergedSnapshot.records.size() == 3 && !completed.active &&
+          !recorder.Snapshot().active);
+
+    IncidentRecorderModel rollover(1024, 50, 10, 20);
+    bool accepted = true;
+    for (std::uint64_t i = 1; i <= 8; ++i)
+        accepted = rollover.Observe({i, "roll-" + std::to_string(i),
+                                     std::string(240, 'x')}) && accepted;
+    const bool rolloverTriggered = rollover.Trigger(
+        {9, "incident-roll", "manual"});
+    const auto rolled = rollover.Snapshot();
+    const bool largeRecordRejected = !rollover.Observe(
+        {10, "oversized", std::string(2048, 'y')});
+    const auto truncated = rollover.Snapshot();
+    Check(r, "incident.rollover-and-budget-loss-explicit",
+          accepted && rollover.LostRecords() > 0 && rolloverTriggered &&
+          rolled.prehistoryIncomplete && rolled.recordsTruncated &&
+          largeRecordRejected && truncated.recordsTruncated &&
+          truncated.lostRecords > rolled.lostRecords &&
+          rollover.StoredBytes() <= 1024);
+
+    IncidentRecorderModel triggerCap(65536, 20, 10, 25);
+    bool triggersAccepted = triggerCap.Trigger({100, "incident-cap", "manual"});
+    for (std::size_t i = 1; i < IncidentRecorderModel::kMaxTriggersPerIncident; ++i)
+        triggersAccepted = triggerCap.Trigger(
+            {100, "related-" + std::to_string(i), "recipe"}) && triggersAccepted;
+    const bool overflowRejected = !triggerCap.Trigger(
+        {100, "related-overflow", "recipe"});
+    const auto triggerSummary = triggerCap.Snapshot();
+    Check(r, "incident.related-trigger-metadata-bounded",
+          triggersAccepted && overflowRejected &&
+          triggerSummary.triggers.size() ==
+              IncidentRecorderModel::kMaxTriggersPerIncident &&
+          triggerSummary.triggersTruncated && triggerSummary.lostTriggers == 1);
 }
 
 void CheckProcessInstances(TestResult& r) {
@@ -12327,6 +12391,7 @@ static const unsigned char kClientHello[] = {
     CheckLifecycleDecoder(r);
     CheckProcessInstances(r);
     CheckLifecycleFlows(r);
+    CheckIncidentRecorderModel(r);
     CheckT08Evaluator(r);
     CheckT11Evaluator(r);
     CheckT12Evaluator(r);
