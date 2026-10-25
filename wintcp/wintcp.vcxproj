@@ -228,6 +228,7 @@
     <ClCompile Include="src\EngineStore.cpp" />
     <ClCompile Include="src\EngineOperations.cpp" />
     <ClCompile Include="src\EngineClock.cpp" />
+    <ClCompile Include="src\CollectorLossModel.cpp" />
     <ClCompile Include="src\RecipeModel.cpp" />
     <ClCompile Include="src\RestrictionModel.cpp" />
     <ClCompile Include="src\RestrictionLease.cpp" />
@@ -327,6 +328,7 @@
     <ClInclude Include="src\EngineStore.h" />
     <ClInclude Include="src\EngineOperations.h" />
     <ClInclude Include="src\EngineClock.h" />
+    <ClInclude Include="src\CollectorLossModel.h" />
     <ClInclude Include="src\RecipeModel.h" />
     <ClInclude Include="src\RestrictionModel.h" />
     <ClInclude Include="src\RestrictionLease.h" />
