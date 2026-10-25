@@ -161,12 +161,16 @@ try {
   return process;
 }
 
-function recipeText(enabled, revision, imagePath) {
+function recipeText(enabled, revision, imagePath, schedule = null) {
   const hex = (value) => Array.from(new TextEncoder().encode(value),
     (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return "WinTCP-Recipes:1\n" + [recipeId, revision, enabled ? "1" : "0",
+  const fields = [recipeId, revision, enabled ? "1" : "0",
     "outbound_activity", "0", hex("Disposable Active integration check"),
-    hex(imagePath)].join("|") + "\n";
+    hex(imagePath)];
+  if (schedule) fields.push("weekly_window", String(schedule.daysMask),
+    String(schedule.startMinute), String(schedule.endMinute), hex(schedule.timeZoneId));
+  return (schedule ? "WinTCP-Recipes:2\n" : "WinTCP-Recipes:1\n") +
+    fields.join("|") + "\n";
 }
 
 async function saveRecipes(expectedRevision, text) {
@@ -542,6 +546,69 @@ try {
   child = null;
   assert(grantProbeExit === 0, `Grant-expiry probe exited with ${grantProbeExit}`);
 
+  // Reuse the isolated recipe to prove a real, recipe-owned dynamic filter is
+  // removed when a weekly UTC window closes (before its five-minute lease TTL).
+  const now = new Date();
+  const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const startMinute = (minute + 1439) % 1440;
+  const endMinute = (minute + (now.getUTCSeconds() > 40 ? 2 : 1)) % 1440;
+  const closeSchedule = { daysMask: 127, startMinute, endMinute, timeZoneId: "UTC" };
+  const scheduleCurrent = await get("/api/engine/recipes");
+  const scheduleDisabled = await saveRecipes(scheduleCurrent.revision,
+    recipeText(false, 3, canonicalProbePath, closeSchedule));
+  recipeStoreRevision = scheduleDisabled.revision;
+  const scheduleEnabled = await saveRecipes(recipeStoreRevision,
+    recipeText(true, 4, canonicalProbePath, closeSchedule));
+  recipeStoreRevision = scheduleEnabled.revision;
+  const scheduled = (await get("/api/engine/recipes")).items?.find((item) =>
+    item.id === recipeId);
+  assert(scheduled?.enabled && scheduled.runtime?.scheduleActive === true,
+    "Short UTC schedule was not active before the lease test");
+  const scheduleOwner = `recipe:${recipeId}`;
+  const preview = await operation("/api/restrictions/preview", {
+    imagePath: canonicalProbePath, remoteAddress: address,
+    remotePort: String(port), protocol: "tcp", minutes: "5",
+    owner: scheduleOwner,
+  });
+  assert(preview.confirmationToken,
+    "Could not preview the isolated schedule-bound recipe lease");
+  const applied = await operation("/api/restrictions/apply", {
+    confirmationToken: preview.confirmationToken,
+  });
+  const scheduledLeaseId = applied.lease?.id;
+  assert(scheduledLeaseId && applied.lease.owner === scheduleOwner,
+    "The schedule test did not install a lease owned by its recipe");
+  let scheduleReleased = false;
+  const scheduleDeadline = Date.now() + 145000;
+  while (Date.now() < scheduleDeadline) {
+    const current = (await get("/api/engine/recipes")).items?.find((item) =>
+      item.id === recipeId);
+    const inventory = await get("/api/restrictions");
+    const leaseStillPresent = inventory.items?.some((item) =>
+      item.id === scheduledLeaseId) === true;
+    if (current?.runtime?.scheduleActive === false &&
+        current.runtime.scheduleLeaseReleaseState === "released" &&
+        !leaseStillPresent) {
+      scheduleReleased = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  assert(scheduleReleased,
+    "The real recipe-owned temporary lease survived its UTC schedule boundary");
+  const acceptedAfterScheduleRelease = accepted.length + 1;
+  child = startProbe(canonicalProbePath, address, port);
+  assert(await waitLine(12000) === "READY",
+    `The isolated flow did not recover after schedule release; stderr=${errors.slice(-400)}`);
+  await waitAccepted(acceptedAfterScheduleRelease);
+  child.stdin.write("quit\n");
+  const scheduleProbeExit = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Schedule-release probe did not exit")), 5000);
+    child.once("exit", (code) => { clearTimeout(timer); resolve(code); });
+  });
+  child = null;
+  assert(scheduleProbeExit === 0, `Schedule-release probe exited with ${scheduleProbeExit}`);
+
   await releaseOwnedAuthorization();
   const finalRecipes = await get("/api/engine/recipes");
   const finalDelete = await saveRecipes(finalRecipes.revision, "WinTCP-Recipes:1\n");
@@ -551,7 +618,7 @@ try {
   eventsStarted = false;
   await operation("/api/collector/control", { action: "stop" });
   collectorStarted = false;
-  console.log(`active-recipe-test=PASS image=${canonicalProbePath} peer=${address}:${port} verifiedNotice=true blockedRetry=true leaseExpired=true restoredAfterExpiry=true ownedLeaseReleased=true cleanStop=true ackRestart=true grantNotRestored=true brokerCrashCleanup=true unusedGrantExpired=true noLateAction=true`);
+  console.log(`active-recipe-test=PASS image=${canonicalProbePath} peer=${address}:${port} verifiedNotice=true blockedRetry=true leaseExpired=true restoredAfterExpiry=true ownedLeaseReleased=true scheduleBoundaryReleased=true scheduleFlowRestored=true cleanStop=true ackRestart=true grantNotRestored=true brokerCrashCleanup=true unusedGrantExpired=true noLateAction=true`);
 } finally {
   if (child && child.exitCode === null) {
     try { child.stdin.write("quit\n"); } catch { /* child may have already exited */ }
