@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include "EngineConfig.h"
@@ -21,6 +22,12 @@ bool EngineRequestRestrictionHistory(const std::string& cursor, unsigned limit,
                                      std::string* response);
 bool EngineRequestLifecycleHistory(const std::string& cursor, unsigned limit,
                                    std::string* response);
+bool EngineIncidentRequest(const std::string& action,
+                           const std::string& requestId,
+                           const std::string& triggerId,
+                           const std::string& reason,
+                           std::uint64_t offset, unsigned limit,
+                           std::string* response);
 bool EngineRequestConfig(std::string* response);
 bool EngineSubmitConfig(const std::string& requestId,
                         const std::string& expectedRevision,
