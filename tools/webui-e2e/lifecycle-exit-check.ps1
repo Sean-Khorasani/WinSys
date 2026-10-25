@@ -32,7 +32,9 @@ function Wait-OwnCollectorExit([int]$TimeoutMs = 5000) {
 }
 
 function Get-Api([string]$Path) {
-    return Invoke-RestMethod -Uri ($script:base + $Path) -Headers $script:headers
+    $result = Invoke-RestMethod -Uri ($script:base + $Path) -Headers $script:headers
+    if ($result -is [string]) { return $result | ConvertFrom-Json }
+    return $result
 }
 
 function Invoke-EngineOperation([string]$Path, [hashtable]$Fields) {
@@ -92,7 +94,9 @@ try {
         throw 'Recipe store is not empty; preserving existing recipes and aborting.'
     }
     $status = Get-Api '/api/engine'
-    if (-not $status.running) { throw 'The per-user engine is not running.' }
+    if (-not $status.running) {
+        throw "The per-user engine is not running: $($status | ConvertTo-Json -Compress -Depth 6)"
+    }
     $initialLifecycleCount = [uint64]$status.lifecycle.persistedRecords
 
     $collectorStartRequested = $true
@@ -110,12 +114,32 @@ try {
         throw 'Initial ETW clock mapping status is missing or inconsistent.'
     }
     $traceVisible = $false
+    $lossStatusVisible = $false
+    $lossCounters = $null
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         $engineStatus = Get-Api '/api/engine'
-        if ($engineStatus.lifecycle.enabled) { $traceVisible = $true; break }
+        if ($engineStatus.lifecycle.enabled) { $traceVisible = $true }
+        if ($engineStatus.collectorEventLoss.available) {
+            $loss = $engineStatus.collectorEventLoss
+            $null = [uint64]$loss.queueLost
+            $null = [uint64]$loss.schemaRejected
+            $null = [uint64]$loss.eventsLost
+            $null = [uint64]$loss.buffersLost
+            $null = [uint64]$loss.historyEvicted
+            $null = [uint64]$loss.flowEvicted
+            if (-not $loss.lastSampleUtc) {
+                throw 'Collector loss counters have no sample timestamp.'
+            }
+            $lossCounters = $loss
+            $lossStatusVisible = $true
+        }
+        if ($traceVisible -and $lossStatusVisible) { break }
         Start-Sleep -Milliseconds 250
     }
     if (-not $traceVisible) { throw 'Engine did not observe the running lifecycle trace.' }
+    if (-not $lossStatusVisible) {
+        throw 'Engine status did not expose valid collector loss counters.'
+    }
 
     # Connect the short-lived child directly to the dashboard's loopback
     # listener. The TCP/IP ETW provider is already known to report these local
@@ -157,6 +181,29 @@ try {
         if ([uint64]$eventStopResult.events.$counter -ne 0) {
             throw "Lifecycle trace reported $counter=$($eventStopResult.events.$counter)."
         }
+    }
+    $stoppedLossStatus = $null
+    $lossStatusConsistent = $false
+    for ($attempt = 0; $attempt -lt 24; $attempt++) {
+        $candidate = (Get-Api '/api/engine').collectorEventLoss
+        $countersMatch = $true
+        foreach ($counter in @('queueLost', 'schemaRejected', 'eventsLost',
+                'buffersLost', 'historyEvicted', 'flowEvicted')) {
+            if ([uint64]$candidate.$counter -ne
+                [uint64]$eventStopResult.events.$counter) {
+                $countersMatch = $false
+                break
+            }
+        }
+        if ($candidate.available -and -not $candidate.eventTracking -and $countersMatch) {
+            $stoppedLossStatus = $candidate
+            $lossStatusConsistent = $true
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $lossStatusConsistent) {
+        throw "Engine did not converge on the connected, stopped-trace counters: $($candidate | ConvertTo-Json -Compress -Depth 4)"
     }
     $stableCount = 0
     $lastCount = $initialLifecycleCount
@@ -230,7 +277,8 @@ try {
         Start-Sleep -Milliseconds 250
     }
     if (-not $sharedHistory) {
-        throw 'Normalized connect, disconnect, and process-exit events did not reach shared engine history.'
+        $missingEventIds = @($expectedEventIds | Where-Object { $retainedIds -notcontains $_ })
+        throw "Normalized lifecycle events did not reach shared engine history; missing=$($missingEventIds -join ',') retainedCount=$($retainedIds.Count)."
     }
     $process = $connect.process
     $hasIdentityEvidence = $process.imagePath -or $process.observedImageName -or
@@ -244,8 +292,19 @@ try {
     if (-not (Wait-OwnCollectorExit)) {
         throw 'Collector stop completed but the helper process is still running.'
     }
+    $offlineLossStatus = (Get-Api '/api/engine').collectorEventLoss
+    if ($offlineLossStatus.available -or -not $offlineLossStatus.eventEpoch) {
+        throw 'Engine did not preserve last-known collector loss counters as offline after helper exit.'
+    }
+    foreach ($counter in @('queueLost', 'schemaRejected', 'eventsLost',
+            'buffersLost', 'historyEvicted', 'flowEvicted')) {
+        if ([uint64]$offlineLossStatus.$counter -ne
+            [uint64]$stoppedLossStatus.$counter) {
+            throw "Offline last-known $counter changed after helper exit."
+        }
+    }
     $collectorStartRequested = $false
-    Write-Output "lifecycle-exit-test=PASS pid=$clientPid rawConnect=true rawDisconnect=true rawProcessExit=true normalizedSharedHistory=true identity=$identity sourcePort=$sourcePort destinationPort=$port"
+    Write-Output "lifecycle-exit-test=PASS pid=$clientPid rawConnect=true rawDisconnect=true rawProcessExit=true normalizedSharedHistory=true liveAndFinalLossCounters=true offlineLastKnownCounters=true queueLost=$($offlineLossStatus.queueLost) eventsLost=$($offlineLossStatus.eventsLost) buffersLost=$($offlineLossStatus.buffersLost) identity=$identity sourcePort=$sourcePort destinationPort=$port"
 }
 catch {
     $failure = $_.Exception.Message
@@ -256,7 +315,10 @@ finally {
     }
     if ($headers -and $collectorStartRequested) {
         $remainingCollectors = Get-OwnCollectorProcesses
-        if ($remainingCollectors.Count -gt 0) {
+        $collectorConnected = $false
+        try { $collectorConnected = (Get-Api '/api/engine').collectorEventLoss.available }
+        catch { }
+        if ($collectorConnected -or $remainingCollectors.Count -gt 0) {
             try {
                 $null = Invoke-EngineOperation '/api/collector/control' @{ action = 'events-stop' }
             } catch { $cleanupFailure = "events-stop cleanup failed: $($_.Exception.Message)" }
