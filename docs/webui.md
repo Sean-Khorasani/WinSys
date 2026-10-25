@@ -279,6 +279,11 @@ UI starts it as the current user without requesting elevation.
 Stopping waits until the engine has drained its workers and released its
 single-instance lock before reporting success, so a Start immediately after a
 successful Stop does not race the previous engine's shutdown.
+`GET /api/engine/history` pages durable snapshot evidence; its cursor survives
+an engine restart while the referenced segment is retained and expires
+explicitly after rotation. `GET /api/engine/notifications` preserves inbox IDs
+and acknowledgement state across restart. This persistence does not restore
+Active recipe authorization.
 
 The Monitors list shows whether each rule is disabled, starting, running, or
 degraded, its current cooldown state, and the latest trigger recorded in this
