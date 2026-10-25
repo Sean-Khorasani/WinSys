@@ -126,6 +126,57 @@ std::vector<NetworkEvent> SnapshotEventAdapter::Observe(
     return emitted;
 }
 
+std::string SnapshotEventAdapter::CheckpointJson(const std::string& utc,
+    std::uint64_t monotonicNs, std::size_t maxBytes) {
+    constexpr std::size_t kMinimumBytes = 1024;
+    constexpr std::size_t kMaximumBytes = 128 * 1024;
+    maxBytes = (std::max)(kMinimumBytes, (std::min)(maxBytes, kMaximumBytes));
+    std::string json = "{\"schemaVersion\":1,\"kind\":\"state_checkpoint\",";
+    json += "\"source\":\"snapshot\",\"occurredAtUtc\":" +
+        NetworkJsonQuote(utc) + ",\"monotonicNs\":\"" +
+        std::to_string(monotonicNs) + "\",\"state\":{\"coverage\":\"snapshot_only\",";
+    json += "\"complete\":";
+    const std::size_t completeAt = json.size();
+    json += "true,\"items\":[";
+    std::size_t included = 0;
+    bool complete = true;
+    for (const auto& entry : previous_) {
+        NetworkEvent state = entry.second;
+        state.kind = NetworkEventKind::EndpointObserved;
+        state.occurredAtUtc = utc;
+        state.receivedAtUtc = utc;
+        state.monotonicNs = monotonicNs;
+        const std::string serialized = NetworkEventJson(state);
+        const std::size_t separator = included == 0 ? 0 : 1;
+        constexpr std::size_t kClosingReserve = 96;
+        if (json.size() + kClosingReserve > maxBytes ||
+            serialized.size() + separator >
+                maxBytes - json.size() - kClosingReserve) {
+            complete = false;
+            break;
+        }
+        if (separator != 0) json.push_back(',');
+        json += serialized;
+        ++included;
+    }
+    json.replace(completeAt, 4, complete ? "true" : "false");
+    const std::string suffix = "],\"includedEndpoints\":" +
+        std::to_string(included) + ",\"totalEndpoints\":" +
+        std::to_string(previous_.size()) + "}}";
+    if (json.size() + suffix.size() > maxBytes) {
+        // Metadata is deliberately kept even when every endpoint is omitted.
+        return "{\"schemaVersion\":1,\"kind\":\"state_checkpoint\","
+            "\"source\":\"snapshot\",\"occurredAtUtc\":" +
+            NetworkJsonQuote(utc) + ",\"monotonicNs\":\"" +
+            std::to_string(monotonicNs) +
+            "\",\"state\":{\"coverage\":\"snapshot_only\","
+            "\"complete\":false,\"items\":[],\"includedEndpoints\":0,"
+            "\"totalEndpoints\":" + std::to_string(previous_.size()) + "}}";
+    }
+    json += suffix;
+    return json;
+}
+
 void SnapshotEventAdapter::Reset() {
     previous_.clear();
     baseline_ = false;
