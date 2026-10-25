@@ -23,6 +23,7 @@
     <ClCompile Include="src\EngineStore.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\EngineOperations.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\EngineClock.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\CollectorLossModel.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\RecipeModel.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\RestrictionModel.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\RestrictionLease.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -166,6 +167,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\CliCommands.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CollectorLossModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
