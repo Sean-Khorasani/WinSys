@@ -1204,7 +1204,7 @@ wintcp.exe version
 ```
 
 ```text
-WinTCP 1.0.4
+WinTCP 1.0.8
 
 A live view of every TCP and UDP endpoint on this machine (IPv4 + IPv6), with the process that owns it, read through the IP Helper API (GetExtendedTcpTable / GetExtendedUdpTable).
 Plain Win32 API and the common controls. No MFC, ATL or Qt.
