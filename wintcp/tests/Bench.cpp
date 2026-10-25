@@ -2117,8 +2117,16 @@ void CheckEngineStore(TestResult& r) {
     const std::wstring previous = directory + L"\\events-previous.ndjson";
     std::string error;
     std::size_t written = 0;
-    const std::string large = "{\"schemaVersion\":1,\"x\":\"" +
-                              std::string(100000, 'a') + "\"}";
+    const auto large = [](unsigned sequence) {
+        return "{\"schemaVersion\":1,\"n\":" +
+               std::to_string(sequence) + ",\"x\":\"" +
+               std::string(99980, 'a') + "\"}";
+    };
+    const std::string record1 = large(1);
+    const std::string record2 = large(2);
+    const std::string record3 = large(3);
+    const std::string record4 = large(4);
+    const std::string record5 = large(5);
     bool opened = false, rotated = false, rejected = false, reopened = false;
     bool paged = false, expired = false;
     {
@@ -2126,14 +2134,24 @@ void CheckEngineStore(TestResult& r) {
         opened = validSecurity &&
             store.Open(directory, L"events", 256 * 1024, security, &error);
         if (opened) {
-            rotated = store.Append({large, large, large}, &written, &error) &&
+            rotated = store.Append({record1, record2, record3}, &written, &error) &&
                 written == 3 && store.Rollovers() == 1;
             const EngineStorePage first = store.Read("", 1, 220000);
             const EngineStorePage second = store.Read(first.nextCursor, 2, 220000);
             paged = first.items.size() == 1 &&
                 second.items.size() == 2 && second.error.empty();
-            if (store.Append({large, large}, &written, &error))
+            if (store.Append({record4, record5}, &written, &error)) {
                 expired = store.Read(first.nextCursor, 1, 220000).cursorExpired;
+                const EngineStorePage retainedFirst = store.Read("", 2, 220000);
+                const EngineStorePage retainedSecond = store.Read(
+                    retainedFirst.nextCursor, 2, 220000);
+                paged = paged && retainedFirst.items.size() == 2 &&
+                    retainedFirst.items[0] == record3 &&
+                    retainedFirst.items[1] == record4 &&
+                    retainedSecond.items.size() == 1 &&
+                    retainedSecond.items[0] == record5 &&
+                    retainedSecond.error.empty();
+            }
             rejected = !store.Append({"{}\n{}"}, &written, &error) &&
                 written == 0 && error == "invalid_store_record";
         }
@@ -2142,7 +2160,7 @@ void CheckEngineStore(TestResult& r) {
         EngineStore store;
         reopened = store.Open(directory, L"events", 256 * 1024,
                               security, &error) &&
-                   store.Append({"{\"schemaVersion\":1,\"n\":4}"}, &written, &error) &&
+                   store.Append({"{\"schemaVersion\":1,\"n\":6}"}, &written, &error) &&
                    written == 1;
     }
     WIN32_FILE_ATTRIBUTE_DATA currentData = {};
