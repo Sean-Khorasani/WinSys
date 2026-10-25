@@ -28,11 +28,13 @@ private:
         LifecycleAnnotation annotation;
         std::uint64_t start = 0, closed = 0, superseded = 0;
         std::size_t bytes = 0;
+        NetworkProcessIdentity process;
     };
     TraceObservation Normalize(TraceObservation observation, const char* flushReason);
     std::string Key(const TraceObservation& observation) const;
     Flow* CreateFlow(const std::string& key, std::uint64_t qpc,
-                     LifecycleAnnotation annotation);
+                     LifecycleAnnotation annotation,
+                     const NetworkProcessIdentity& process);
     void EvictOldest();
     std::string epoch_;
     std::uint64_t frequency_, highestSequence_ = 0, emittedQpc_ = 0, nextFlow_ = 0;
