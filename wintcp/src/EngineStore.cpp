@@ -145,6 +145,7 @@ bool ReadSegment(const Reader& reader, bool current, std::uint64_t* offset,
             if (page->items.size() != 0 &&
                 maxResponseBytes < line.size() + 256) {
                 page->nextCursor = Cursor(reader, *offset + position);
+                page->hasMore = true;
                 return false;
             }
             if (line.size() + 256 > maxResponseBytes) {
@@ -159,7 +160,8 @@ bool ReadSegment(const Reader& reader, bool current, std::uint64_t* offset,
         *offset += position;
     }
     page->nextCursor = Cursor(reader, *offset);
-    return page->items.size() < limit;
+    page->hasMore = *offset < reader.size;
+    return !page->hasMore;
 }
 
 }  // namespace
@@ -351,6 +353,8 @@ EngineStorePage EngineStore::Read(const std::string& cursor, std::size_t limit,
         offset = 0;
         if (!ReadSegment(current, true, &offset, limit, maxResponseBytes,
                          &page)) return page;
+    } else if (start == &previous && current.size != 0) {
+        page.hasMore = true;
     }
     return page;
 }
