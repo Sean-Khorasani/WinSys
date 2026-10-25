@@ -8,7 +8,13 @@
     "check": "node run-checks.mjs",
     "workflows": "node workflow-checks.mjs",
     "automation": "node isolated-checks.mjs automation-checks.mjs",
+    "recipe-notification-delivery": "node recipe-notification-delivery-check.mjs",
+    "recipe-schedule": "node recipe-schedule-check.mjs",
+    "active-recipe": "node active-recipe-check.mjs",
     "restart": "node server-restart-checks.mjs",
+    "incident-import": "node incident-import-check.mjs",
+    "incident-replay": "node incident-replay-ui-check.mjs",
+    "incident-recipe-trigger": "node incident-recipe-trigger-check.mjs",
     "shots": "node screenshots.mjs"
   },
   "devDependencies": {
