@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "EngineClock.h"
 
+#include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace wintcp {
@@ -9,7 +11,8 @@ namespace wintcp {
 EngineClock::EngineClock(std::string epoch) : epoch_(std::move(epoch)) {}
 
 ClockObservation EngineClock::Observe(std::uint64_t utcMs,
-                                      std::uint64_t monotonicMs) {
+                                      std::uint64_t monotonicMs,
+                                      std::uint64_t expectedIntervalMs) {
     ClockObservation observation;
     if (mappingNumber_ == 0) {
         mappingNumber_ = 1;
@@ -17,6 +20,19 @@ ClockObservation EngineClock::Observe(std::uint64_t utcMs,
         anchorMonotonicMs_ = monotonicMs;
     } else {
         const bool monotonicBackwards = monotonicMs < lastMonotonicMs_;
+        const std::uint64_t elapsed = monotonicBackwards ? 0 :
+            monotonicMs - lastMonotonicMs_;
+        observation.elapsedMonotonicMs = elapsed;
+        // Avoid classifying ordinary scheduler delays as sleep/resume on fast
+        // sampling configurations while still surfacing extended pauses.
+        const std::uint64_t scaledInterval = expectedIntervalMs >
+            (std::numeric_limits<std::uint64_t>::max)() / 5
+            ? (std::numeric_limits<std::uint64_t>::max)()
+            : expectedIntervalMs * 5;
+        const std::uint64_t gapThreshold =
+            (std::max<std::uint64_t>)(5000, scaledInterval);
+        observation.samplingGap = expectedIntervalMs != 0 &&
+            elapsed > gapThreshold;
         const std::int64_t predicted = static_cast<std::int64_t>(lastUtcMs_) +
             (monotonicBackwards ? 0 :
                 static_cast<std::int64_t>(monotonicMs - lastMonotonicMs_));
