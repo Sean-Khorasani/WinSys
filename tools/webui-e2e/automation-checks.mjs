@@ -69,6 +69,23 @@ async function runLifecycleLabelTests(page) {
     labels[2] === "PID 42");
 }
 
+async function runCollectorLossUiTests(page) {
+  await page.goto(`${url}#/automations`, { waitUntil: "networkidle" });
+  try {
+    await page.getByRole("tab", { name: "Event history" }).click();
+    await page.getByText(/Collector loss counters have not been sampled|Last-known \(collector disconnected\)/)
+      .waitFor({ timeout: 5000 });
+    const text = await page.locator(".tab-panel-body").innerText();
+    const explainsState = text.includes("start or reconnect the elevated collector") ||
+      (text.includes("Last-known (collector disconnected)") && text.includes("queue drops"));
+    check("Event history explains unavailable or last-known collector-loss status",
+      explainsState && text.includes("Refresh loss status"));
+  } catch (error) {
+    check("Event history explains unavailable or last-known collector-loss status",
+      false, error.message);
+  }
+}
+
 async function runScriptEngineTests(page) {
   await page.goto(`${url}#/`, { waitUntil: "networkidle" });
   await page.waitForTimeout(800);
@@ -1416,6 +1433,8 @@ testPage.on("pageerror", (e) => consoleErrors.push("pageerror: " + e.message));
 try {
   console.log("=== Lifecycle Evidence Labels ===");
   await runLifecycleLabelTests(testPage);
+  console.log("=== Collector Loss Status ===");
+  await runCollectorLossUiTests(testPage);
   console.log("=== Script Engine Unit Tests (edge cases) ===");
   await runScriptEngineTests(testPage);
 
