@@ -47,6 +47,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "EngineClock.h"
 #include "CollectorLossModel.h"
 #include "RecipeModel.h"
+#include "RecipeScheduleWindows.h"
 #include "RestrictionModel.h"
 #include "RestrictionLease.h"
 #include "EventDecoder.h"
@@ -2037,6 +2038,14 @@ void CheckSnapshotEvents(TestResult& r) {
           first[0].tcpState == "established" &&
           first[0].firstObservedMidSession);
     Check(r, "snapshot.stable-no-repeat", adapter.Observe({row}, "later", 200).empty());
+    const std::string checkpoint = adapter.CheckpointJson(
+        "2026-10-23T00:00:00Z", 250);
+    Check(r, "snapshot.checkpoint-captures-current-flow-state",
+          checkpoint.find("\"kind\":\"state_checkpoint\"") != std::string::npos &&
+          checkpoint.find("\"coverage\":\"snapshot_only\"") != std::string::npos &&
+          checkpoint.find("\"complete\":true") != std::string::npos &&
+          checkpoint.find("test-epoch:flow-") != std::string::npos &&
+          checkpoint.find("\"monotonicNs\":\"250\"") != std::string::npos);
     row.procMeta.processCreate.dwLowDateTime = 124;
     const auto reused = adapter.Observe({row}, "later", 300);
     Check(r, "snapshot.pid-reuse-separate-flow", reused.size() == 2 &&
@@ -2056,6 +2065,29 @@ void CheckSnapshotEvents(TestResult& r) {
           postGapBaseline[0].kind == NetworkEventKind::EndpointObserved &&
           postGapBaseline[0].firstObservedMidSession &&
           postGapBaseline[0].flowId != preGapFlow);
+
+    SnapshotEventAdapter boundedCheckpoint("checkpoint-limit");
+    std::vector<Connection> manyRows;
+    manyRows.reserve(1200);
+    for (unsigned i = 0; i < 1200; ++i) {
+        Connection item;
+        item.identity.pid = 1000 + i;
+        item.identity.family = AF_INET;
+        item.identity.protocol = IPPROTO_TCP;
+        item.identity.localPort = 1000 + i;
+        item.identity.remotePort = 443;
+        item.display.localAddress = L"192.0.2.10";
+        item.display.remoteAddress = L"198.51.100.20";
+        item.display.processPath = L"C:\\" + std::wstring(600, L'x') + L".exe";
+        manyRows.push_back(std::move(item));
+    }
+    (void)boundedCheckpoint.Observe(manyRows, "checkpoint-limit", 1000);
+    const std::string truncatedCheckpoint = boundedCheckpoint.CheckpointJson(
+        "checkpoint-limit", 2000, 1024);
+    Check(r, "snapshot.checkpoint-bounds-and-labels-truncation",
+          truncatedCheckpoint.size() <= 1024 &&
+          truncatedCheckpoint.find("\"complete\":false") != std::string::npos &&
+          truncatedCheckpoint.find("\"totalEndpoints\":1200") != std::string::npos);
 }
 
 void CheckEngineConfig(TestResult& r) {
@@ -2142,6 +2174,8 @@ void CheckEngineStore(TestResult& r) {
             const EngineStorePage second = store.Read(first.nextCursor, 2, 220000);
             paged = first.items.size() == 1 &&
                 second.items.size() == 2 && second.error.empty();
+            Check(r, "engine-store.read-has-more",
+                first.hasMore && !second.hasMore);
             if (store.Append({record4, record5}, &written, &error)) {
                 expired = store.Read(first.nextCursor, 1, 220000).cursorExpired;
                 const EngineStorePage retainedFirst = store.Read("", 2, 220000);
@@ -2679,6 +2713,24 @@ void CheckQpcClockMapper(TestResult& r) {
 
 void CheckRecipeModel(TestResult& r) {
     using namespace wintcp;
+    const auto utcMillis = [](WORD year, WORD month, WORD day,
+                              WORD hour, WORD minute) -> std::uint64_t {
+        SYSTEMTIME utc = {};
+        utc.wYear = year;
+        utc.wMonth = month;
+        utc.wDay = day;
+        utc.wHour = hour;
+        utc.wMinute = minute;
+        FILETIME fileTime = {};
+        if (!::SystemTimeToFileTime(&utc, &fileTime)) return 0;
+        const std::uint64_t ticks =
+            (static_cast<std::uint64_t>(fileTime.dwHighDateTime) << 32) |
+            fileTime.dwLowDateTime;
+        constexpr std::uint64_t kUnixEpochFileTimeTicks =
+            116444736000000000ULL;
+        return ticks < kUnixEpochFileTimeTicks ? 0 :
+            (ticks - kUnixEpochFileTimeTicks) / 10000ULL;
+    };
     RecipeDef recipe;
     recipe.id = "watch-app";
     recipe.name = "Example app";
@@ -2690,9 +2742,95 @@ void CheckRecipeModel(TestResult& r) {
     Check(r, "recipe.roundtrip", ParseRecipes(saved, &parsed, &error) &&
           parsed.size() == 1 && parsed[0].imagePath == recipe.imagePath &&
           parsed[0].enabled);
+    const std::vector<RecipeDef> recipeRoundtrip = parsed;
+    const std::string legacy = "WinTCP-Recipes:1\nwatch-app|1|0|outbound_activity|60|" +
+        std::string("4578616d706c6520617070|433a5c417070735c4578616d706c652e657865\n");
+    Check(r, "recipe.legacy-always-schedule-loads",
+          ParseRecipes(legacy, &parsed, &error) && parsed.size() == 1 &&
+          parsed[0].schedule.type == RecipeScheduleType::Always &&
+          FormatRecipes(parsed).rfind("WinTCP-Recipes:2\n", 0) == 0);
+    RecipeDef scheduled = recipe;
+    scheduled.enabled = false;
+    scheduled.schedule.type = RecipeScheduleType::WeeklyWindow;
+    scheduled.schedule.daysMask = 0x3e;  // Monday through Friday.
+    scheduled.schedule.startMinute = 22 * 60;
+    scheduled.schedule.endMinute = 6 * 60;
+    scheduled.schedule.timeZoneId = "Pacific Standard Time";
+    Check(r, "recipe.weekly-window-roundtrip",
+          ParseRecipes(FormatRecipes({scheduled}), &parsed, &error) &&
+          parsed.size() == 1 && parsed[0].schedule.type ==
+              RecipeScheduleType::WeeklyWindow &&
+          parsed[0].schedule.daysMask == 0x3e &&
+          parsed[0].schedule.startMinute == 1320 &&
+          parsed[0].schedule.endMinute == 360 &&
+          parsed[0].schedule.timeZoneId == "Pacific Standard Time" &&
+          RecipeJson(parsed[0]).find("\"timeZoneId\":\"Pacific Standard Time\"") !=
+              std::string::npos);
+    Check(r, "recipe.weekly-window-wraps-midnight-by-start-day",
+          RecipeScheduleMatchesLocalTime(scheduled.schedule, 1, 1320) &&
+          RecipeScheduleMatchesLocalTime(scheduled.schedule, 2, 359) &&
+          !RecipeScheduleMatchesLocalTime(scheduled.schedule, 2, 360) &&
+          !RecipeScheduleMatchesLocalTime(scheduled.schedule, 0, 1380));
+    RecipeSchedule dstSpring = scheduled.schedule;
+    dstSpring.daysMask = 0x01;  // Sunday.
+    dstSpring.startMinute = 120;
+    dstSpring.endMinute = 180;
+    unsigned localWeekday = 99, localMinute = 0;
+    const bool springBeforeConverted = WindowsRecipeScheduleLocalTimeAtUtc(
+        "Pacific Standard Time", utcMillis(2026, 3, 8, 9, 59),
+        &localWeekday, &localMinute);
+    const bool springBefore = springBeforeConverted && localWeekday == 0 &&
+        localMinute == 119 && !RecipeScheduleMatchesLocalTime(
+            dstSpring, localWeekday, localMinute);
+    const bool springAfterConverted = WindowsRecipeScheduleLocalTimeAtUtc(
+        "Pacific Standard Time", utcMillis(2026, 3, 8, 10, 0),
+        &localWeekday, &localMinute);
+    Check(r, "recipe.schedule-dst-spring-forward-skips-missing-hour",
+          springBefore && springAfterConverted && localWeekday == 0 &&
+          localMinute == 180 && !RecipeScheduleMatchesLocalTime(
+              dstSpring, localWeekday, localMinute));
+    RecipeSchedule dstFall = dstSpring;
+    dstFall.startMinute = 60;
+    dstFall.endMinute = 120;
+    const bool fallFirstConverted = WindowsRecipeScheduleLocalTimeAtUtc(
+        "Pacific Standard Time", utcMillis(2026, 11, 1, 8, 59),
+        &localWeekday, &localMinute);
+    const bool fallFirstActive = fallFirstConverted && localWeekday == 0 &&
+        localMinute == 119 && RecipeScheduleMatchesLocalTime(
+            dstFall, localWeekday, localMinute);
+    const bool fallRepeatedConverted = WindowsRecipeScheduleLocalTimeAtUtc(
+        "Pacific Standard Time", utcMillis(2026, 11, 1, 9, 0),
+        &localWeekday, &localMinute);
+    Check(r, "recipe.schedule-dst-fall-back-repeats-window",
+          fallFirstActive && fallRepeatedConverted && localWeekday == 0 &&
+          localMinute == 60 && RecipeScheduleMatchesLocalTime(
+              dstFall, localWeekday, localMinute));
+    std::uint64_t nextTransition = 0;
+    bool activeAfterTransition = false;
+    Check(r, "recipe.schedule-next-transition-skips-spring-gap",
+          WindowsRecipeScheduleNextTransitionAtUtc(dstSpring,
+              utcMillis(2026, 3, 8, 9, 59), &nextTransition,
+              &activeAfterTransition) &&
+          nextTransition == utcMillis(2026, 3, 15, 9, 0) &&
+          activeAfterTransition);
+    Check(r, "recipe.schedule-next-transition-closes-after-fall-repeat",
+          WindowsRecipeScheduleNextTransitionAtUtc(dstFall,
+              utcMillis(2026, 11, 1, 8, 59), &nextTransition,
+              &activeAfterTransition) &&
+          nextTransition == utcMillis(2026, 11, 1, 10, 0) &&
+          !activeAfterTransition);
+    RecipeSchedule invalidSchedule = scheduled.schedule;
+    invalidSchedule.daysMask = 0;
+    Check(r, "recipe.weekly-window-refuses-empty-days",
+          !RecipeScheduleMatchesLocalTime(invalidSchedule, 1, 1320));
+    invalidSchedule = scheduled.schedule;
+    invalidSchedule.timeZoneId = "Unknown/Timezone";
+    scheduled.schedule = invalidSchedule;
+    Check(r, "recipe.weekly-window-refuses-invalid-timezone-spelling",
+          !ValidateRecipe(scheduled, &error) && error == "invalid_schedule");
     Check(r, "recipe.revision-changes-on-update",
           RecipesRevision({recipe}) != RecipesRevision({}) &&
-          RecipesRevision({recipe}) == RecipesRevision(parsed));
+          RecipesRevision({recipe}) == RecipesRevision(recipeRoundtrip));
     RecipeDef disabled = recipe;
     disabled.enabled = false;
     std::vector<RecipeDef> changed;
@@ -2803,6 +2941,30 @@ void CheckRecipeModel(TestResult& r) {
     event.firstObservedMidSession = true;
     Check(r, "recipe.no-baseline-storm", !evaluator.Evaluate(recipe, event).fire);
     event.firstObservedMidSession = false;
+    NetworkEvent missingProcess = event;
+    missingProcess.process.pid = 0;
+    Check(r, "recipe.missing-process-id-is-not-attributed",
+          !evaluator.Evaluate(recipe, missingProcess).matched);
+    missingProcess = event;
+    missingProcess.process.imagePath.clear();
+    Check(r, "recipe.missing-executable-path-is-not-attributed",
+          !evaluator.Evaluate(recipe, missingProcess).matched);
+    NetworkEvent missingPeer = event;
+    missingPeer.remote.known = false;
+    Check(r, "recipe.missing-peer-is-not-attributed",
+          !evaluator.Evaluate(recipe, missingPeer).matched);
+    RecipeEvaluator unknownInstanceEvaluator;
+    NetworkEvent unknownInstance = event;
+    unknownInstance.process.creationTimeKnown = false;
+    unknownInstance.eventId = "fixture:unknown-instance-one";
+    const RecipeHit unknownFirst = unknownInstanceEvaluator.Evaluate(
+        recipe, unknownInstance);
+    unknownInstance.eventId = "fixture:unknown-instance-two";
+    unknownInstance.monotonicNs += 1000000000ULL;
+    const RecipeHit unknownSecond = unknownInstanceEvaluator.Evaluate(
+        recipe, unknownInstance);
+    Check(r, "recipe.unknown-instance-does-not-merge-pid-reuse",
+          unknownFirst.fire && unknownSecond.fire);
     const RecipeHit first = evaluator.Evaluate(recipe, event);
     Check(r, "recipe.snapshot-coverage-honest", first.fire &&
           first.coverage == "snapshot_tcp_appearance_direction_unknown");
@@ -3091,6 +3253,7 @@ void CheckIncidentRecorderModel(TestResult& r) {
     Check(r, "incident.pretrigger-window-retained",
           historyReady && triggerStarted && pre.active &&
           !pre.prehistoryIncomplete && pre.records.size() == 2 &&
+          pre.prehistoryWindowNs == 20 && pre.prehistoryRetainedNs == 15 &&
           pre.records[0].eventId == "e2" && pre.records[1].eventId == "e3");
 
     const bool merged = recorder.Trigger({35, "related-1", "recipe"});
@@ -3156,10 +3319,33 @@ void CheckIncidentRecorderModel(TestResult& r) {
           triggerSummary.triggers.size() ==
               IncidentRecorderModel::kMaxTriggersPerIncident &&
           triggerSummary.triggersTruncated && triggerSummary.lostTriggers == 1);
+    Check(r, "incident.empty-prehistory-reports-zero-retained-span",
+          triggerSummary.prehistoryWindowNs == 20 &&
+          triggerSummary.prehistoryRetainedNs == 0);
 }
 
 void CheckIncidentArchive(TestResult& r) {
     using namespace wintcp;
+    std::vector<IncidentArchiveRetentionCandidate> retention;
+    for (std::uint64_t i = 0; i < 20; ++i)
+        retention.push_back({i, 60ULL * 1024 * 1024, i == 0});
+    std::vector<std::size_t> remove;
+    std::string retentionError;
+    const bool bytePlan = PlanIncidentArchiveRetention(retention,
+        1ULL * 1024 * 1024, 20, 1024ULL * 1024 * 1024,
+        &remove, &retentionError);
+    Check(r, "incident-archive.retention-plans-oldest-under-byte-and-count-limits",
+          bytePlan && remove == std::vector<std::size_t>({1, 2, 3}), retentionError);
+    for (auto& item : retention) item.pinned = true;
+    const bool allPinnedRejected = !PlanIncidentArchiveRetention(retention, 1,
+        20, 1024ULL * 1024 * 1024, &remove, &retentionError) &&
+        retentionError == "incident_archive_quota_pinned" && remove.empty();
+    Check(r, "incident-archive.retention-planner-refuses-all-pinned",
+          allPinnedRejected, retentionError);
+    Check(r, "incident-archive.retention-planner-rejects-single-oversize",
+          !PlanIncidentArchiveRetention({}, 1025, 20, 1024, &remove,
+              &retentionError) && retentionError == "incident_archive_size_limit");
+
     wchar_t tempPath[MAX_PATH + 1] = {};
     const DWORD tempLength = ::GetTempPathW(MAX_PATH, tempPath);
     const std::wstring root = tempLength == 0 || tempLength > MAX_PATH
@@ -3175,6 +3361,11 @@ void CheckIncidentArchive(TestResult& r) {
     incident.endMonotonicNs = 30;
     incident.triggers.push_back({20, "trigger-1", "synthetic test"});
     incident.records.push_back({20, "event-1", "{\"kind\":\"event\"}"});
+    incident.records.push_back({25, "state_checkpoint",
+        "{\"schemaVersion\":1,\"kind\":\"state_checkpoint\","
+        "\"state\":{\"coverage\":\"snapshot_only\",\"complete\":true,"
+        "\"items\":[{\"flowId\":\"flow-1\"}],"
+        "\"includedEndpoints\":1,\"totalEndpoints\":1}}"});
     std::string archiveId, error;
     const bool saved = rootReady && SaveIncidentArchive(root, security, incident,
         &archiveId, &error);
@@ -3185,11 +3376,23 @@ void CheckIncidentArchive(TestResult& r) {
         : IncidentArchivePage{};
     const bool roundtrip = saved && archives.size() == 1 &&
         archives[0].id == archiveId &&
-        archives[0].manifestJson.find("\"replayReady\":false") != std::string::npos &&
-        page.error.empty() && page.records.size() == 1 &&
-        page.records[0].find("\"eventId\":\"event-1\"") != std::string::npos;
+        archives[0].bytes != 0 && !archives[0].pinned &&
+        archives[0].manifestJson.find("\"replayReady\":true") != std::string::npos &&
+        archives[0].manifestJson.find("\"checkpointCount\":1") != std::string::npos &&
+        archives[0].manifestJson.find("\"checkpointStateComplete\":true") != std::string::npos &&
+        page.error.empty() && page.totalRecords == 2 && page.records.size() == 2 &&
+        page.records[0].find("\"eventId\":\"event-1\"") != std::string::npos &&
+        page.records[1].find("\"eventId\":\"state_checkpoint\"") != std::string::npos;
     Check(r, "incident-archive.atomic-save-and-bounded-read", roundtrip,
           error.empty() ? page.error : error);
+
+    const bool pinSaved = saved && SetIncidentArchivePinned(root, archiveId,
+        true, security, &error);
+    archives = pinSaved ? ListIncidentArchives(root, 10, &error)
+                        : std::vector<IncidentArchiveInfo>();
+    const bool pinVisible = pinSaved && archives.size() == 1 &&
+        archives[0].pinned && archives[0].bytes != 0;
+    Check(r, "incident-archive.pin-state-persists", pinVisible, error);
 
     bool tamperRejected = false;
     std::wstring archiveDirectory;
@@ -3222,12 +3425,53 @@ void CheckIncidentArchive(TestResult& r) {
     }
     Check(r, "incident-archive.tampered-payload-refused", tamperRejected);
 
-    if (saved) {
+    std::vector<std::string> generatedIds;
+    bool quotaSaves = pinVisible;
+    for (unsigned i = 0; quotaSaves && i < 20; ++i) {
+        IncidentSnapshot extra = incident;
+        extra.id = "quota-incident-" + std::to_string(i);
+        std::string id;
+        quotaSaves = SaveIncidentArchive(root, security, extra, &id, &error);
+        if (quotaSaves) generatedIds.push_back(id);
+    }
+    archives = quotaSaves ? ListIncidentArchives(root, 100, &error)
+                          : std::vector<IncidentArchiveInfo>();
+    const auto pinnedOriginal = std::find_if(archives.begin(), archives.end(),
+        [&archiveId](const IncidentArchiveInfo& item) { return item.id == archiveId; });
+    const bool countBounded = quotaSaves && archives.size() == 20 &&
+        pinnedOriginal != archives.end() && pinnedOriginal->pinned;
+    Check(r, "incident-archive.retention-count-and-pinned-protection",
+          countBounded, error);
+
+    bool allPinned = countBounded;
+    for (const IncidentArchiveInfo& archive : archives)
+        allPinned = allPinned && SetIncidentArchivePinned(root, archive.id,
+            true, security, &error);
+    IncidentSnapshot refused = incident;
+    refused.id = "all-pinned-refusal";
+    std::string refusedId;
+    const bool saveRefused = allPinned && !SaveIncidentArchive(root, security,
+        refused, &refusedId, &error) && error == "incident_archive_quota_pinned";
+    Check(r, "incident-archive.all-pinned-quota-refuses-new-save", saveRefused,
+          error);
+
+    archives = ListIncidentArchives(root, 100, &error);
+    bool cleanupReady = !archives.empty();
+    for (const IncidentArchiveInfo& archive : archives)
+        cleanupReady = SetIncidentArchivePinned(root, archive.id, false,
+            security, &error) && cleanupReady;
+
+    if (cleanupReady) {
+        archives = ListIncidentArchives(root, 100, &error);
         const wchar_t* files[] = {L"manifest.json", L"events.ndjson",
-            L"checkpoints.ndjson", L"index.json"};
-        for (const wchar_t* name : files)
-            (void)::DeleteFileW((archiveDirectory + L"\\" + name).c_str());
-        (void)::RemoveDirectoryW(archiveDirectory.c_str());
+            L"checkpoints.ndjson", L"index.json", L"pinned.txt"};
+        for (const IncidentArchiveInfo& archive : archives) {
+            const std::wstring directory = root + L"\\incident-" +
+                std::wstring(archive.id.begin(), archive.id.end());
+            for (const wchar_t* name : files)
+                (void)::DeleteFileW((directory + L"\\" + name).c_str());
+            (void)::RemoveDirectoryW(directory.c_str());
+        }
     }
     if (rootReady) (void)::RemoveDirectoryW(root.c_str());
 }
