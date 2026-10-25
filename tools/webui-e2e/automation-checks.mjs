@@ -49,6 +49,26 @@ function check(name, ok, detail = "") {
 // No eval/Function (CSP blocks them); test logic is written as real functions
 // that are serialized and run in-page.
 
+async function runLifecycleLabelTests(page) {
+  await page.goto(`${url}#/`, { waitUntil: "networkidle" });
+  const labels = await page.evaluate(async () => {
+    const { processEvidenceLabel } = await import("./js/pages/automations.js");
+    return [
+      processEvidenceLabel({ process: { pid: 42, imagePath: null, observedImageName: "node.exe" } }),
+      processEvidenceLabel({ process: { pid: 42, imagePath: null }, derived: {
+        process: { pid: 42, imagePath: null, observedImageName: "node.exe" },
+      } }),
+      processEvidenceLabel({ process: { pid: 42, imagePath: null, observedImageName: null } }),
+    ];
+  });
+  check("Lifecycle view labels source-only image name explicitly",
+    labels[0] === "Observed name: node.exe");
+  check("Lifecycle view uses flow-correlated name when raw event lacks one",
+    labels[1] === "Observed name: node.exe");
+  check("Lifecycle view falls back to PID when identity is unknown",
+    labels[2] === "PID 42");
+}
+
 async function runScriptEngineTests(page) {
   await page.goto(`${url}#/`, { waitUntil: "networkidle" });
   await page.waitForTimeout(800);
@@ -560,6 +580,122 @@ async function runApiTests(page) {
         results.push({ name: t.name, pass: false, detail: err.message });
       }
     }
+
+    // Exercise the runtime serializer with an actual retained recipe. An empty
+    // catalogue cannot catch malformed per-item state JSON. Preserve any
+    // existing definitions and only use an empty catalogue for this fixture.
+    const recipeHeaders = {
+      "X-WinTCP-Token": token,
+      "Content-Type": "application/x-www-form-urlencoded",
+    };
+    let recipeFixtureCreated = false;
+    let recipeRevisionForCleanup = "";
+    try {
+      const beforeResponse = await fetch("/api/engine/recipes", {
+        headers: { "X-WinTCP-Token": token },
+      });
+      const before = await beforeResponse.json();
+      if (beforeResponse.ok && Array.isArray(before.items) && before.items.length === 0) {
+        const id = crypto.randomUUID().replaceAll("-", "").slice(0, 24);
+        const hex = (value) => Array.from(new TextEncoder().encode(value),
+          (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const recipesText = (revision) => "WinTCP-Recipes:1\n" + [
+          id, revision, "0", "outbound_activity", "60",
+          hex("Web UI JSON contract fixture"), hex(`C:\\WinTCP-Test\\${id}.exe`),
+        ].join("|") + "\n";
+        const save = async (expectedRevision, text) => {
+          const response = await fetch("/api/engine/recipes", {
+            method: "POST",
+            headers: recipeHeaders,
+            body: new URLSearchParams({
+              requestId: crypto.randomUUID().replaceAll("-", ""),
+              expectedRevision,
+              recipesText: text,
+            }),
+          });
+          const submitted = await response.json();
+          if (response.status !== 202 || !submitted.operationId)
+            throw new Error(`recipe save returned ${response.status}: ${submitted.code || "no operation"}`);
+          let operation;
+          for (let attempt = 0; attempt < 80; attempt++) {
+            operation = await (await fetch(
+              `/api/engine/operations/${submitted.operationId}`,
+              { headers: { "X-WinTCP-Token": token } })).json();
+            if (operation.status === "succeeded" || operation.status === "failed") break;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          if (operation?.status !== "succeeded")
+            throw new Error(operation?.error?.code || "recipe operation did not complete");
+          return operation.result;
+        };
+        const created = await save(before.revision, recipesText("1"));
+        recipeFixtureCreated = true;
+        recipeRevisionForCleanup = created?.revision || "";
+        const listedResponse = await fetch("/api/engine/recipes", {
+          headers: { "X-WinTCP-Token": token },
+        });
+        const listed = await listedResponse.json();
+        const fixture = listed.items?.find((item) => item.id === id);
+        const validRuntime = fixture &&
+          typeof fixture.runtime?.activeActionGrant === "boolean" &&
+          typeof fixture.runtime?.restrictionPreviouslyApplied === "boolean" &&
+          typeof fixture.runtime?.suppressed === "string";
+        results.push({
+          name: "Saved monitor runtime state is valid JSON with boolean authorization fields",
+          pass: listedResponse.ok && validRuntime,
+          detail: `status=${listedResponse.status}; fixture=${Boolean(fixture)}`,
+        });
+        if (listedResponse.ok && listed.revision)
+          recipeRevisionForCleanup = listed.revision;
+      } else {
+        results.push({
+          name: "Saved monitor runtime JSON contract test",
+          pass: beforeResponse.ok && Array.isArray(before.items),
+          detail: "skipped fixture creation to preserve existing monitor definitions",
+        });
+      }
+    } catch (err) {
+      results.push({
+        name: "Saved monitor runtime state is valid JSON with boolean authorization fields",
+        pass: false,
+        detail: err.message,
+      });
+    } finally {
+      if (recipeFixtureCreated && recipeRevisionForCleanup) {
+        try {
+          const response = await fetch("/api/engine/recipes", {
+            method: "POST",
+            headers: recipeHeaders,
+            body: new URLSearchParams({
+              requestId: crypto.randomUUID().replaceAll("-", ""),
+              expectedRevision: recipeRevisionForCleanup,
+              recipesText: "WinTCP-Recipes:1\n",
+            }),
+          });
+          const submitted = await response.json();
+          let operation;
+          for (let attempt = 0; response.status === 202 && attempt < 80; attempt++) {
+            operation = await (await fetch(
+              `/api/engine/operations/${submitted.operationId}`,
+              { headers: { "X-WinTCP-Token": token } })).json();
+            if (operation.status === "succeeded" || operation.status === "failed") break;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          results.push({
+            name: "Temporary monitor fixture was removed after the JSON contract test",
+            pass: response.status === 202 && operation?.status === "succeeded",
+            detail: operation?.error?.code || `status=${response.status}`,
+          });
+        } catch (err) {
+          results.push({
+            name: "Temporary monitor fixture was removed after the JSON contract test",
+            pass: false,
+            detail: err.message,
+          });
+        }
+      }
+    }
+
     try {
       const snapshotResponse = await fetch("/api/connections", { headers: { "X-WinTCP-Token": token } });
       const snapshot = await snapshotResponse.json();
@@ -673,10 +809,16 @@ async function runApiTests(page) {
         headers: { "X-WinTCP-Token": token, "Content-Type": "application/json" },
         body: JSON.stringify({ name: readOnlyRule.name, operation: "remove" }),
       }) : null;
+      const readOnlyBody = readOnlyPreview
+        ? await readOnlyPreview.json().catch(() => ({})) : {};
+      const readOnlyRefused = !readOnlyPreview || readOnlyPreview.status === 403 ||
+        (readOnlyPreview.status === 409 &&
+          /no longer present|identity is ambiguous/.test(readOnlyBody.error || ""));
       results.push({
         name: "Windows-managed firewall rules cannot enter the WinTCP mutation flow",
-        pass: !readOnlyRule || readOnlyPreview.status === 403,
-        detail: readOnlyRule ? "status=" + readOnlyPreview.status : "no Windows-managed rules were returned",
+        pass: readOnlyRefused,
+        detail: !readOnlyRule ? "no Windows-managed rules were returned" :
+          `status=${readOnlyPreview.status} error=${readOnlyBody.error || "none"}`,
       });
       const unknownRuleAction = await fetch("/api/firewall/rule/execute", {
         method: "POST",
@@ -907,6 +1049,20 @@ async function testAutomationsPage(page) {
   check("Automations has Templates tab", trimmedTabs.includes("Templates"));
   check("Automations has Scripts tab", trimmedTabs.includes("Scripts"));
   check("Automations has Events tab", trimmedTabs.includes("Events & audit"));
+  const restrictionStates = await page.evaluate(async () => {
+    const { recipeRestrictionState } = await import("./js/pages/automations.js");
+    const prior = { runtime: { restrictionPreviouslyApplied: true } };
+    const fresh = { runtime: { restrictionPreviouslyApplied: false } };
+    return [
+      recipeRestrictionState(prior, null, true),
+      recipeRestrictionState(prior, null, false),
+      recipeRestrictionState(prior, { id: "lease" }, true),
+      recipeRestrictionState(fresh, null, true),
+    ];
+  });
+  check("Previous temporary blocks distinguish needs-rearm, unknown, and live states",
+    restrictionStates.join(",") === "needs_rearm,unknown,armed,never_armed",
+    restrictionStates.join(","));
 
   // ---- Templates tab tests ----
   // Click the second tab (Scripts or Events) then back to Templates to ensure tab switching works
@@ -1258,6 +1414,8 @@ testPage.on("console", (m) => {
 testPage.on("pageerror", (e) => consoleErrors.push("pageerror: " + e.message));
 
 try {
+  console.log("=== Lifecycle Evidence Labels ===");
+  await runLifecycleLabelTests(testPage);
   console.log("=== Script Engine Unit Tests (edge cases) ===");
   await runScriptEngineTests(testPage);
 
