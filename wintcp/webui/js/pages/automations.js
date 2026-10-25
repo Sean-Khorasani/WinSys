@@ -533,6 +533,7 @@ export async function renderAutomations(page, store) {
         if (!result.items.length) inbox.append(h("p", { class: "muted text-sm" },
           "No notifications in this page."));
         for (const notice of result.items) {
+          const evidenceEventId = notice.triggerEventId || notice.eventId || "";
           const ackState = h("span", { class: "badge badge-outline" },
             notice.acknowledged ? "Acknowledged" : "Unacknowledged");
           const ack = h("button", { class: "btn btn-sm btn-outline", type: "button",
@@ -562,9 +563,9 @@ export async function renderAutomations(page, store) {
             h("time", { class: "muted", datetime: notice.occurredAtUtc || "" },
               notice.occurredAtUtc ? new Date(notice.occurredAtUtc).toLocaleString() : "Time unknown"),
             h("span", { class: "engine-event-target" }, notice.message || "Monitor fired"),
-            notice.triggerEventId ? h("button", { class: "btn btn-sm btn-outline", type: "button",
+            evidenceEventId ? h("button", { class: "btn btn-sm btn-outline", type: "button",
               onclick: () => {
-                store.set({ automationEvidenceEventId: notice.triggerEventId });
+                store.set({ automationEvidenceEventId: evidenceEventId });
                 void tabs.select("lifecycle");
               },
             }, "View triggering event") : null,
@@ -1028,7 +1029,8 @@ export async function renderAutomations(page, store) {
             const priorCursor = cursor;
             const limit = linkedEventId ? 500 : 30;
             const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-            const page = await api.get(`/api/engine/lifecycle?limit=${limit}${query}`,
+            const historyPath = linkedSearch ? "/api/engine/history" : "/api/engine/lifecycle";
+            const page = await api.get(`${historyPath}?limit=${limit}${query}`,
               { signal: requests.signal });
             if (disposed) return;
             const rows = page.items || [];
@@ -1052,9 +1054,9 @@ export async function renderAutomations(page, store) {
                 h("p", {}, item.sourceEndpoint && item.destinationEndpoint
                   ? `Source ${endpoint(item.sourceEndpoint)} → destination ${endpoint(item.destinationEndpoint)}`
                   : item.reason || "No network tuple in this event"),
-                item.derived?.local && item.derived?.remote
+                (item.derived?.local || item.local) && (item.derived?.remote || item.remote)
                   ? h("p", { class: "muted text-sm" },
-                    `Source-based roles: ${endpoint(item.derived.local)} ↔ ${endpoint(item.derived.remote)} (${item.derived.direction || "direction unknown"})`)
+                    `Source-based roles: ${endpoint(item.derived?.local || item.local)} ↔ ${endpoint(item.derived?.remote || item.remote)} (${item.derived?.direction || item.direction || "direction unknown"})`)
                   : null,
                 h("p", { class: "muted text-sm" }, item.receivedUtcMs
                   ? `Received ${new Date(Number(item.receivedUtcMs)).toLocaleString()}; ${item.process?.creationTimeFileTime
@@ -1066,13 +1068,12 @@ export async function renderAutomations(page, store) {
               foundLinked = foundLinked || !!linked;
             }
             pageNumber++;
-            if (!linkedSearch || foundLinked || rows.length < limit ||
-                !cursor || cursor === priorCursor) break;
-          } while (pageNumber < 64);
+            if (!linkedSearch || foundLinked || !cursor || cursor === priorCursor) break;
+          } while (pageNumber < 2048);
           if (linkedSearch) {
             linkedEventStatus.textContent = foundLinked
               ? `Found linked notification evidence: ${linkedEventId}`
-              : `Linked event ${linkedEventId} was not found in the retained lifecycle window.`;
+              : `Linked event ${linkedEventId} was not found in retained event history.`;
             if (foundLinked) linkedEventId = "";
             load.textContent = foundLinked ? "Load more events" : "Retry linked event search";
           }
@@ -1082,7 +1083,16 @@ export async function renderAutomations(page, store) {
           if (!linkedSearch) load.textContent = "Next events page";
         } catch (error) {
           if (!disposed) {
-            if (error.status === 410) { cursor = ""; seen.clear(); }
+            if (error.status === 410) {
+              cursor = "";
+              seen.clear();
+              if (linkedEventId) {
+                linkedEventStatus.textContent =
+                  `Linked event ${linkedEventId} rotated out of retained event history.`;
+                linkedEventId = "";
+                load.textContent = "Load retained events";
+              }
+            }
             status.textContent = error.status === 410
               ? "Older records rotated out. Load again from the first retained page."
               : error.message || "Lifecycle history unavailable.";
