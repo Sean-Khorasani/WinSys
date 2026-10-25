@@ -415,6 +415,17 @@ On a clean **Stop event tracking**, the collector consumes final ETW buffers,
 drains queued decoding, and flushes pending normalized flows before reporting
 completion; queue and ETW loss remain explicit counters rather than silently
 discarded shutdown data.
+The Event history view also reads `collectorEventLoss` from `/api/engine` and
+shows queue drops, schema rejects, ETW event/buffer losses, and collector
+history/flow evictions. These are cumulative counters for the current ETW trace
+session, refreshed on demand or after collector controls; they are unavailable
+as live values when the elevated helper is disconnected. The last sampled
+counters remain labeled as stale for the last-known session when available.
+Counter increases and same-session resets also create deterministic coverage-gap
+rows in retained lifecycle and shared event history. The engine checkpoints
+those cumulative totals after the evidence append, preventing a restart from
+counting the same observed increase twice. These rows share the bounded history
+retention policy, and the counters reset when a new trace session starts.
 `/api/engine`, `/api/engine/capabilities`, and `/api/engine/events` require the
 page's session token even for GET. If the process is absent they return an
 explicit unavailable response. Its live event feed combines sampled endpoints
