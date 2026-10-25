@@ -18,6 +18,9 @@ public:
                         std::uint64_t eventQpc, std::uint64_t liveAtQpc);
     bool Find(std::uint32_t pid, std::uint64_t eventQpc,
               NetworkProcessIdentity* identity) const;
+    // A source-observed lifecycle boundary makes later events ineligible for
+    // the prior instance without discarding its earlier verified history.
+    void EndAt(std::uint32_t pid, std::uint64_t eventQpc);
     bool HasInstance(std::uint32_t pid, std::uint64_t creationTime) const {
         return records_.find({pid, creationTime}) != records_.end();
     }
