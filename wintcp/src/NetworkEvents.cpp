@@ -56,9 +56,194 @@ bool ParseSequence(const std::string& text, std::uint64_t* result) {
     return true;
 }
 
+bool FlatObject(const std::string& json, std::string* object) {
+    const std::string marker = "\"normalizedFields\":{";
+    const std::size_t found = json.find(marker);
+    if (found == std::string::npos) return false;
+    const std::size_t begin = found + marker.size() - 1;
+    bool quoted = false, escaped = false;
+    unsigned depth = 0;
+    for (std::size_t i = begin; i < json.size(); ++i) {
+        const char c = json[i];
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') quoted = false;
+            continue;
+        }
+        if (c == '"') quoted = true;
+        else if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0) {
+            *object = json.substr(begin, i - begin + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FlatValue(const std::string& object, const std::string& key,
+               std::string* raw) {
+    const std::string marker = "\"" + key + "\":";
+    const std::size_t found = object.find(marker);
+    if (found == std::string::npos) return false;
+    std::size_t begin = found + marker.size();
+    while (begin < object.size() && (object[begin] == ' ' || object[begin] == '\t')) ++begin;
+    std::size_t end = begin;
+    if (begin < object.size() && object[begin] == '"') {
+        ++end;
+        bool escaped = false;
+        for (; end < object.size(); ++end) {
+            const char c = object[end];
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') { ++end; break; }
+        }
+        if (end > object.size() || object[end - 1] != '"') return false;
+    } else {
+        while (end < object.size() && object[end] != ',' && object[end] != '}' &&
+               object[end] != ' ' && object[end] != '\r' && object[end] != '\n') ++end;
+    }
+    if (end <= begin) return false;
+    *raw = object.substr(begin, end - begin);
+    return true;
+}
+
+bool FlatString(const std::string& object, const std::string& key,
+                std::string* value, bool* known = nullptr) {
+    std::string raw;
+    if (!FlatValue(object, key, &raw)) return false;
+    if (raw == "null") {
+        value->clear();
+        if (known != nullptr) *known = false;
+        return true;
+    }
+    if (raw.size() < 2 || raw.front() != '"' || raw.back() != '"') return false;
+    value->clear();
+    for (std::size_t i = 1; i + 1 < raw.size(); ++i) {
+        char c = raw[i];
+        if (c == '\\') {
+            if (++i + 1 >= raw.size()) return false;
+            c = raw[i];
+            if (c == '"' || c == '\\' || c == '/') value->push_back(c);
+            else if (c == 'u' && i + 4 < raw.size() && raw[i + 1] == '0' &&
+                     raw[i + 2] == '0') {
+                const auto nibble = [](char x) -> int {
+                    if (x >= '0' && x <= '9') return x - '0';
+                    if (x >= 'a' && x <= 'f') return x - 'a' + 10;
+                    if (x >= 'A' && x <= 'F') return x - 'A' + 10;
+                    return -1;
+                };
+                const int hi = nibble(raw[i + 3]), lo = nibble(raw[i + 4]);
+                if (hi < 0 || lo < 0) return false;
+                value->push_back(static_cast<char>((hi << 4) | lo));
+                i += 4;
+            } else return false;
+        } else value->push_back(c);
+    }
+    if (known != nullptr) *known = true;
+    return true;
+}
+
+bool FlatUnsigned(const std::string& object, const std::string& key,
+                  std::uint64_t maximum, std::uint64_t* value) {
+    std::string raw;
+    if (!FlatValue(object, key, &raw)) return false;
+    if (raw == "null") { *value = 0; return true; }
+    if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"')
+        raw = raw.substr(1, raw.size() - 2);
+    if (!ParseSequence(raw, value) || *value > maximum) return false;
+    return true;
+}
+
+bool FlatBool(const std::string& object, const std::string& key, bool* value) {
+    std::string raw;
+    if (!FlatValue(object, key, &raw) || (raw != "true" && raw != "false")) return false;
+    *value = raw == "true";
+    return true;
+}
+
+bool FlatEndpoint(const std::string& object, const char* prefix,
+                  NetworkEndpoint* endpoint) {
+    const std::string base(prefix);
+    bool known = false;
+    if (!FlatString(object, base + "Address", &endpoint->address, &known)) return false;
+    if (!known) { *endpoint = {}; return true; }
+    std::uint64_t port = 0, scope = 0;
+    if (!FlatUnsigned(object, base + "Port", 65535, &port) ||
+        !FlatUnsigned(object, base + "ScopeId", 0xffffffffULL, &scope)) return false;
+    endpoint->port = static_cast<std::uint16_t>(port);
+    endpoint->scopeId = static_cast<std::uint32_t>(scope);
+    endpoint->known = true;
+    return true;
+}
+
 }  // namespace
 
 std::string NetworkJsonQuote(const std::string& value) { return Quote(value); }
+
+bool ParseLifecycleDerivedEvent(const std::string& traceJson,
+                                NetworkEvent* event, std::string* error) {
+    const auto fail = [error](const char* reason) {
+        if (error != nullptr) *error = reason;
+        return false;
+    };
+    if (event == nullptr || traceJson.size() > 128 * 1024)
+        return fail("lifecycle_record_invalid");
+    std::string object;
+    if (!FlatObject(traceJson, &object)) return fail("normalized_fields_missing");
+    NetworkEvent parsed;
+    std::string kind, creation, evidenceId;
+    std::uint64_t pid = 0, generation = 0;
+    bool creationKnown = false;
+    if (!FlatString(object, "eventId", &parsed.eventId) || parsed.eventId.empty() ||
+        !FlatString(object, "sourceSequence", &parsed.sourceSequence) ||
+        !FlatString(object, "source", &parsed.source) ||
+        !FlatString(object, "kind", &kind) ||
+        !FlatString(object, "occurredAtUtc", &parsed.occurredAtUtc) ||
+        !FlatUnsigned(object, "monotonicNs", (std::numeric_limits<std::uint64_t>::max)(),
+                      &parsed.monotonicNs) ||
+        !FlatString(object, "timebaseId", &parsed.timebaseId) ||
+        !FlatString(object, "receivedAtUtc", &parsed.receivedAtUtc) ||
+        !FlatUnsigned(object, "pid", 0xffffffffULL, &pid) ||
+        !FlatString(object, "creationTimeFileTime", &creation, &creationKnown) ||
+        !FlatString(object, "imagePath", &parsed.process.imagePath) ||
+        !FlatString(object, "observedImageName", &parsed.process.observedImageName) ||
+        !FlatString(object, "flowId", &parsed.flowId) ||
+        !FlatUnsigned(object, "flowGeneration", (std::numeric_limits<std::uint64_t>::max)(),
+                      &generation) ||
+        !FlatBool(object, "lateArrival", &parsed.lateArrival) ||
+        !FlatBool(object, "incompleteChronology", &parsed.incompleteChronology) ||
+        !FlatString(object, "chronologyReason", &parsed.chronologyReason) ||
+        !FlatString(object, "endpointRoleConfidence", &parsed.endpointRoleConfidence) ||
+        !FlatBool(object, "firstObservedMidSession", &parsed.firstObservedMidSession) ||
+        !FlatString(object, "transport", &parsed.transport) ||
+        !FlatString(object, "tcpState", &parsed.tcpState) ||
+        !FlatString(object, "family", &parsed.family) ||
+        !FlatEndpoint(object, "local", &parsed.local) ||
+        !FlatEndpoint(object, "remote", &parsed.remote) ||
+        !FlatString(object, "direction", &parsed.direction) ||
+        !FlatString(object, "interfaceGuid", &parsed.interfaceGuid) ||
+        !FlatString(object, "interfaceReason", &parsed.interfaceReason) ||
+        !FlatString(object, "confidence", &parsed.confidence) ||
+        !FlatString(object, "evidenceId", &evidenceId) ||
+        !FlatString(object, "coverageId", &parsed.coverageId))
+        return fail("normalized_fields_invalid");
+    parsed.process.pid = static_cast<std::uint32_t>(pid);
+    parsed.process.creationTimeKnown = creationKnown;
+    if (creationKnown && (!ParseSequence(creation, &parsed.process.creationTimeFileTime) ||
+                          parsed.process.creationTimeFileTime == 0))
+        return fail("normalized_process_identity_invalid");
+    if (kind == "connection_established") parsed.kind = NetworkEventKind::ConnectionEstablished;
+    else if (kind == "connection_closed") parsed.kind = NetworkEventKind::ConnectionClosed;
+    else if (kind == "udp_activity") parsed.kind = NetworkEventKind::UdpActivity;
+    else if (kind == "process_started") parsed.kind = NetworkEventKind::ProcessStarted;
+    else if (kind == "process_exited") parsed.kind = NetworkEventKind::ProcessExited;
+    else return fail("normalized_event_kind_unsupported");
+    if (!evidenceId.empty()) parsed.evidenceIds.push_back(evidenceId);
+    *event = std::move(parsed);
+    if (error != nullptr) error->clear();
+    return true;
+}
 
 const char* NetworkEventKindName(NetworkEventKind kind) {
     switch (kind) {
@@ -102,6 +287,7 @@ std::string NetworkEventJson(const NetworkEvent& event) {
         << (event.process.creationTimeKnown
                 ? Quote(std::to_string(event.process.creationTimeFileTime)) : "null")
         << ",\"imagePath\":" << Nullable(event.process.imagePath)
+        << ",\"observedImageName\":" << Nullable(event.process.observedImageName)
         << "},\"flowId\":" << Nullable(event.flowId)
         << ",\"flowGeneration\":" << (event.flowGeneration == 0 ? "null" :
             Quote(std::to_string(event.flowGeneration)))
@@ -156,7 +342,9 @@ NetworkEventJournal::NetworkEventJournal(std::size_t maxRecords, std::size_t max
     epoch_ = std::to_string(tick) + "-" + std::to_string(++counter);
 }
 
-void NetworkEventJournal::Append(NetworkEvent event) {
+bool NetworkEventJournal::Append(NetworkEvent event) {
+    if (!event.eventId.empty() && retainedIds_.find(event.eventId) != retainedIds_.end())
+        return false;
     std::size_t bytes = NetworkEventJson(event).size();
     if (bytes > 128 * 1024) {
         NetworkEvent gap;
@@ -177,14 +365,18 @@ void NetworkEventJournal::Append(NetworkEvent event) {
     record.sequence = nextSequence_++;
     record.bytes = bytes;
     record.event = std::move(event);
+    if (!record.event.eventId.empty()) retainedIds_.insert(record.event.eventId);
     records_.push_back(std::move(record));
     bytes_ += bytes;
     while (!records_.empty() &&
            (records_.size() > maxRecords_ || bytes_ > maxBytes_)) {
         bytes_ -= records_.front().bytes;
+        if (!records_.front().event.eventId.empty())
+            retainedIds_.erase(records_.front().event.eventId);
         records_.pop_front();
         ++evictedRecords_;
     }
+    return true;
 }
 
 NetworkEventPage NetworkEventJournal::Read(const std::string& cursor,
