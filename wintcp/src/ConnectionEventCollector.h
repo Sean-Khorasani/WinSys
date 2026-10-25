@@ -3,6 +3,7 @@
 #pragma once
 #include "EventDecoder.h"
 #include "ProcessInstanceCache.h"
+#include "BoundedQueueBudget.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -113,7 +114,7 @@ private:
     std::wstring ownerScope_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
-    std::atomic<std::uint64_t> nextSequence_{0}, decoded_{0}, queueLost_{0}, rejected_{0};
+    std::atomic<std::uint64_t> nextSequence_{0}, decoded_{0}, rejected_{0};
     std::atomic<std::uint64_t> eventsLost_{0}, buffersLost_{0}, historyEvicted_{0};
     std::atomic<ULONG> traceResult_{ERROR_SUCCESS};
     std::atomic<std::uint64_t> qpcFrequency_{0};
@@ -136,7 +137,7 @@ private:
     std::mutex queueMutex_;
     std::condition_variable ready_;
     std::deque<RawRecord> queue_;
-    std::size_t queueBytes_ = 0;
+    BoundedQueueBudget queueBudget_{16384, 8 * 1024 * 1024};
     mutable std::mutex historyMutex_;
     std::deque<TraceObservation> history_;
     std::size_t historyBytes_ = 0;
