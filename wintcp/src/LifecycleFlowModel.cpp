@@ -25,6 +25,7 @@ void Incomplete(LifecycleAnnotation* annotation, const char* reason) {
 
 std::size_t TraceObservationBytes(const TraceObservation& observation) {
     return sizeof(observation) + 64 + 2 * (observation.process.imagePath.size() +
+        observation.process.observedImageName.size() + observation.observedImageName.size() +
         observation.identityReason.size() + observation.timeReason.size() +
         observation.decoded.family.size() + observation.decoded.source.address.size() +
         observation.decoded.destination.address.size() + observation.lifecycle.flowId.size() +
@@ -66,16 +67,19 @@ void LifecycleFlowModel::EvictOldest() {
 }
 
 LifecycleFlowModel::Flow* LifecycleFlowModel::CreateFlow(const std::string& key,
-    std::uint64_t qpc, LifecycleAnnotation annotation) {
+    std::uint64_t qpc, LifecycleAnnotation annotation,
+    const NetworkProcessIdentity& process) {
     const std::size_t bytes = sizeof(Flow) + 256 + key.size() * 2 +
-        2 * (annotation.local.address.size() + annotation.remote.address.size());
+        2 * (annotation.local.address.size() + annotation.remote.address.size() +
+             process.imagePath.size() + process.observedImageName.size());
     while (!flows_.empty() && (flows_.size() >= flowCapacity_ ||
                               flowBytes_ + bytes > kFlowBudget)) EvictOldest();
     if (bytes > kFlowBudget) return nullptr;
     const auto generation = ++nextFlow_;
     annotation.generation = generation;
     annotation.flowId = epoch_ + ":flow-" + std::to_string(generation);
-    auto inserted = flows_.emplace(generation, Flow{key, std::move(annotation), qpc, 0, 0, bytes});
+    auto inserted = flows_.emplace(generation, Flow{key, std::move(annotation), qpc, 0, 0,
+                                                     bytes, process});
     index_[key].push_back(generation);
     flowBytes_ += bytes;
     return &inserted.first->second;
@@ -122,17 +126,28 @@ TraceObservation LifecycleFlowModel::Normalize(TraceObservation observation,
                            (selected == nullptr || selected->start < flow.start)) selected = &flow;
             }
         }
-        if (connect) selected = CreateFlow(key, observation.sourceQpc, annotation);
+        if (connect) selected = CreateFlow(key, observation.sourceQpc, annotation,
+                                            observation.process);
         else if (selected == nullptr) {
             annotation.midSession = true;
             Incomplete(&annotation, "connect_not_observed");
-            selected = CreateFlow(key, observation.sourceQpc, annotation);
+            selected = CreateFlow(key, observation.sourceQpc, annotation,
+                                  observation.process);
         }
         if (selected != nullptr) {
             annotation.flowId = selected->annotation.flowId;
             annotation.generation = selected->annotation.generation;
             if (close) {
                 selected->closed = observation.sourceQpc;
+                // Carry only the source-observed name along an exact retained
+                // flow match. Never upgrade it into an executable path or
+                // creation-time identity for an event delivered after exit.
+                if (observation.process.observedImageName.empty() &&
+                    !selected->process.observedImageName.empty()) {
+                    observation.process.observedImageName = selected->process.observedImageName;
+                    observation.observedImageName = selected->process.observedImageName;
+                    observation.identityReason = "flow_correlated_image_name_only";
+                }
                 annotation.local = selected->annotation.local;
                 annotation.remote = selected->annotation.remote;
                 annotation.direction = selected->annotation.direction;
