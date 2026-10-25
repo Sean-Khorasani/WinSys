@@ -86,6 +86,8 @@ wintcp/src/TrayIcon.cpp
     wintcp/src/EngineClock.h
     wintcp/src/RecipeModel.cpp
     wintcp/src/RecipeModel.h
+    wintcp/src/RecipeScheduleWindows.cpp
+    wintcp/src/RecipeScheduleWindows.h
     wintcp/src/RestrictionModel.cpp
     wintcp/src/RestrictionModel.h
     wintcp/src/RestrictionLease.cpp
