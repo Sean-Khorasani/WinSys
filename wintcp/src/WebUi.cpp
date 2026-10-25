@@ -3196,20 +3196,64 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             return response;
         }
         std::map<std::string, std::string> fields;
-        if (!ParseForm(request.body, &fields) || fields.size() != 2 ||
-            !fields.count("requestId") ||
-            (fields["action"] != "start" && fields["action"] != "stop" &&
+        if (!ParseForm(request.body, &fields) || !fields.count("requestId") ||
+            !fields.count("action") ||
+            (fields["action"] != "release-owner" &&
+             fields["action"] != "arm-reactive" && fields.size() != 2) ||
+            (fields["action"] == "release-owner" && fields.size() != 3) ||
+            (fields["action"] == "arm-reactive" && fields.size() != 12) ||
+            (fields["action"] != "release-owner" &&
+             fields["action"] != "arm-reactive" &&
+             fields["action"] != "start" && fields["action"] != "stop" &&
              fields["action"] != "events-start" && fields["action"] != "events-stop")) {
             response.status = 400;
             response.body = "{\"code\":\"invalid_collector_action\"}";
             return response;
         }
-        if (!EngineSubmitCollector(fields["requestId"], fields["action"], "",
+        std::string payload = fields.count("owner") ? fields["owner"] : "";
+        if (fields["action"] == "arm-reactive") {
+            uint64_t port = 0, leaseMinutes = 0, grantMinutes = 0;
+            uint64_t actions = 0, cumulativeMinutes = 0, revision = 0;
+            if (!fields.count("imagePath") || !fields.count("remoteAddress") ||
+                !fields.count("remotePort") || !fields.count("protocol") ||
+                !fields.count("minutes") || !fields.count("recipeRevision") ||
+                !fields.count("grantMinutes") || !fields.count("maxActions") ||
+                !fields.count("cumulativeMinutes") ||
+                !ParseUint64Strict(fields["remotePort"], &port) || port > 65535 ||
+                !ParseUint64Strict(fields["minutes"], &leaseMinutes) ||
+                leaseMinutes < 1 || leaseMinutes > 480 ||
+                !ParseUint64Strict(fields["grantMinutes"], &grantMinutes) ||
+                grantMinutes < 1 || grantMinutes > 480 ||
+                !ParseUint64Strict(fields["maxActions"], &actions) ||
+                actions < 1 || actions > 3 ||
+                !ParseUint64Strict(fields["cumulativeMinutes"], &cumulativeMinutes) ||
+                cumulativeMinutes < leaseMinutes || cumulativeMinutes > 60 ||
+                !ParseUint64Strict(fields["recipeRevision"], &revision) || revision == 0 ||
+                fields["protocol"] != "both" ||
+                fields["owner"].rfind("recipe:", 0) != 0) {
+                response.status = 400;
+                response.body = "{\"code\":\"bad_active_recipe_scope\"}";
+                return response;
+            }
+            payload = fields["imagePath"] + '\n' + fields["remoteAddress"] + '\n' +
+                std::to_string(port) + "\nboth\n" + std::to_string(leaseMinutes) +
+                '\n' + fields["owner"] + '\n' + std::to_string(revision) + '\n' +
+                std::to_string(grantMinutes) + '\n' + std::to_string(leaseMinutes) +
+                '\n' + std::to_string(actions) + '\n' + std::to_string(cumulativeMinutes);
+        }
+        if (!EngineSubmitCollector(fields["requestId"], fields["action"], payload,
                                    &response.body)) {
             response.status = 503;
             response.body = "{\"code\":\"engine_unavailable_or_invalid_request\"}";
-        } else response.status = response.body.find("\"code\":") == std::string::npos
-            ? 202 : response.body.find("request_id_reused") != std::string::npos ? 409 : 400;
+        } else if (response.body.find("\"code\":") == std::string::npos) {
+            response.status = 202;
+        } else if (response.body.find("operation_queue_full") != std::string::npos) {
+            response.status = 503;
+        } else if (response.body.find("request_id_reused") != std::string::npos) {
+            response.status = 409;
+        } else {
+            response.status = 400;
+        }
         return response;
     }
     if (path == "/api/restrictions" || path == "/api/restrictions/preview" ||
@@ -3261,7 +3305,9 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             return response;
         }
         std::string action, payload;
-        if (path == "/api/restrictions/preview" && fields.size() == 6 &&
+        if (path == "/api/restrictions/preview" &&
+            (fields.size() == 6 || fields.size() == 7) &&
+            (fields.size() == 6 || fields.count("owner")) &&
             fields.count("imagePath") && fields.count("remoteAddress") &&
             fields.count("remotePort") && fields.count("protocol") &&
             fields.count("minutes")) {
@@ -3272,7 +3318,8 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
                 action = "preview";
                 payload = fields["imagePath"] + '\n' + fields["remoteAddress"] +
                     '\n' + std::to_string(port) + '\n' + fields["protocol"] +
-                    '\n' + std::to_string(minutes);
+                    '\n' + std::to_string(minutes) + '\n' +
+                    (fields.count("owner") ? fields["owner"] : "manual");
             } else {
                 response.status = 400;
                 response.body = "{\"code\":\"bad_restriction_scope\"}";
@@ -3307,8 +3354,15 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
                                           &response.body)) {
             response.status = 503;
             response.body = "{\"code\":\"engine_unavailable_or_invalid_request\"}";
-        } else response.status = response.body.find("\"code\":") == std::string::npos
-            ? 202 : response.body.find("request_id_reused") != std::string::npos ? 409 : 400;
+        } else if (response.body.find("\"code\":") == std::string::npos) {
+            response.status = 202;
+        } else if (response.body.find("operation_queue_full") != std::string::npos) {
+            response.status = 503;
+        } else if (response.body.find("request_id_reused") != std::string::npos) {
+            response.status = 409;
+        } else {
+            response.status = 400;
+        }
         return response;
     }
     if (path == "/api/engine/control") {
