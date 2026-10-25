@@ -97,6 +97,9 @@
          unreferenced TU; the Debug configurations (/OPT:NOREF) failed with
          LNK2019 on MonitorDef::Validate and friends. Do not re-add it. -->
     <ClCompile Include="src\WebUi.cpp" />
+    <ClCompile Include="src\Notify.cpp" />
+    <ClCompile Include="src\WebStatic.cpp" />
+    <ClCompile Include="src\WebProcesses.cpp" />
     <ClCompile Include="src\EngineRuntime.cpp" />
     <ClCompile Include="src\EngineConfig.cpp" />
     <ClCompile Include="src\EngineStore.cpp" />
