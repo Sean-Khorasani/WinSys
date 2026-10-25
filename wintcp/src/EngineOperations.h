@@ -35,8 +35,9 @@ struct OperationSubmission {
     std::string status;
 };
 
-// Single-owner, bounded operation journal. Caller supplies a monotonic clock,
-// making expiry and idempotency testable without a running engine.
+// Single-owner, bounded operation journal with reserved collector-control
+// capacity. Caller supplies a monotonic clock, making expiry and idempotency
+// testable without a running engine.
 class EngineOperations {
 public:
     void SetEpoch(std::string epoch);
