@@ -28,8 +28,6 @@ bool LifecycleSessionOwnerMatches(const GUID& observed, const GUID& expected) {
 }
 
 namespace {
-constexpr std::size_t kMaxQueueRecords = 16384;
-constexpr std::size_t kMaxQueueBytes = 8 * 1024 * 1024;
 constexpr std::size_t kMaxHistoryRecords = 16384;
 constexpr std::size_t kMaxHistoryBytes = 16 * 1024 * 1024;
 constexpr ULONG kPropertiesBytes = sizeof(EVENT_TRACE_PROPERTIES) + 512 * sizeof(wchar_t);
@@ -339,8 +337,13 @@ bool ConnectionEventCollector::Start(std::string* error) {
         history_.clear();
         historyBytes_ = 0;
     }
-    nextSequence_ = 0; decoded_ = 0; queueLost_ = 0; rejected_ = 0;
+    nextSequence_ = 0; decoded_ = 0; rejected_ = 0;
     eventsLost_ = 0; buffersLost_ = 0; historyEvicted_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        queue_.clear();
+        queueBudget_.Reset();
+    }
     traceResult_ = ERROR_SUCCESS;
     published_ = 0; lateRecords_ = 0; flowEvicted_ = 0; reorderFlushes_ = 0;
     stopping_ = false;
@@ -407,9 +410,8 @@ bool ConnectionEventCollector::Stop(std::string* error) {
     }
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        queueLost_ += static_cast<std::uint64_t>(queue_.size());
+        queueBudget_.DropPending();
         queue_.clear();
-        queueBytes_ = 0;
     }
     running_ = false;
     if (error) error->clear();
@@ -436,7 +438,7 @@ void ConnectionEventCollector::OnEvent(EVENT_RECORD* record) noexcept {
     try {
         const std::uint64_t sequence = ++nextSequence_;
         if (record->UserData == nullptr || record->UserDataLength == 0 ||
-            record->UserDataLength > 4096) { ++queueLost_; return; }
+            record->UserDataLength > 4096) { queueBudget_.RecordDrop(); return; }
         RawRecord copied;
         copied.header = record->EventHeader;
         copied.context = record->BufferContext;
@@ -452,14 +454,14 @@ void ConnectionEventCollector::OnEvent(EVENT_RECORD* record) noexcept {
         const std::size_t size = sizeof(RawRecord) + copied.payload.size();
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            if (queue_.size() >= kMaxQueueRecords || size > kMaxQueueBytes - queueBytes_) {
-                ++queueLost_; return;
+            if (!queueBudget_.CanAccept(size)) {
+                queueBudget_.RecordDrop(); return;
             }
             queue_.push_back(std::move(copied));
-            queueBytes_ += size;
+            queueBudget_.Accepted(size);
         }
         ready_.notify_one();
-    } catch (...) { ++queueLost_; }
+    } catch (...) { queueBudget_.RecordDrop(); }
 }
 
 DWORD WINAPI ConnectionEventCollector::TraceThread(void* context) {
@@ -495,9 +497,10 @@ void ConnectionEventCollector::DecodeLoop() {
             ready_.wait_for(lock, std::chrono::milliseconds(50),
                 [this] { return stopping_.load() || !queue_.empty(); });
             if (!queue_.empty()) {
+                const std::size_t size = sizeof(RawRecord) + queue_.front().payload.size();
                 raw = std::move(queue_.front());
                 queue_.pop_front();
-                queueBytes_ -= sizeof(RawRecord) + raw.payload.size();
+                queueBudget_.Removed(size);
                 haveRecord = true;
             } else finish = stopping_.load();
         }
@@ -557,7 +560,7 @@ void ConnectionEventCollector::Publish(std::vector<TraceObservation> observation
 }
 
 ConnectionCollectorStatus ConnectionEventCollector::Status() const {
-    return {running_.load(), decoded_.load(), queueLost_.load(), rejected_.load(),
+    return {running_.load(), decoded_.load(), queueBudget_.Lost(), rejected_.load(),
         eventsLost_.load(), buffersLost_.load(), historyEvicted_.load(),
         qpcFrequency_.load(), traceResult_.load(), attributed_.load(), clockStable_.load(),
         clockMappingGeneration_.load(), clockRecoveries_.load(),
