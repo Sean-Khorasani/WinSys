@@ -29,6 +29,15 @@ import {
 const MAX_SAVED_SCRIPTS = 40;
 const MAX_RUN_STEPS = 100;
 
+export function processEvidenceLabel(event) {
+  const rawProcess = event?.process || event;
+  const process = rawProcess?.imagePath || rawProcess?.observedImageName
+    ? rawProcess : (event?.derived?.process || rawProcess);
+  if (process?.imagePath) return process.imagePath;
+  if (process?.observedImageName) return `Observed name: ${process.observedImageName}`;
+  return process ? `PID ${process.pid}` : "Collector coverage";
+}
+
 function recipeFile(items) {
   const hex = (text) => Array.from(new TextEncoder().encode(text),
     (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -37,6 +46,12 @@ function recipeFile(items) {
     item.trigger.type, item.cooldownSeconds,
     hex(item.name), hex(item.target.imagePaths[0]),
   ].join("|") + "\n").join("");
+}
+
+export function recipeRestrictionState(item, activeLease, inventoryKnown) {
+  if (activeLease) return "armed";
+  if (item?.runtime?.restrictionPreviouslyApplied !== true) return "never_armed";
+  return inventoryKnown ? "needs_rearm" : "unknown";
 }
 
 function timeText(iso) {
@@ -242,6 +257,81 @@ export async function renderAutomations(page, store) {
     let notificationCursor = "";
     let saving = false;
     let editingId = "";
+    async function runQueued(path, fields) {
+      const submitted = await api.postForm(path, {
+        requestId: crypto.randomUUID().replaceAll("-", ""), ...fields,
+      });
+      let operation;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        operation = await api.get(`/api/engine/operations/${submitted.operationId}`);
+        if (operation.status === "succeeded" || operation.status === "failed") break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      if (operation?.status !== "succeeded")
+        throw new Error(operation?.error?.code || "Operation pending; refresh to check its result.");
+      return operation.result;
+    }
+    async function armPreemptiveBlock(item, path) {
+      const remoteAddress = prompt("Remote IP address (leave blank to cover all destinations):", "");
+      if (remoteAddress === null) return;
+      const remotePort = prompt("Remote port (0 means any port):", "0");
+      if (remotePort === null) return;
+      const duration = prompt("Lease duration in minutes (1–480; expires automatically):", "60");
+      if (duration === null) return;
+      if (!/^\\d+$/.test(remotePort) || Number(remotePort) > 65535 ||
+          !/^\\d+$/.test(duration) || Number(duration) < 1 || Number(duration) > 480) {
+        engineMessage.textContent = "Invalid port or duration. No restriction was created.";
+        return;
+      }
+      const owner = `recipe:${item.id}`;
+      try {
+        const review = await runQueued("/api/restrictions/preview", {
+          imagePath: path, remoteAddress: remoteAddress.trim(), remotePort,
+          protocol: "both", minutes: duration, owner,
+        });
+        if (!confirm(`ARM a verified temporary outbound block?\\n\\nRecipe: ${item.name}\\nExecutable: ${review.imagePath}\\nDestination: ${review.remoteAddress || "all IPs"}${review.remotePort ? `:${review.remotePort}` : " (all ports)"}\\nProtocol: TCP + UDP\\nDuration: ${Number(review.durationSeconds) / 60} minutes\\n\\nThis is an explicit preemptive restriction, not an automatic response to a detected connection.`)) return;
+        const applied = await runQueued("/api/restrictions/apply", {
+          confirmationToken: review.confirmationToken,
+        });
+        engineMessage.textContent = applied.notificationStatus === "recorded"
+          ? `Armed ${item.name}; verified lease ${applied.lease.id}. The action was added to the notification inbox.`
+          : `Armed ${item.name}; verified lease ${applied.lease.id}. The inbox notification could not be recorded.`;
+        await Promise.all([loadRecipes(), loadNotifications()]);
+      } catch (error) {
+        engineMessage.textContent = error.message || "Could not arm this restriction.";
+      }
+    }
+    async function armReactiveBlock(item, path) {
+      const remoteAddress = prompt("Optional remote IP to block (blank means any destination):", "");
+      if (remoteAddress === null) return;
+      const remotePort = prompt("Optional remote port (0 means any port):", "0");
+      if (remotePort === null) return;
+      const grantMinutes = prompt("How long may this explicit approval stay armed? (1–480 minutes):", "60");
+      if (grantMinutes === null) return;
+      const leaseMinutes = prompt("Temporary block duration per matching connection (1–60 minutes):", "10");
+      if (leaseMinutes === null) return;
+      if (!/^\d+$/.test(remotePort) || Number(remotePort) > 65535 ||
+          !/^\d+$/.test(grantMinutes) || Number(grantMinutes) < 1 || Number(grantMinutes) > 480 ||
+          !/^\d+$/.test(leaseMinutes) || Number(leaseMinutes) < 1 || Number(leaseMinutes) > 60) {
+        engineMessage.textContent = "Invalid peer or duration. No active recipe was armed.";
+        return;
+      }
+      const owner = `recipe:${item.id}`;
+      if (!confirm(`ARM automatic temporary blocking for ${item.name}?\n\nExecutable: ${path}\nPeer: ${remoteAddress.trim() || "any destination"}${Number(remotePort) ? `:${remotePort}` : " (any port)"}\nThe first observed connection may already be established; subsequent matching traffic is blocked. The rule can affect all processes running this executable as your user.\n\nApproval expires in ${grantMinutes} minutes. Each verified action lasts ${leaseMinutes} minutes; one action maximum; no authorization is restored after restart.`)) return;
+      try {
+        await runQueued("/api/collector/control", {
+          action: "arm-reactive", imagePath: path,
+          remoteAddress: remoteAddress.trim(), remotePort,
+          protocol: "both", minutes: leaseMinutes, owner,
+          recipeRevision: item.revision, grantMinutes,
+          maxActions: "1", cumulativeMinutes: leaseMinutes,
+        });
+        engineMessage.textContent = `${item.name} armed for event-triggered temporary blocking. The engine will notify only after a verified restriction is installed.`;
+        await loadRecipes();
+      } catch (error) {
+        engineMessage.textContent = error.message || "Could not arm automatic restriction.";
+      }
+    }
     const formTitle = h("h3", {}, "Add monitor");
     const submitButton = h("button", { class: "btn btn-outline", type: "submit" },
       "Add disabled monitor");
@@ -292,18 +382,66 @@ export async function renderAutomations(page, store) {
         const result = await api.get("/api/engine/recipes", { signal: requests.signal });
         if (disposed) return;
         current = result;
+        let eventTrackingReady = false;
+        try {
+          const engine = await api.get("/api/engine", { signal: requests.signal });
+          eventTrackingReady = engine.capabilities?.some((capability) =>
+            (capability.id === "events.tcpLifecycle" || capability.id === "events.udpActivity") &&
+            capability.supported === true && capability.enabled === true &&
+            capability.available === true) === true;
+        } catch { /* Passive recipe management remains usable without event collection. */ }
+        let leases = [];
+        let restrictionInventoryKnown = false;
+        try {
+          const restrictions = await api.get("/api/restrictions", { signal: requests.signal });
+          if (restrictions.available !== false && Array.isArray(restrictions.items)) {
+            leases = restrictions.items;
+            restrictionInventoryKnown = true;
+          }
+        } catch { /* Keep passive recipe controls available without the optional helper. */ }
+        const leaseByOwner = new Map(leases.map((lease) => [lease.owner, lease]));
         clear(list);
+        const actionQueueLosses = Number(result.activeActionQueueLosses || 0);
+        const actionFailures = Number(result.activeActionFailures || 0);
+        if (actionQueueLosses > 0 || actionFailures > 0)
+          list.append(h("p", { class: "badge badge-warning", role: "status" },
+            `Active action coverage warning: ${actionQueueLosses} triggers could not be queued; ${actionFailures} actions failed. Last failure: ${result.activeActionLastFailure || "not available"}.`));
         if (!result.items.length) list.append(h("p", { class: "muted text-sm" },
           "No saved monitors. Add one below; new monitors start disabled."));
         for (const item of result.items) {
           const path = item.target?.imagePaths?.[0] || "";
-          list.append(h("div", { class: "engine-event-row" },
+          const activeLease = leaseByOwner.get(`recipe:${item.id}`);
+          const activeActionGrant = item.runtime?.activeActionGrant === true;
+          const restrictionState = recipeRestrictionState(item, activeLease,
+            restrictionInventoryKnown);
+          const needsRearm = restrictionState === "needs_rearm";
+          const restrictionStatusUnknown = restrictionState === "unknown";
+          list.append(h("div", { class: "engine-monitor-row" },
             h("span", { class: `badge ${item.enabled ? "badge-success" : "badge-muted"}` },
               item.enabled ? "ON" : "OFF"),
+            activeLease ? h("span", { class: "badge badge-destructive" }, "ARMED") : null,
+            activeActionGrant ? h("span", { class: "badge badge-warning" }, "AUTO-ACTION ARMED") : null,
+            needsRearm ? h("span", { class: "badge badge-warning" }, "NEEDS RE-ARM") : null,
+            restrictionStatusUnknown ? h("span", { class: "badge badge-warning" }, "STATUS UNKNOWN") : null,
             h("span", { class: "engine-event-target", title: path },
               h("strong", {}, item.name), h("small", {}, ` ${path}`)),
             h("span", { class: "muted" }, item.trigger?.type === "new_listener"
               ? "TCP listener" : "Remote TCP endpoint"),
+            h("span", { class: "engine-monitor-runtime" },
+              `${item.runtime?.state || (item.enabled ? "running" : "disabled")} · ${item.runtime?.condition || "clear"}`),
+            item.enabled && !eventTrackingReady ? h("small", { class: "muted" },
+              "Automatic actions need the collector running and event tracking enabled; no trigger is required before arming.") : null,
+            activeLease ? h("small", { class: "muted" },
+              `Verified lease expires ${new Date(Number(activeLease.deadlineUtcMs)).toLocaleString()} · ${activeLease.id}`) : null,
+            needsRearm ? h("small", { class: "muted" },
+              "The previous temporary block is no longer active. Nothing was restored after expiry or restart; review and arm again if wanted.") : null,
+            restrictionStatusUnknown ? h("small", { class: "muted" },
+              "A prior temporary block is recorded, but the collector status is unavailable; current restriction state could not be verified.") : null,
+            item.runtime?.lastTriggeredAtUtc
+              ? h("small", { class: "muted" },
+                `Last trigger ${new Date(item.runtime.lastTriggeredAtUtc).toLocaleString()} · ${item.runtime.lastReason || "matched"} · ${item.runtime.suppressed || "0"} suppressed`)
+              : h("small", { class: "muted" },
+                `No trigger this engine session · ${item.runtime?.suppressed || "0"} suppressed`),
             h("button", { class: "btn btn-sm btn-outline", type: "button",
               onclick: () => {
                 editingId = item.id;
@@ -328,7 +466,7 @@ export async function renderAutomations(page, store) {
                   clear(testResults);
                   testResults.append(h("strong", {}, `${item.name}: ${result.wouldNotify} simulated notification(s)`),
                     h("p", { class: "muted text-sm" },
-                      `${result.matched} matching observations among ${result.examined} recent retained events. No notifications or actions were created. Snapshots cannot prove attempted or outbound connections.`));
+                      `${result.matched} matching observations among ${result.examined} recent retained events. No notifications or actions were created. Snapshot sightings do not prove attempts; normalized ETW evidence reports established TCP or outbound UDP activity only while its collector is running.`));
                   for (const example of result.examples || []) {
                     testResults.append(h("p", { class: "muted text-sm" },
                       `${example.reason}: ${example.event?.eventId || "unknown event"}`));
@@ -338,6 +476,33 @@ export async function renderAutomations(page, store) {
                 }
               },
             }, "Test"),
+            item.trigger?.type === "outbound_activity"
+              ? h("button", { class: "btn btn-sm btn-destructive", type: "button",
+                disabled: !item.enabled || activeActionGrant || !!activeLease ||
+                  !restrictionInventoryKnown || !eventTrackingReady,
+                title: !eventTrackingReady ? "Start the collector and enable event tracking first." : "",
+                onclick: () => { void armReactiveBlock(item, path); },
+              }, activeActionGrant ? "Auto-action armed" : "Arm notify + block") : null,
+            item.trigger?.type === "outbound_activity"
+              ? h("button", { class: "btn btn-sm btn-destructive", type: "button",
+                disabled: !item.enabled || activeActionGrant || !!activeLease || !restrictionInventoryKnown,
+                onclick: () => { void armPreemptiveBlock(item, path); },
+              }, activeLease ? "Armed" : !restrictionInventoryKnown ? "Collector status unavailable" :
+                needsRearm ? "Re-arm preemptive block" :
+                item.enabled ? "Arm preemptive block" : "Enable to arm") : null,
+            h("button", { class: "btn btn-sm btn-outline", type: "button",
+              onclick: async () => {
+                try {
+                  await runQueued("/api/collector/control", {
+                    action: "release-owner", owner: `recipe:${item.id}`,
+                  });
+                  engineMessage.textContent = `${item.name} disarmed; its recipe-owned leases and pending approvals were released.`;
+                  await loadRecipes();
+                } catch (error) {
+                  engineMessage.textContent = error.message || "Could not disarm recipe.";
+                }
+              },
+            }, "Disarm"),
             h("button", { class: "btn btn-sm btn-outline", type: "button",
               onclick: () => { void saveItems(current.items.map((row) => row.id === item.id
                 ? { ...row, revision: String(BigInt(row.revision) + 1n), enabled: !row.enabled }
@@ -397,6 +562,18 @@ export async function renderAutomations(page, store) {
             h("time", { class: "muted", datetime: notice.occurredAtUtc || "" },
               notice.occurredAtUtc ? new Date(notice.occurredAtUtc).toLocaleString() : "Time unknown"),
             h("span", { class: "engine-event-target" }, notice.message || "Monitor fired"),
+            notice.triggerEventId ? h("button", { class: "btn btn-sm btn-outline", type: "button",
+              onclick: () => {
+                store.set({ automationEvidenceEventId: notice.triggerEventId });
+                void tabs.select("lifecycle");
+              },
+            }, "View triggering event") : null,
+            notice.restrictionLeaseId ? h("button", { class: "btn btn-sm btn-outline", type: "button",
+              onclick: () => {
+                store.set({ automationRestrictionLeaseId: notice.restrictionLeaseId });
+                void tabs.select("restrictions");
+              },
+            }, "View restriction") : null,
             ackState, ack));
         }
         next.textContent = "Next inbox page";
@@ -659,6 +836,7 @@ export async function renderAutomations(page, store) {
         if (!result.items?.length) leases.append(h("p", { class: "muted text-sm" },
           "No temporary restrictions are active."));
         for (const item of result.items || []) {
+          const linkedLease = item.id === store.get().automationRestrictionLeaseId;
           const deadline = Number(item.deadlineUtcMs);
           const timeLeft = h("span", { class: "muted" });
           timeLeft.textContent = Number.isFinite(deadline)
@@ -671,7 +849,8 @@ export async function renderAutomations(page, store) {
               : "Expiry unknown";
             setTimeout(updateTime, 1000);
           };
-          leases.append(h("div", { class: "engine-event-row" },
+          leases.append(h("div", { class: `engine-event-row${linkedLease ? " restriction-event-linked" : ""}` },
+            linkedLease ? h("span", { class: "badge badge-info" }, "Linked from notification") : null,
             h("span", { class: "engine-event-target", title: item.imagePath },
               h("strong", {}, item.imagePath),
               h("small", {}, ` ${item.protocol.toUpperCase()} ${item.remoteAddress || "all peers"}${item.remotePort ? `:${item.remotePort}` : ""}`)),
@@ -768,6 +947,9 @@ export async function renderAutomations(page, store) {
   async function renderLifecycle() {
     const status = h("p", { class: "muted text-sm", role: "status" });
     const history = h("div", { class: "engine-events" });
+    let linkedEventId = store.get().automationEvidenceEventId || "";
+    const linkedEventStatus = linkedEventId ? h("p", { class: "badge badge-info" },
+      `Finding notification evidence ${linkedEventId}`) : null;
     const buttons = [];
     let cursor = "";
     const seen = new Set();
@@ -816,40 +998,67 @@ export async function renderAutomations(page, store) {
       onclick: async () => {
         load.disabled = true;
         try {
-          const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-          const page = await api.get(`/api/engine/lifecycle?limit=30${query}`,
-            { signal: requests.signal });
-          if (disposed) return;
-          cursor = page.nextCursor || "";
+          const linkedSearch = !!linkedEventId;
           clear(history);
-          for (const item of page.items || []) {
-            if (seen.has(item.eventId)) continue;
-            if (seen.size >= 2048) seen.delete(seen.values().next().value);
-            seen.add(item.eventId);
-            history.append(h("article", { class: "lifecycle-event" },
-              h("header", {}, badge({ variant: "outline" }, item.kind || "Unknown event"),
-                item.derived?.flowGeneration ? badge({ variant: "secondary" }, `Flow ${item.derived.flowGeneration}`) : null,
-                item.derived?.lateArrival ? badge({ variant: "warning" }, "Late") : null,
-                item.derived?.incompleteChronology ? badge({ variant: "warning" }, "Incomplete chronology") : null,
-                h("strong", {}, item.process?.imagePath || (item.process ? `PID ${item.process.pid}` : "Collector coverage"))),
-              h("p", {}, item.sourceEndpoint && item.destinationEndpoint
-                ? `Source ${endpoint(item.sourceEndpoint)} → destination ${endpoint(item.destinationEndpoint)}`
-                : item.reason || "No network tuple in this event"),
-              item.derived?.local && item.derived?.remote
-                ? h("p", { class: "muted text-sm" },
-                  `Source-based roles: ${endpoint(item.derived.local)} ↔ ${endpoint(item.derived.remote)} (${item.derived.direction || "direction unknown"})`)
-                : null,
-              h("p", { class: "muted text-sm" }, item.receivedUtcMs
-                ? `Received ${new Date(Number(item.receivedUtcMs)).toLocaleString()}; ${item.process?.creationTimeFileTime
-                  ? `verified process instance (PID ${item.process.pid})`
-                  : `identity unverified: ${item.process?.identityReason || "unknown"}`}`
-                : item.occurredAtUtc || "Time unknown"),
-              h("details", {}, h("summary", {}, "Source evidence"),
-                h("pre", { class: "lifecycle-evidence" }, JSON.stringify(item, null, 2)))));
+          if (linkedEventId) seen.clear();
+          let foundLinked = false;
+          let pageNumber = 0;
+          do {
+            const priorCursor = cursor;
+            const limit = linkedEventId ? 500 : 30;
+            const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+            const page = await api.get(`/api/engine/lifecycle?limit=${limit}${query}`,
+              { signal: requests.signal });
+            if (disposed) return;
+            const rows = page.items || [];
+            cursor = page.nextCursor || "";
+            for (const item of rows) {
+              const linked = linkedEventId &&
+                (item.eventId === linkedEventId || item.derived?.eventId === linkedEventId);
+              if (linkedEventId && !linked) continue;
+              if (seen.has(item.eventId)) continue;
+              if (seen.size >= 2048) seen.delete(seen.values().next().value);
+              seen.add(item.eventId);
+              history.append(h("article", { class: `lifecycle-event${linked ? " lifecycle-event-linked" : ""}`,
+                ref: linked ? (element) => setTimeout(() =>
+                  element.scrollIntoView({ block: "center" }), 0) : undefined },
+                h("header", {}, badge({ variant: "outline" }, item.kind || "Unknown event"),
+                  linked ? badge({ variant: "info" }, "Linked notification evidence") : null,
+                  item.derived?.flowGeneration ? badge({ variant: "secondary" }, `Flow ${item.derived.flowGeneration}`) : null,
+                  item.derived?.lateArrival ? badge({ variant: "warning" }, "Late") : null,
+                  item.derived?.incompleteChronology ? badge({ variant: "warning" }, "Incomplete chronology") : null,
+                  h("strong", {}, processEvidenceLabel(item))),
+                h("p", {}, item.sourceEndpoint && item.destinationEndpoint
+                  ? `Source ${endpoint(item.sourceEndpoint)} → destination ${endpoint(item.destinationEndpoint)}`
+                  : item.reason || "No network tuple in this event"),
+                item.derived?.local && item.derived?.remote
+                  ? h("p", { class: "muted text-sm" },
+                    `Source-based roles: ${endpoint(item.derived.local)} ↔ ${endpoint(item.derived.remote)} (${item.derived.direction || "direction unknown"})`)
+                  : null,
+                h("p", { class: "muted text-sm" }, item.receivedUtcMs
+                  ? `Received ${new Date(Number(item.receivedUtcMs)).toLocaleString()}; ${item.process?.creationTimeFileTime
+                    ? `verified process instance (PID ${item.process.pid})`
+                    : `identity unverified: ${item.process?.identityReason || "unknown"}`}`
+                  : item.occurredAtUtc || "Time unknown"),
+                h("details", {}, h("summary", {}, "Source evidence"),
+                  h("pre", { class: "lifecycle-evidence" }, JSON.stringify(item, null, 2)))));
+              foundLinked = foundLinked || !!linked;
+            }
+            pageNumber++;
+            if (!linkedSearch || foundLinked || rows.length < limit ||
+                !cursor || cursor === priorCursor) break;
+          } while (pageNumber < 64);
+          if (linkedSearch) {
+            linkedEventStatus.textContent = foundLinked
+              ? `Found linked notification evidence: ${linkedEventId}`
+              : `Linked event ${linkedEventId} was not found in the retained lifecycle window.`;
+            if (foundLinked) linkedEventId = "";
+            load.textContent = foundLinked ? "Load more events" : "Retry linked event search";
           }
           if (!history.childNodes.length) history.append(h("p", { class: "muted text-sm" },
-            "No additional retained lifecycle evidence in this page."));
-          load.textContent = "Next events page";
+            linkedSearch ? "No matching event in this retained search window." :
+              "No additional retained lifecycle evidence in this page."));
+          if (!linkedSearch) load.textContent = "Next events page";
         } catch (error) {
           if (!disposed) {
             if (error.status === 410) { cursor = ""; seen.clear(); }
@@ -859,19 +1068,19 @@ export async function renderAutomations(page, store) {
           }
         } finally { if (!disposed) load.disabled = false; }
       },
-    }, "Load retained events");
+    }, linkedEventId ? "Find linked evidence" : "Load retained events");
     return h("div", { class: "tab-panel-body" },
       card({}, cardHeader({}, cardTitle({}, "Event-based connection evidence"),
         cardDescription({}, "Optional metadata collection can retain activity between endpoint snapshots.")),
         cardContent({}, h("p", { class: "muted text-sm" },
-          "This experimental view preserves decoded source events and their derived flow correlations. Verified identities and mapped times are included when available. Source-based endpoint roles and incomplete chronology are marked explicitly; these records cannot authorize automated restrictions."),
+          "This view preserves decoded source events and derived flow correlations. Verified identities and mapped times are included when available. Only complete, actionable outbound TCP/UDP events for an explicitly armed recipe can trigger its bounded temporary restriction; source-role guesses, incomplete chronology, and unknown identities cannot."),
           h("div", { class: "template-actions" },
             controlButton("Start engine", "engine-start"),
             controlButton("Start collector (UAC)", "start"),
             controlButton("Enable event tracking", "events-start"),
             controlButton("Stop event tracking", "events-stop")), status)),
       card({}, cardHeader({}, cardTitle({}, "Retained lifecycle history")),
-        cardContent({}, history), cardFooter({}, load)));
+        cardContent({}, linkedEventStatus, history), cardFooter({}, load)));
   }
 
   async function renderEngine() {
@@ -899,8 +1108,8 @@ export async function renderAutomations(page, store) {
             for (const item of items) {
               list.append(h("li", { class: "engine-event-row" },
                 h("span", { class: "badge badge-outline" }, item.kind || "unknown"),
-                h("span", { class: "engine-event-target", title: item.process?.imagePath || "" },
-                  item.process?.imagePath || `PID ${item.process?.pid ?? "unknown"}`),
+                h("span", { class: "engine-event-target", title: processEvidenceLabel(item) },
+                  processEvidenceLabel(item)),
                 h("span", { class: "muted" }, item.remote?.address
                   ? `${item.remote.address}:${item.remote.port}` : "No remote peer observed"),
                 h("time", { class: "muted", datetime: item.occurredAtUtc || "" },
@@ -1056,8 +1265,8 @@ export async function renderAutomations(page, store) {
               ? `${item.remote.address}:${item.remote.port}` : "No remote peer observed";
             list.append(h("li", { class: "engine-event-row" },
               h("span", { class: "badge badge-outline" }, item.kind || "unknown"),
-              h("span", { class: "engine-event-target", title: item.process?.imagePath || "" },
-                item.process?.imagePath || `PID ${item.process?.pid ?? "unknown"}`),
+              h("span", { class: "engine-event-target", title: processEvidenceLabel(item) },
+                processEvidenceLabel(item)),
               h("span", { class: "muted" }, peer),
               h("time", { class: "muted", datetime: item.occurredAtUtc || "" },
                 item.occurredAtUtc ? new Date(item.occurredAtUtc).toLocaleTimeString() : "Time unknown"),
