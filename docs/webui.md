@@ -451,6 +451,41 @@ pages under **Persisted observations**. Corrupt/incomplete records are reported
 as errors rather than silently included as valid events. An unfinished line
 at the active file tail is withheld and flagged as `partialTail: true` until
 its writer completes it.
+
+The experimental incident-window API is separate from durable history:
+`POST /api/engine/incidents` accepts `arm`, `trigger`, `disarm`, explicit
+`save`, or `discard` actions; `GET /api/engine/incidents` reports state, and adding
+`?offset=N&limit=N` reads a bounded page from the current incident. Arm begins
+a 120-second rolling pre-trigger window; a manual trigger captures 30 seconds
+afterward and related triggers extend that window up to 120 seconds. It records
+observed snapshot and normalized lifecycle events with their original evidence
+JSON and a separate engine capture timestamp. Capture remains in memory until
+the user explicitly saves a finalized incident. Save writes a generated,
+per-user directory under `%LOCALAPPDATA%\WinTCP\Engine\Incidents` containing
+`manifest.json`, `events.ndjson`, `checkpoints.ndjson`, and `index.json`; files
+are flushed in a temporary directory and exposed by same-volume rename, and
+the manifest includes SHA-256 hashes. The current archive is intentionally
+marked `replayReady: false`: periodic state checkpoints, state reconstruction,
+privacy-filtered export, and safe import validation are not implemented yet.
+Saved archives survive engine restart; the live capture and
+its in-session view do not. `disarm` stops early and marks the post-window
+incomplete; `discard` clears only the in-memory incident and does not erase a
+saved archive. The token-protected `GET /api/engine/incidents/archives?limit=N`
+lists finalized archives; `GET /api/engine/incidents/archives/{id}?offset=N&limit=N`
+validates file hashes and JSON structure before returning a bounded event page.
+Automations > Event history exposes a Saved incident library labeled
+**Recorded / Read-only**. It inspects recorded event rows only; it is not yet a
+state-reconstruction replay, and offers no live actions or external lookups.
+These controls never enable ETW or apply firewall actions by themselves. The
+endpoints require the session token; POST also uses the normal same-origin
+mutation checks.
+The focused disposable-loopback integration check is
+`node tools/webui-e2e/incident-recorder-check.mjs --url http://127.0.0.1:PORT/`.
+It requires an unarmed recorder with no retained incident, briefly arms and
+triggers the recorder, opens a local loopback TCP connection, verifies a
+snapshot observation is readable, explicitly saves and verifies archive file
+hashes, then removes only the generated test archive and discards its fixture.
+It does not enable ETW or require administrator privileges.
 Monitor state checkpoints retain remaining cooldowns and suppressed counts in
 the engine's local storage. Restart restores those deadlines without restoring
 privileged authorization. Offline time reduces a cooldown only when monotonic
