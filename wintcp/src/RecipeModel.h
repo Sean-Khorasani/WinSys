@@ -12,6 +12,17 @@
 namespace wintcp {
 
 enum class RecipeTrigger { OutboundActivity, NewListener };
+enum class RecipeScheduleType { Always, WeeklyWindow };
+
+struct RecipeSchedule {
+    RecipeScheduleType type = RecipeScheduleType::Always;
+    // Sunday is bit 0 through Saturday at bit 6. For a window crossing
+    // midnight, the selected day is the day on which the window starts.
+    std::uint8_t daysMask = 0;
+    std::uint16_t startMinute = 0;
+    std::uint16_t endMinute = 0;
+    std::string timeZoneId;
+};
 
 // F1's snapshot-capable Passive subset. Unsupported trigger/action/mode values
 // are rejected, not silently converted to this weaker source.
@@ -20,12 +31,16 @@ struct RecipeDef {
     std::string name;
     std::string imagePath;
     RecipeTrigger trigger = RecipeTrigger::OutboundActivity;
+    RecipeSchedule schedule;
     unsigned cooldownSeconds = 60;
     std::uint64_t revision = 1;
     bool enabled = false;
 };
 
 const char* RecipeTriggerName(RecipeTrigger trigger);
+bool RecipeScheduleMatchesLocalTime(const RecipeSchedule& schedule,
+                                    unsigned weekdaySundayZero,
+                                    unsigned minuteOfDay);
 bool ValidateRecipe(const RecipeDef& recipe, std::string* error);
 std::string FormatRecipes(const std::vector<RecipeDef>& recipes);
 std::string RecipesRevision(const std::vector<RecipeDef>& recipes);
