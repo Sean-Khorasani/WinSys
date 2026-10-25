@@ -10,6 +10,7 @@
 #include <tdh.h>
 #include <cstring>
 #include <climits>
+#include <string_view>
 #include <utility>
 
 namespace wintcp {
@@ -31,7 +32,9 @@ struct TdhApi {
 
 class TdhReader final : public EventPropertyReader {
 public:
-    TdhReader(EVENT_RECORD* record, TdhApi* api) : record_(record), api_(api) {}
+    TdhReader(EVENT_RECORD* record, TdhApi* api, TRACE_EVENT_INFO* schema,
+              std::size_t schemaBytes)
+        : record_(record), api_(api), schema_(schema), schemaBytes_(schemaBytes) {}
     bool Read(const wchar_t* name, std::vector<unsigned char>* bytes) override {
         PROPERTY_DATA_DESCRIPTOR descriptor = {};
         descriptor.PropertyName = reinterpret_cast<ULONGLONG>(name);
@@ -43,9 +46,48 @@ public:
         return api_->property(record_, 0, nullptr, 1, &descriptor, size,
                               bytes->data()) == ERROR_SUCCESS;
     }
+    bool ReadText(const wchar_t* name, std::vector<unsigned char>* bytes,
+                  bool* unicode) override {
+        if (name == nullptr || bytes == nullptr || unicode == nullptr || schema_ == nullptr)
+            return false;
+        const EVENT_PROPERTY_INFO* match = nullptr;
+        const ULONG count = schema_->PropertyCount;
+        for (ULONG i = 0; i < count; ++i) {
+            const auto& candidate = schema_->EventPropertyInfoArray[i];
+            if (candidate.Flags & PropertyStruct) continue;
+            const auto offset = static_cast<std::size_t>(candidate.NameOffset);
+            if (offset >= schemaBytes_ || (schemaBytes_ - offset) < sizeof(wchar_t)) continue;
+            const auto* propertyName = reinterpret_cast<const wchar_t*>(
+                reinterpret_cast<const unsigned char*>(schema_) + offset);
+            const auto chars = (schemaBytes_ - offset) / sizeof(wchar_t);
+            std::size_t length = 0;
+            while (length < chars && propertyName[length] != L'\0') ++length;
+            if (length < chars && std::wstring_view(propertyName, length) == name) {
+                match = &candidate;
+                break;
+            }
+        }
+        if (match == nullptr) return false;
+        const auto inputType = match->nonStructType.InType;
+        if (inputType != TDH_INTYPE_UNICODESTRING && inputType != TDH_INTYPE_ANSISTRING)
+            return false;
+        PROPERTY_DATA_DESCRIPTOR descriptor = {};
+        descriptor.PropertyName = reinterpret_cast<ULONGLONG>(name);
+        descriptor.ArrayIndex = ULONG_MAX;
+        ULONG size = 0;
+        if (api_->size(record_, 0, nullptr, 1, &descriptor, &size) != ERROR_SUCCESS ||
+            size < 2 || size > 4096) return false;
+        bytes->resize(size);
+        if (api_->property(record_, 0, nullptr, 1, &descriptor, size,
+                           bytes->data()) != ERROR_SUCCESS) return false;
+        *unicode = inputType == TDH_INTYPE_UNICODESTRING;
+        return true;
+    }
 private:
     EVENT_RECORD* record_;
     TdhApi* api_;
+    TRACE_EVENT_INFO* schema_;
+    std::size_t schemaBytes_;
 };
 
 bool Read32(EventPropertyReader& reader, const wchar_t* name, std::uint32_t* out) {
@@ -53,6 +95,46 @@ bool Read32(EventPropertyReader& reader, const wchar_t* name, std::uint32_t* out
     if (!reader.Read(name, &bytes) || bytes.size() != sizeof(*out)) return false;
     std::memcpy(out, bytes.data(), sizeof(*out));
     return true;
+}
+
+bool ReadImageName(EventPropertyReader& reader, std::string* out) {
+    std::vector<unsigned char> bytes;
+    bool unicode = false;
+    if (!reader.ReadText(L"ImageFileName", &bytes, &unicode)) return true;
+    std::wstring wide;
+    if (unicode) {
+        if ((bytes.size() % sizeof(wchar_t)) != 0) return false;
+        const auto* text = reinterpret_cast<const wchar_t*>(bytes.data());
+        const auto count = bytes.size() / sizeof(wchar_t);
+        std::size_t length = 0;
+        while (length < count && text[length] != L'\0') ++length;
+        if (length == 0 || length == count || length > 2048) return false;
+        wide.assign(text, length);
+    } else {
+        const auto* text = reinterpret_cast<const char*>(bytes.data());
+        const auto length = std::find(bytes.begin(), bytes.end(), 0) - bytes.begin();
+        if (length == 0 || static_cast<std::size_t>(length) == bytes.size() || length > 4096)
+            return false;
+        const int needed = ::MultiByteToWideChar(CP_ACP, 0, text,
+            static_cast<int>(length), nullptr, 0);
+        if (needed <= 0 || needed > 2048) return false;
+        wide.resize(static_cast<std::size_t>(needed));
+        if (::MultiByteToWideChar(CP_ACP, 0, text, static_cast<int>(length),
+                                  &wide[0], needed) != needed) return false;
+        std::vector<char> roundTrip(static_cast<std::size_t>(length) + 1);
+        const int restored = ::WideCharToMultiByte(CP_ACP, 0, wide.data(), needed,
+            roundTrip.data(), static_cast<int>(roundTrip.size()), nullptr, nullptr);
+        if (restored != length || std::memcmp(roundTrip.data(), text,
+                                               static_cast<std::size_t>(length)) != 0)
+            return false;
+    }
+    const auto length = wide.size();
+    const int needed = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.c_str(),
+        static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+    if (needed <= 0 || needed > 4096) return false;
+    out->resize(static_cast<std::size_t>(needed));
+    return ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.c_str(),
+        static_cast<int>(length), &(*out)[0], needed, nullptr, nullptr) == needed;
 }
 
 bool ReadEndpoint(EventPropertyReader& reader, const wchar_t* address,
@@ -124,6 +206,11 @@ EventDecodeResult DecodeLifecycleFields(const EVENT_HEADER& header,
             return EventDecodeResult::Malformed;
         }
         decoded.bytesKnown = Read32(properties, L"size", &decoded.bytes);
+    } else if (type == LifecycleType::ProcessStart) {
+        if (!ReadImageName(properties, &decoded.observedImageName)) {
+            *error = "process_image_path_invalid";
+            return EventDecodeResult::Malformed;
+        }
     }
     std::vector<unsigned char> key;
     if (properties.Read(process ? L"UniqueProcessKey" : L"connid", &key)) {
@@ -170,7 +257,7 @@ EventDecodeResult DecodeLifecycleRecord(const EVENT_RECORD* record,
         *error = "event_schema_unavailable";
         return EventDecodeResult::SchemaUnavailable;
     }
-    TdhReader reader(&view, &api);
+    TdhReader reader(&view, &api, reinterpret_cast<TRACE_EVENT_INFO*>(schema.data()), schema.size());
     return DecodeLifecycleFields(view.EventHeader, reader, result, error);
 }
 }  // namespace wintcp
