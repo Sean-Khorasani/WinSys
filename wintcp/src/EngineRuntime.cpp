@@ -31,6 +31,7 @@
 #include "NetworkEvents.h"
 #include "EngineConfig.h"
 #include "EngineClock.h"
+#include "CollectorLossModel.h"
 #include "EngineStore.h"
 #include "EngineOperations.h"
 #include "CollectorRuntime.h"
@@ -553,6 +554,15 @@ struct State {
     bool restrictionsAvailable = false;
     std::string collectorReason = "collector_not_connected";
     std::string collectorLastSampleUtc;
+    bool collectorLossKnown = false;
+    std::string collectorEventEpoch;
+    std::uint64_t collectorQueueLost = 0;
+    std::uint64_t collectorSchemaRejected = 0;
+    std::uint64_t collectorEventsLost = 0;
+    std::uint64_t collectorBuffersLost = 0;
+    std::uint64_t collectorHistoryEvicted = 0;
+    std::uint64_t collectorFlowEvicted = 0;
+    std::string collectorLossLastSampleUtc;
     std::uint64_t restrictionAuditLost = 0;
     std::string restrictionAuditError;
     std::string restrictionAuditCursor;
@@ -1396,6 +1406,9 @@ void OperationLoop(State* state, const std::wstring& sid,
             if (!auditRecorded && auditError.empty()) auditError = "audit_write_incomplete";
             if (error.empty() && (action == "events-start" || action == "events-stop")) {
                 std::lock_guard<std::mutex> lock(state->mutex);
+                // The operation result is authoritative; do not leave the UI
+                // showing the previous trace state until the next probe tick.
+                state->lifecycleEnabled = action == "events-start";
                 state->lifecycleNeedsDrain = true;
             }
             if (error.empty() && action == "events-stop") {
@@ -1744,6 +1757,39 @@ std::string LoadCollectorCursor(const std::wstring& directory, std::string* erro
     return cursor;
 }
 
+bool LoadCollectorLossCheckpoint(const std::wstring& directory,
+                                 CollectorLossTracker* tracker,
+                                 std::string* error) {
+    if (tracker == nullptr || error == nullptr) return false;
+    error->clear();
+    const std::wstring path = directory + L"\\collector-loss.txt";
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (::GetLastError() == ERROR_FILE_NOT_FOUND) return true;
+        *error = "collector_loss_checkpoint_unavailable";
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION info = {};
+    LARGE_INTEGER size = {};
+    bool valid = ::GetFileInformationByHandle(file, &info) &&
+        !(info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+        ::GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart <= 512;
+    std::string checkpoint;
+    if (valid) {
+        checkpoint.resize(static_cast<std::size_t>(size.QuadPart));
+        DWORD read = 0;
+        valid = ::ReadFile(file, &checkpoint[0], static_cast<DWORD>(checkpoint.size()),
+            &read, nullptr) && read == checkpoint.size();
+    }
+    ::CloseHandle(file);
+    if (!valid || !tracker->Restore(checkpoint, error)) {
+        if (error->empty()) *error = "collector_loss_checkpoint_invalid";
+        return false;
+    }
+    return true;
+}
+
 std::string QuotedStatusField(const std::string& json, const char* field) {
     const std::string marker = "\"" + std::string(field) + "\":\"";
     const auto first = json.find(marker);
@@ -1763,6 +1809,7 @@ void CollectorProbe(State* state, const std::wstring& directory,
     bool gapReported = false;
     bool gracefulAuditComplete = false;
     std::string observedEventEpoch, observedDecodedCount, observedPublishedCount;
+    std::string observedLossFingerprint;
     std::uint64_t gapSequence = 0;
     while (::WaitForSingleObject(state->stopEvent, 0) == WAIT_TIMEOUT) {
         std::string status;
@@ -1843,13 +1890,44 @@ void CollectorProbe(State* state, const std::wstring& directory,
                 const std::string eventEpoch = QuotedStatusField(status, "eventEpoch");
                 const std::string decodedCount = QuotedStatusField(status, "decoded");
                 const std::string publishedCount = QuotedStatusField(status, "published");
+                std::uint64_t queueLost = 0, schemaRejected = 0, eventsLost = 0;
+                std::uint64_t buffersLost = 0, historyEvicted = 0, flowEvicted = 0;
+                const bool lossCountersValid =
+                    ParseUnsignedField(QuotedStatusField(status, "queueLost"), &queueLost) &&
+                    ParseUnsignedField(QuotedStatusField(status, "schemaRejected"), &schemaRejected) &&
+                    ParseUnsignedField(QuotedStatusField(status, "eventsLost"), &eventsLost) &&
+                    ParseUnsignedField(QuotedStatusField(status, "buffersLost"), &buffersLost) &&
+                    ParseUnsignedField(QuotedStatusField(status, "historyEvicted"), &historyEvicted) &&
+                    ParseUnsignedField(QuotedStatusField(status, "flowEvicted"), &flowEvicted);
+                const std::string lossFingerprint = eventEpoch + ":" +
+                    std::to_string(queueLost) + ":" + std::to_string(schemaRejected) + ":" +
+                    std::to_string(eventsLost) + ":" + std::to_string(buffersLost) + ":" +
+                    std::to_string(historyEvicted) + ":" + std::to_string(flowEvicted);
                 if ((state->lifecycleEnabled || (!decodedCount.empty() && decodedCount != "0")) &&
                     (eventEpoch != observedEventEpoch || decodedCount != observedDecodedCount ||
                      publishedCount != observedPublishedCount))
                     state->lifecycleNeedsDrain = true;
+                if (lossCountersValid && !eventEpoch.empty() &&
+                    lossFingerprint != observedLossFingerprint &&
+                    (state->lifecycleEnabled || queueLost != 0 || schemaRejected != 0 ||
+                     eventsLost != 0 || buffersLost != 0 || historyEvicted != 0 ||
+                     flowEvicted != 0))
+                    state->lifecycleNeedsDrain = true;
                 observedEventEpoch = eventEpoch;
                 observedDecodedCount = decodedCount;
                 observedPublishedCount = publishedCount;
+                observedLossFingerprint = lossFingerprint;
+                state->collectorLossKnown = lossCountersValid && !eventEpoch.empty();
+                if (state->collectorLossKnown) {
+                    state->collectorEventEpoch = eventEpoch;
+                    state->collectorQueueLost = queueLost;
+                    state->collectorSchemaRejected = schemaRejected;
+                    state->collectorEventsLost = eventsLost;
+                    state->collectorBuffersLost = buffersLost;
+                    state->collectorHistoryEvicted = historyEvicted;
+                    state->collectorFlowEvicted = flowEvicted;
+                    state->collectorLossLastSampleUtc = clock.utc;
+                }
                 state->restrictionsAvailable = status.find(
                     "\"restrictionsAvailable\":true") != std::string::npos;
                 state->collectorReason.clear();
@@ -1879,6 +1957,11 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
                           SECURITY_ATTRIBUTES* security) {
     std::string checkpointError;
     std::string cursor = LoadCollectorCursor(directory, &checkpointError, true);
+    CollectorLossTracker lossTracker;
+    std::string lossCheckpointError;
+    (void)LoadCollectorLossCheckpoint(directory, &lossTracker,
+        &lossCheckpointError);
+    bool lossCheckpointReported = false;
     bool dirty = false, draining = false, disconnectedReported = false;
     bool clockGapReported = false;
     std::uint64_t gapSequence = 0;
@@ -1900,6 +1983,10 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
         std::vector<NetworkEvent> normalizedEvents;
         std::string error;
         std::string normalizationError;
+        CollectorLossSnapshot pendingLossSnapshot;
+        std::vector<CollectorLossDelta> pendingLossDeltas;
+        bool pendingLossSnapshotAvailable = false;
+        bool pendingLossSnapshotChanged = false;
         const auto gap = [&](const char* reason, std::uint64_t lost) {
             return "{\"schemaVersion\":1,\"eventId\":\"" + state->epoch +
                 ":lifecycle-gap-" + std::to_string(++gapSequence) +
@@ -1908,6 +1995,83 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
                 NetworkJsonQuote(SampleClock().utc) + ",\"lostRecords\":\"" +
                 std::to_string(lost) + "\"}";
         };
+        std::string collectorStatus;
+        if (CollectorStatus(&collectorStatus)) {
+            const std::string eventEpoch = QuotedStatusField(collectorStatus, "eventEpoch");
+            const char* counterFields[] = {"queueLost", "schemaRejected", "eventsLost",
+                "buffersLost", "historyEvicted", "flowEvicted"};
+            if (SafeId(eventEpoch, 32)) {
+                bool countersValid = true;
+                pendingLossSnapshot.eventEpoch = eventEpoch;
+                for (std::size_t i = 0; i < pendingLossSnapshot.totals.size(); ++i) {
+                    if (!ParseUnsignedField(QuotedStatusField(collectorStatus,
+                            counterFields[i]), &pendingLossSnapshot.totals[i])) {
+                        countersValid = false;
+                        break;
+                    }
+                }
+                if (countersValid) {
+                    pendingLossDeltas = lossTracker.Preview(pendingLossSnapshot);
+                    pendingLossSnapshotAvailable = true;
+                    pendingLossSnapshotChanged = !lossTracker.Initialized() ||
+                        lossTracker.Current().eventEpoch != pendingLossSnapshot.eventEpoch ||
+                        !pendingLossDeltas.empty();
+                    const ClockSample lossClock = SampleClock();
+                    const std::uint64_t lostMonoNs = lossClock.monotonicMs * 1000000ULL;
+                    for (const CollectorLossDelta& delta : pendingLossDeltas) {
+                        const char* counter = CollectorLossCounterName(delta.counter);
+                        const char* unit = CollectorLossCounterUnit(delta.counter);
+                        const std::string eventId = eventEpoch + ":loss:" + counter + ":" +
+                            std::to_string(delta.previous) + "-" + std::to_string(delta.total);
+                        const std::string reason = delta.reset
+                            ? "collector_loss_counter_reset"
+                            : CollectorLossCounterReason(delta.counter);
+                        const std::uint64_t lostRecords = !delta.reset &&
+                            std::strcmp(unit, "records") == 0 ? delta.amount : 0;
+                        lines.push_back("{\"schemaVersion\":1,\"eventId\":" +
+                            NetworkJsonQuote(eventId) + ",\"kind\":\"coverage_gap\",\"source\":\"etw_collector_status\",\"reason\":" +
+                            NetworkJsonQuote(reason) + ",\"counter\":" +
+                            NetworkJsonQuote(counter) + ",\"counterUnit\":" +
+                            NetworkJsonQuote(unit) + ",\"counterDelta\":\"" +
+                            std::to_string(delta.amount) + "\",\"counterTotal\":\"" +
+                            std::to_string(delta.total) + "\",\"counterReset\":" +
+                            (delta.reset ? "true" : "false") + ",\"occurredAtUtc\":" +
+                            NetworkJsonQuote(lossClock.utc) + ",\"lostRecords\":\"" +
+                            std::to_string(lostRecords) + "\"}");
+                        NetworkEvent event;
+                        event.eventId = eventId;
+                        event.sourceSequence = std::to_string(delta.total);
+                        event.source = "etw_collector_status";
+                        event.kind = NetworkEventKind::CoverageGap;
+                        event.occurredAtUtc = lossClock.utc;
+                        event.receivedAtUtc = lossClock.utc;
+                        event.monotonicNs = lostMonoNs;
+                        event.timebaseId = state->epoch + ":engine-monotonic";
+                        event.lossReason = reason;
+                        event.lostRecords = lostRecords;
+                        event.confidence = "observed";
+                        normalizedEvents.push_back(std::move(event));
+                    }
+                    if (!lossCheckpointError.empty() && !lossCheckpointReported) {
+                        const std::string eventId = eventEpoch + ":loss-checkpoint-unavailable";
+                        lines.push_back("{\"schemaVersion\":1,\"eventId\":" +
+                            NetworkJsonQuote(eventId) + ",\"kind\":\"coverage_gap\",\"source\":\"etw_collector_status\",\"reason\":\"loss_checkpoint_unavailable\",\"occurredAtUtc\":" +
+                            NetworkJsonQuote(lossClock.utc) + ",\"lostRecords\":\"0\"}");
+                        NetworkEvent event;
+                        event.eventId = eventId;
+                        event.source = "etw_collector_status";
+                        event.kind = NetworkEventKind::CoverageGap;
+                        event.occurredAtUtc = lossClock.utc;
+                        event.receivedAtUtc = lossClock.utc;
+                        event.monotonicNs = lostMonoNs;
+                        event.timebaseId = state->epoch + ":engine-monotonic";
+                        event.lossReason = "loss_checkpoint_unavailable";
+                        event.confidence = "observed";
+                        normalizedEvents.push_back(std::move(event));
+                    }
+                }
+            }
+        }
         std::string nextCursor = cursor;
         bool nextClockGapReported = clockGapReported;
         bool more = false;
@@ -2013,6 +2177,22 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
             }
             for (std::size_t i = 0; i < written && i < newLifecycleIds.size(); ++i)
                 RememberPersistedLifecycleId(state, newLifecycleIds[i]);
+        }
+        if (batchStored && storageError.empty() && pendingLossSnapshotAvailable &&
+            pendingLossSnapshotChanged) {
+            CollectorLossTracker nextLossTracker = lossTracker;
+            nextLossTracker.Commit(pendingLossSnapshot);
+            const std::string nextLossCheckpoint = nextLossTracker.Checkpoint();
+            if (nextLossCheckpoint.empty() || !SaveEngineText(directory,
+                    L"collector-loss", nextLossCheckpoint, security, &storageError)) {
+                if (storageError.empty()) storageError = "collector_loss_checkpoint_save_failed";
+                lossCheckpointError = storageError;
+                batchStored = false;
+            } else {
+                lossTracker.Commit(pendingLossSnapshot);
+                lossCheckpointError.clear();
+                lossCheckpointReported = true;
+            }
         }
         if (batchStored && storageError.empty()) {
             std::unique_lock<std::mutex> recipeCommitLock(state->recipeCommitMutex);
@@ -2249,6 +2429,19 @@ std::string StatusJson(State* state) {
            std::to_string(state->restrictionAuditLost) + "\",\"error\":" +
            (state->restrictionAuditError.empty() ? "null" :
                "\"" + state->restrictionAuditError + "\"") + "}" +
+           ",\"collectorEventLoss\":{\"available\":" +
+           (state->collectorConnected && state->collectorLossKnown ? "true" : "false") +
+           ",\"eventTracking\":" + std::string(state->lifecycleEnabled ? "true" : "false") +
+           ",\"eventEpoch\":" + (state->collectorEventEpoch.empty() ? "null" :
+               NetworkJsonQuote(state->collectorEventEpoch)) +
+           ",\"lastSampleUtc\":" + (state->collectorLossLastSampleUtc.empty() ? "null" :
+               NetworkJsonQuote(state->collectorLossLastSampleUtc)) +
+           ",\"queueLost\":\"" + std::to_string(state->collectorQueueLost) +
+           "\",\"schemaRejected\":\"" + std::to_string(state->collectorSchemaRejected) +
+           "\",\"eventsLost\":\"" + std::to_string(state->collectorEventsLost) +
+           "\",\"buffersLost\":\"" + std::to_string(state->collectorBuffersLost) +
+           "\",\"historyEvicted\":\"" + std::to_string(state->collectorHistoryEvicted) +
+           "\",\"flowEvicted\":\"" + std::to_string(state->collectorFlowEvicted) + "\"}" +
            ",\"capabilities\":[" + capabilities + "]}";
 }
 
