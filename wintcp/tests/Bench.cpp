@@ -2195,6 +2195,106 @@ void CheckEngineStore(TestResult& r) {
                              &error) && error == "store_current_oversized");
     (void)::DeleteFileW(current.c_str());
     (void)::DeleteFileW(previous.c_str());
+
+    const std::wstring soakCurrent = directory + L"\\soak-current.ndjson";
+    const std::wstring soakPrevious = directory + L"\\soak-previous.ndjson";
+    bool soakOpened = false;
+    bool soakWritten = false;
+    bool exactSuffix = false;
+    std::uint64_t soakRollovers = 0;
+    std::size_t soakRetainedCount = 0;
+    std::string soakFailure;
+    {
+        EngineStore soak;
+        soakOpened = validSecurity && soak.Open(directory, L"soak",
+            256 * 1024, security, &error);
+        std::vector<std::string> allRecords;
+        std::vector<std::string> batch;
+        batch.reserve(64);
+        if (soakOpened) {
+            for (unsigned sequence = 1; sequence <= 4096; ++sequence) {
+                const std::string record =
+                    "{\"schemaVersion\":1,\"n\":" +
+                    std::to_string(sequence) + ",\"pad\":\"" +
+                    std::string(1900, 'p') + "\"}";
+                allRecords.push_back(record);
+                batch.push_back(record);
+                if (batch.size() == 64) {
+                    std::size_t batchWritten = 0;
+                    if (!soak.Append(batch, &batchWritten, &error) ||
+                        batchWritten != batch.size()) {
+                        soakFailure = "append:" + error;
+                        soakOpened = false;
+                        break;
+                    }
+                    batch.clear();
+                }
+            }
+            soakWritten = soakOpened && batch.empty() &&
+                allRecords.size() == 4096;
+            soakRollovers = soak.Rollovers();
+            std::vector<std::string> retained;
+            std::string cursor;
+            bool pagesValid = soakWritten;
+            for (unsigned pageNumber = 0; pagesValid && pageNumber < 32;
+                 ++pageNumber) {
+                const EngineStorePage page = soak.Read(cursor, 500, 220000);
+                if (!page.error.empty() || page.partialTail ||
+                    page.cursorExpired ||
+                    (!page.items.empty() && page.nextCursor == cursor)) {
+                    soakFailure = "page:" + page.error;
+                    pagesValid = false;
+                    break;
+                }
+                if (page.items.empty()) {
+                    soakFailure = "drained";
+                    break;
+                }
+                retained.insert(retained.end(), page.items.begin(),
+                                page.items.end());
+                cursor = page.nextCursor;
+            }
+            soakRetainedCount = retained.size();
+            if (soakFailure.empty()) soakFailure = "page_limit_or_bad_bounds";
+            exactSuffix = pagesValid && soakRollovers >= 25 &&
+                retained.size() > 150 && retained.size() <= 2 * 256 * 1024 / 1900 &&
+                retained.size() <= allRecords.size();
+            if (!exactSuffix && soakFailure == "drained")
+                soakFailure = "bounds_or_rotation_count";
+            if (exactSuffix) {
+                const std::size_t first = allRecords.size() - retained.size();
+                for (std::size_t i = 0; i < retained.size(); ++i) {
+                    if (retained[i] != allRecords[first + i]) {
+                        soakFailure = "record_mismatch_at:" + std::to_string(i);
+                        exactSuffix = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    WIN32_FILE_ATTRIBUTE_DATA soakCurrentData = {};
+    WIN32_FILE_ATTRIBUTE_DATA soakPreviousData = {};
+    const bool soakBounded = ::GetFileAttributesExW(soakCurrent.c_str(),
+        GetFileExInfoStandard, &soakCurrentData) &&
+        ::GetFileAttributesExW(soakPrevious.c_str(), GetFileExInfoStandard,
+                               &soakPreviousData) &&
+        soakCurrentData.nFileSizeHigh == 0 &&
+        soakCurrentData.nFileSizeLow <= 256 * 1024 &&
+        soakPreviousData.nFileSizeHigh == 0 &&
+        soakPreviousData.nFileSizeLow <= 256 * 1024;
+    const std::string soakDetail = exactSuffix
+        ? "retained=" + std::to_string(soakRetainedCount) +
+            ", rotations=" + std::to_string(soakRollovers)
+        : "retained=" + std::to_string(soakRetainedCount) +
+            ", rotations=" + std::to_string(soakRollovers) +
+            ", detail=" + soakFailure;
+    Check(r, "engine-store.repeated-rotation-retains-exact-suffix",
+          soakOpened && soakWritten && exactSuffix, soakDetail);
+    Check(r, "engine-store.repeated-rotation-keeps-two-segment-bound",
+          soakBounded && soakRollovers >= 25);
+    (void)::DeleteFileW(soakCurrent.c_str());
+    (void)::DeleteFileW(soakPrevious.c_str());
     (void)::RemoveDirectoryW(directory.c_str());
 }
 
