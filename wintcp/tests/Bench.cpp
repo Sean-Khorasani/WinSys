@@ -2493,6 +2493,57 @@ void CheckBoundedEventQueue(TestResult& r) {
     queue.Reset();
     Check(r, "event-queue.reset-starts-new-trace-epoch",
           queue.Lost() == 0 && queue.Size() == 0 && queue.TryPush(5, 10));
+
+    struct SweepFilters final : RestrictionFilterBackend {
+        bool installed = false;
+        bool Install(const RestrictionPlan&,
+                     std::vector<std::uint64_t>* ids,
+                     std::string* error) override {
+            installed = true;
+            ids->assign(1, 1);
+            error->clear();
+            return true;
+        }
+        bool Remove(const std::vector<std::uint64_t>&,
+                    std::string* error) override {
+            installed = false;
+            error->clear();
+            return true;
+        }
+        void Close() override { installed = false; }
+    } filters;
+    RestrictionLeaseController leases(&filters);
+    RestrictionPlan plan;
+    plan.imagePath = "C:\\Apps\\Example.exe";
+    plan.userSid = "S-1-5-21-1-2-3-1001";
+    plan.durationSeconds = 60;
+    std::string error;
+    leases.Heartbeat({1000, 100000});
+    const bool reviewed = leases.Preview(plan, "overload-review", "manual",
+                                         {1000, 100000}, &error);
+    const bool leaseApplied = reviewed && leases.ApplyApproved(
+        "overload-review", "overload-lease", {1001, 100001}, &error);
+    BoundedEventQueue<unsigned> overloaded(2, 8);
+    const bool queueFilled = overloaded.TryPush(1, 4) &&
+                             overloaded.TryPush(2, 4);
+    for (unsigned i = 0; i < 10000; ++i)
+        (void)overloaded.TryPush(i, 1);
+    leases.Heartbeat({61000, 160000});
+    leases.Sweep({61001, 160001});
+    const std::string overloadDetail =
+        "reviewed=" + std::to_string(reviewed) +
+        ", applied=" + std::to_string(leaseApplied) +
+        ", queue=" + std::to_string(queueFilled) +
+        ", lost=" + std::to_string(overloaded.Lost()) +
+        ", filter=" + std::to_string(filters.installed) +
+        ", active=" + std::to_string(leases.Active().size()) +
+        ", outcome=" + (leases.Changes().empty()
+            ? "none" : leases.Changes().back().state);
+    Check(r, "event-queue.simulated-overload-preserves-expiry",
+          leaseApplied && queueFilled && overloaded.Size() == 2 &&
+          overloaded.Lost() == 10000 && !filters.installed &&
+          leases.Active().empty() && !leases.Changes().empty() &&
+          leases.Changes().back().state == "expired", overloadDetail);
 }
 
 void CheckEngineClock(TestResult& r) {
