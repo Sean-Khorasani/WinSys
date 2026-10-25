@@ -12,6 +12,7 @@ namespace wintcp {
 namespace {
 constexpr std::size_t kMaxRecipes = 100;
 constexpr std::size_t kMaxConfigBytes = 256 * 1024;
+constexpr std::uint64_t kCrossSourceWindowNs = 120000000000ULL;
 
 std::string Hex(const std::string& text) {
     static const char kDigits[] = "0123456789abcdef";
@@ -101,6 +102,28 @@ const char* RecipeTriggerName(RecipeTrigger trigger) {
     case RecipeTrigger::NewListener: return "new_listener";
     }
     return "unsupported";
+}
+
+bool RecipeActionEventEligible(const RecipeDef& recipe,
+                               const NetworkEvent& event,
+                               bool sameUser) {
+    if (!sameUser || !recipe.enabled ||
+        recipe.trigger != RecipeTrigger::OutboundActivity ||
+        event.eventId.empty() || event.incompleteChronology || event.lateArrival ||
+        event.direction != "outbound" || !event.remote.known ||
+        event.endpointRoleConfidence != "source_semantics" ||
+        event.remote.address.empty() || event.remote.port == 0 ||
+        Loopback(event.remote.address) || !ProcessActionable(event.process) ||
+        !SamePath(recipe.imagePath, event.process.imagePath)) return false;
+    return (event.kind == NetworkEventKind::ConnectionEstablished &&
+            event.transport == "tcp") ||
+        (event.kind == NetworkEventKind::UdpActivity && event.transport == "udp");
+}
+
+bool RecipeActionCandidateEligible(const RecipeHit& hit,
+                                  const RecipeDef& recipe,
+                                  const NetworkEvent& event) {
+    return hit.matched && RecipeActionEventEligible(recipe, event, true);
 }
 
 bool ValidateRecipe(const RecipeDef& recipe, std::string* error) {
@@ -314,10 +337,27 @@ bool ValidateRecipeUpdate(const std::vector<RecipeDef>& current,
     return true;
 }
 
+std::vector<std::string> RecipeOwnersToInvalidate(
+    const std::vector<RecipeDef>& current,
+    const std::vector<RecipeDef>& next) {
+    std::vector<std::string> owners;
+    for (const RecipeDef& before : current) {
+        if (!before.enabled) continue;
+        const auto after = std::find_if(next.begin(), next.end(),
+            [&before](const RecipeDef& recipe) { return recipe.id == before.id; });
+        if (after == next.end() || !after->enabled ||
+            after->revision != before.revision)
+            owners.push_back("recipe:" + before.id);
+    }
+    return owners;
+}
+
 std::string RecipeNotificationJson(const RecipeDef& recipe,
                                    const NetworkEvent& event,
                                    const RecipeHit& hit,
-                                   const std::string& notificationId) {
+                                   const std::string& notificationId,
+                                   std::uint64_t savedMonotonicNs,
+                                   std::uint64_t savedUtcMs) {
     const bool listener = recipe.trigger == RecipeTrigger::NewListener;
     const NetworkEndpoint& endpoint = listener ? event.local : event.remote;
     const std::string target = endpoint.address + ':' +
@@ -325,8 +365,12 @@ std::string RecipeNotificationJson(const RecipeDef& recipe,
     const std::string message = listener
         ? "New TCP listener for " + recipe.name + " at " + target +
           ". Binding observed; external reachability is not established."
-        : "New TCP remote endpoint for " + recipe.name + " at " + target +
-          ". Snapshot sighting; direction and connection attempt are not established.";
+        : event.kind == NetworkEventKind::ConnectionEstablished
+            ? "Outbound TCP connection established by " + recipe.name + " to " + target + "."
+            : event.kind == NetworkEventKind::UdpActivity
+                ? "Outbound UDP activity observed for " + recipe.name + " to " + target + "."
+                : "New TCP remote endpoint for " + recipe.name + " at " + target +
+                  ". Snapshot sighting; direction and connection attempt are not established.";
     return "{\"schemaVersion\":1,\"id\":" + Quote(notificationId) +
         ",\"recipeId\":" + Quote(recipe.id) +
         ",\"recipeRevision\":\"" + std::to_string(recipe.revision) +
@@ -336,24 +380,44 @@ std::string RecipeNotificationJson(const RecipeDef& recipe,
         "\",\"reason\":" + Quote(hit.reason) +
         ",\"coverage\":" + Quote(hit.coverage) +
         ",\"message\":" + Quote(message) +
-        ",\"acknowledged\":false,\"deliveryStatus\":\"pending\"," +
-        "\"suppressed\":\"" + std::to_string(hit.suppressed) + "\"}";
+        ",\"acknowledged\":false,\"deliveryStatus\":\"inbox\"," +
+        "\"suppressed\":\"" + std::to_string(hit.suppressed) +
+        "\",\"recoveryCooldownKey\":" + Quote(hit.cooldownKey) +
+        ",\"recoveryCooldownRemainingNs\":\"" + std::to_string(
+            hit.cooldownUntilMonotonicNs > savedMonotonicNs
+                ? hit.cooldownUntilMonotonicNs - savedMonotonicNs : 0) +
+        "\",\"recoverySavedMonotonicNs\":\"" +
+        std::to_string(savedMonotonicNs) +
+        "\",\"recoverySavedUtcMs\":\"" + std::to_string(savedUtcMs) + "\"}";
 }
 
 RecipeHit RecipeEvaluator::Evaluate(const RecipeDef& recipe,
                                      const NetworkEvent& event) {
     RecipeHit hit;
-    if (!recipe.enabled || event.kind != NetworkEventKind::EndpointObserved ||
-        event.firstObservedMidSession || event.process.imagePath.empty() ||
-        !SamePath(recipe.imagePath, event.process.imagePath) ||
-        event.transport != "tcp") return hit;
+    const bool snapshot = event.kind == NetworkEventKind::EndpointObserved;
+    if (!recipe.enabled || event.process.imagePath.empty() ||
+        !SamePath(recipe.imagePath, event.process.imagePath)) return hit;
     if (recipe.trigger == RecipeTrigger::OutboundActivity) {
-        if (event.tcpState != "established" || !event.remote.known ||
-            Loopback(event.remote.address)) return hit;
-        hit.reason = "new_remote_tcp_endpoint";
-        hit.coverage = "snapshot_tcp_appearance_direction_unknown";
+        if (snapshot) {
+            if (event.firstObservedMidSession || event.transport != "tcp" ||
+                event.tcpState != "established" || !event.remote.known ||
+                Loopback(event.remote.address)) return hit;
+            hit.reason = "new_remote_tcp_endpoint";
+            hit.coverage = "snapshot_tcp_appearance_direction_unknown";
+        } else if (event.kind == NetworkEventKind::ConnectionEstablished &&
+                   event.transport == "tcp" && event.direction == "outbound" &&
+                   event.remote.known && !Loopback(event.remote.address)) {
+            hit.reason = "outbound_tcp_connection_established";
+            hit.coverage = "etw_tcp_lifecycle_normalized";
+        } else if (event.kind == NetworkEventKind::UdpActivity &&
+                   event.transport == "udp" && event.direction == "outbound" &&
+                   event.remote.known && !Loopback(event.remote.address)) {
+            hit.reason = "outbound_udp_activity";
+            hit.coverage = "etw_udp_send_normalized";
+        } else return hit;
     } else if (recipe.trigger == RecipeTrigger::NewListener) {
-        if (event.tcpState != "listen" || !event.local.known ||
+        if (!snapshot || event.firstObservedMidSession || event.transport != "tcp" ||
+            event.tcpState != "listen" || !event.local.known ||
             Loopback(event.local.address)) return hit;
         hit.reason = "new_tcp_listener";
         hit.coverage = "snapshot_listener_binding";
@@ -365,6 +429,63 @@ RecipeHit RecipeEvaluator::Evaluate(const RecipeDef& recipe,
             ? std::to_string(event.process.creationTimeFileTime) : "unverified");
     if (recipe.trigger == RecipeTrigger::NewListener)
         key += ':' + event.local.address + ':' + std::to_string(event.local.port);
+    hit.cooldownKey = key;
+    // A snapshot and the normalized ETW establish event can describe the same
+    // outbound TCP flow. Correlate only complete tuples and verified process
+    // identity; journal evidence remains untouched, and Active eligibility is
+    // evaluated independently by the caller.
+    const bool snapshotFlow = snapshot && event.transport == "tcp" &&
+        event.local.known && event.remote.known && event.local.port != 0 &&
+        event.remote.port != 0;
+    const bool etwFlow = event.kind == NetworkEventKind::ConnectionEstablished &&
+        event.source == "etw_tcp" && event.transport == "tcp" &&
+        event.direction == "outbound" && event.local.known && event.remote.known &&
+        event.local.port != 0 && event.remote.port != 0;
+    if (recipe.trigger == RecipeTrigger::OutboundActivity &&
+        (snapshotFlow || etwFlow) && event.process.creationTimeKnown) {
+        const auto endpointPart = [](const NetworkEndpoint& endpoint) {
+            std::string address = endpoint.address;
+            for (char& c : address) c = LowerAscii(c);
+            return std::to_string(address.size()) + ':' + address + ':' +
+                std::to_string(endpoint.port) + ':' +
+                std::to_string(endpoint.scopeId);
+        };
+        const std::string flowKey = recipe.id + ':' +
+            std::to_string(recipe.revision) + ':' +
+            std::to_string(event.process.pid) + ':' +
+            std::to_string(event.process.creationTimeFileTime) + ':' +
+            endpointPart(event.local) + ':' + endpointPart(event.remote);
+        if (crossSourceObservations_.find(flowKey) == crossSourceObservations_.end() &&
+            crossSourceObservations_.size() >= 10000) {
+            auto oldest = crossSourceObservations_.begin();
+            for (auto it = crossSourceObservations_.begin();
+                 it != crossSourceObservations_.end(); ++it) {
+                const auto age = (std::max)(it->second.snapshotNs, it->second.etwNs);
+                const auto oldestAge = (std::max)(oldest->second.snapshotNs,
+                                                   oldest->second.etwNs);
+                if (age < oldestAge) oldest = it;
+            }
+            crossSourceObservations_.erase(oldest);
+        }
+        auto& observed = crossSourceObservations_[flowKey];
+        std::uint64_t& sameSourceNs = snapshotFlow
+            ? observed.snapshotNs : observed.etwNs;
+        const std::uint64_t otherSourceNs = snapshotFlow
+            ? observed.etwNs : observed.snapshotNs;
+        const bool crossSourceDuplicate = otherSourceNs != 0 &&
+            (event.monotonicNs >= otherSourceNs
+                ? event.monotonicNs - otherSourceNs
+                : otherSourceNs - event.monotonicNs) <= kCrossSourceWindowNs;
+        sameSourceNs = event.monotonicNs;
+        if (crossSourceDuplicate) {
+            if (suppressed_[key] != (std::numeric_limits<std::uint64_t>::max)())
+                ++suppressed_[key];
+            hit.suppressed = suppressed_[key];
+            auto& status = runtime_[recipe.id];
+            status.revision = recipe.revision;
+            return hit;
+        }
+    }
     auto last = nextFireNs_.find(key);
     const std::uint64_t cooldownNs =
         static_cast<std::uint64_t>(recipe.cooldownSeconds) * 1000000000ULL;
@@ -372,6 +493,8 @@ RecipeHit RecipeEvaluator::Evaluate(const RecipeDef& recipe,
         if (suppressed_[key] != (std::numeric_limits<std::uint64_t>::max)())
             ++suppressed_[key];
         hit.suppressed = suppressed_[key];
+        auto& status = runtime_[recipe.id];
+        status.revision = recipe.revision;
         return hit;
     }
     if (last == nextFireNs_.end() && nextFireNs_.size() >= 10000) {
@@ -385,10 +508,39 @@ RecipeHit RecipeEvaluator::Evaluate(const RecipeDef& recipe,
     nextFireNs_[key] = event.monotonicNs >
         (std::numeric_limits<std::uint64_t>::max)() - cooldownNs
         ? (std::numeric_limits<std::uint64_t>::max)() : event.monotonicNs + cooldownNs;
+    hit.cooldownUntilMonotonicNs = nextFireNs_[key];
     hit.fire = true;
     hit.suppressed = suppressed_[key];
     suppressed_[key] = 0;
+    auto& status = runtime_[recipe.id];
+    status.revision = recipe.revision;
+    status.lastTriggeredMonotonicNs = event.monotonicNs;
+    status.lastEventId = event.eventId;
+    status.lastOccurredAtUtc = event.occurredAtUtc;
+    status.lastReason = hit.reason;
     return hit;
+}
+
+RecipeRuntimeStatus RecipeEvaluator::Status(const std::string& recipeId,
+                                           std::uint64_t revision) const {
+    const auto found = runtime_.find(recipeId);
+    RecipeRuntimeStatus status = found == runtime_.end() ||
+        found->second.revision != revision ? RecipeRuntimeStatus{} : found->second;
+    status.revision = revision;
+    const std::string prefix = recipeId + ':' + std::to_string(revision) + ':';
+    for (const auto& entry : nextFireNs_) {
+        if (entry.first.rfind(prefix, 0) != 0) continue;
+        status.cooldownUntilMonotonicNs = (std::max)(status.cooldownUntilMonotonicNs,
+                                                      entry.second);
+        const auto count = suppressed_.find(entry.first);
+        if (count != suppressed_.end()) {
+            status.suppressed = count->second >
+                (std::numeric_limits<std::uint64_t>::max)() - status.suppressed
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : status.suppressed + count->second;
+        }
+    }
+    return status;
 }
 
 std::string RecipeEvaluator::Checkpoint(std::uint64_t nowNs, std::uint64_t utcMs) const {
@@ -449,10 +601,55 @@ bool RecipeEvaluator::Restore(const std::string& text, std::uint64_t nowNs,
     return true;
 }
 
+bool RecipeEvaluator::RecoverFiredCooldown(const std::string& key,
+                                           std::uint64_t remainingNs,
+                                           std::uint64_t savedMonotonicNs,
+                                           std::uint64_t savedUtcMs,
+                                           std::uint64_t nowNs,
+                                           std::uint64_t nowUtcMs) {
+    if (key.empty() || key.size() > 1024 || !Printable(key) ||
+        remainingNs > 86400000000000ULL || savedUtcMs == 0) return false;
+    if (remainingNs == 0) return true;
+    std::uint64_t elapsedNs = 0;
+    if (nowNs >= savedMonotonicNs && nowUtcMs >= savedUtcMs) {
+        const std::uint64_t monotonicDeltaNs = nowNs - savedMonotonicNs;
+        const std::uint64_t monotonicDeltaMs = monotonicDeltaNs / 1000000ULL;
+        const std::uint64_t wallDeltaMs = nowUtcMs - savedUtcMs;
+        const std::uint64_t difference = monotonicDeltaMs > wallDeltaMs
+            ? monotonicDeltaMs - wallDeltaMs : wallDeltaMs - monotonicDeltaMs;
+        // As with the main checkpoint, only charge offline time when the two
+        // clocks corroborate one another. Clock rollback/reboot fails closed
+        // by retaining the saved remaining cooldown.
+        if (difference <= 2000) elapsedNs = monotonicDeltaNs;
+    }
+    if (remainingNs <= elapsedNs) return true;
+    remainingNs -= elapsedNs;
+    if (nowNs > (std::numeric_limits<std::uint64_t>::max)() - remainingNs)
+        return false;
+    const std::uint64_t recoveredDeadline = nowNs + remainingNs;
+    const auto existing = nextFireNs_.find(key);
+    if (existing == nextFireNs_.end() || recoveredDeadline > existing->second) {
+        if (existing == nextFireNs_.end() && nextFireNs_.size() >= 10000) {
+            const auto oldest = std::min_element(nextFireNs_.begin(), nextFireNs_.end(),
+                [](const auto& a, const auto& b) { return a.second < b.second; });
+            if (oldest != nextFireNs_.end()) {
+                suppressed_.erase(oldest->first);
+                nextFireNs_.erase(oldest);
+            }
+        }
+        nextFireNs_[key] = recoveredDeadline;
+        suppressed_[key] = 0;
+    }
+    return true;
+}
+
 void RecipeEvaluator::Reconcile(const std::vector<RecipeDef>& recipes) {
     std::set<std::string> activePrefixes;
-    for (const auto& recipe : recipes)
+    std::map<std::string, std::uint64_t> revisions;
+    for (const auto& recipe : recipes) {
         activePrefixes.insert(recipe.id + ':' + std::to_string(recipe.revision) + ':');
+        revisions[recipe.id] = recipe.revision;
+    }
     for (auto it = nextFireNs_.begin(); it != nextFireNs_.end();) {
         const auto first = it->first.find(':');
         const auto second = first == std::string::npos ? first : it->first.find(':', first + 1);
@@ -461,6 +658,22 @@ void RecipeEvaluator::Reconcile(const std::vector<RecipeDef>& recipes) {
             suppressed_.erase(it->first);
             it = nextFireNs_.erase(it);
         } else ++it;
+    }
+    for (auto it = runtime_.begin(); it != runtime_.end();) {
+        const auto found = revisions.find(it->first);
+        if (found == revisions.end() || found->second != it->second.revision)
+            it = runtime_.erase(it);
+        else ++it;
+    }
+    for (auto it = crossSourceObservations_.begin();
+         it != crossSourceObservations_.end();) {
+        const auto first = it->first.find(':');
+        const auto second = first == std::string::npos ? first :
+            it->first.find(':', first + 1);
+        if (second == std::string::npos || activePrefixes.find(
+            it->first.substr(0, second + 1)) == activePrefixes.end())
+            it = crossSourceObservations_.erase(it);
+        else ++it;
     }
 }
 
@@ -472,6 +685,13 @@ void RecipeEvaluator::Clear(const std::string& recipeId) {
     }
     for (auto it = suppressed_.begin(); it != suppressed_.end();) {
         if (it->first.rfind(prefix, 0) == 0) it = suppressed_.erase(it);
+        else ++it;
+    }
+    runtime_.erase(recipeId);
+    for (auto it = crossSourceObservations_.begin();
+         it != crossSourceObservations_.end();) {
+        if (it->first.rfind(recipeId + ':', 0) == 0)
+            it = crossSourceObservations_.erase(it);
         else ++it;
     }
 }
