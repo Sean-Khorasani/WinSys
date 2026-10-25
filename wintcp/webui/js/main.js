@@ -20,6 +20,7 @@ import { createCommandPalette } from "./ui/commandpalette.js";
 import { installCspReporter } from "./csp.js";
 import { repaintCharts } from "./charts/timeseries.js";
 import { createSnapshotRefresh } from "./refresh.js";
+import { createRecipeNotificationDelivery } from "./recipe-notification-delivery.js";
 import { normalizeConnectionFilters } from "./connectionfilters.js";
 import { notify } from "./ui/feedback.js";
 
@@ -490,11 +491,34 @@ function init() {
   // Start poller. One poll fans out to every read-only endpoint the pages draw
   // from, so a page switch never has to wait on the network to paint.
   let observedConnections = null;
+  const recipeNotificationDelivery = createRecipeNotificationDelivery({
+    api,
+    enabled: () => store.get().desktopNotifications === true,
+    permitted: () => "Notification" in window && Notification.permission === "granted",
+    notify: (notice) => {
+      const notification = new Notification(notice.recipeName || "WinTCP monitor", {
+        body: String(notice.message || "A monitoring recipe fired.").slice(0, 400),
+        tag: `wintcp-recipe-${notice.id}`,
+      });
+      notification.onclick = () => {
+        window.focus();
+        navigate("/automations");
+        notification.close();
+      };
+      setTimeout(() => notification.close(), 12000);
+    },
+  });
+  let lastRecipeNotificationPoll = 0;
   const refreshController = createSnapshotRefresh({
     api,
     store,
     onUpdate: () => {
       const current = store.get();
+      const now = Date.now();
+      if (now - lastRecipeNotificationPoll >= 15000) {
+        lastRecipeNotificationPoll = now;
+        void recipeNotificationDelivery.poll();
+      }
       const liveConnections = (current.connections || []).filter((row) => !row.removed && row.rport > 0 && row.state !== "LISTENING");
       const identities = new Set(liveConnections.map((row) => row.id));
       const added = observedConnections ? liveConnections.filter((row) => !observedConnections.has(row.id)) : [];
