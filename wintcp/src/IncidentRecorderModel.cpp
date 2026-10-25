@@ -157,6 +157,7 @@ bool IncidentRecorderModel::Trigger(IncidentTrigger trigger, bool related) {
     active_.startMonotonicNs = trigger.monotonicNs > preTriggerNs_
         ? trigger.monotonicNs - preTriggerNs_ : 0;
     active_.firstTriggerMonotonicNs = trigger.monotonicNs;
+    active_.prehistoryWindowNs = preTriggerNs_;
     active_.postDeadlineMonotonicNs = AddSaturated(trigger.monotonicNs,
                                                    postTriggerNs_);
     active_.endMonotonicNs = trigger.monotonicNs;
@@ -168,13 +169,21 @@ bool IncidentRecorderModel::Trigger(IncidentTrigger trigger, bool related) {
     active_.recordsTruncated = hasLostRecords_ &&
         lostThroughNs_ >= active_.startMonotonicNs;
     active_.triggers.push_back(std::move(trigger));
+    std::uint64_t earliestRetainedNs = trigger.monotonicNs;
+    bool hasRetainedPrehistory = false;
     for (const SizedRecord& item : history_) {
         if (item.record->monotonicNs >= active_.startMonotonicNs &&
             item.record->monotonicNs <= active_.firstTriggerMonotonicNs) {
             activeRecords_.push_back(item);
             active_.endMonotonicNs = item.record->monotonicNs;
+            if (item.record->monotonicNs < earliestRetainedNs) {
+                earliestRetainedNs = item.record->monotonicNs;
+                hasRetainedPrehistory = true;
+            }
         }
     }
+    active_.prehistoryRetainedNs = hasRetainedPrehistory
+        ? trigger.monotonicNs - earliestRetainedNs : 0;
     active_.endMonotonicNs = active_.firstTriggerMonotonicNs;
     active_.prehistoryIncomplete = active_.prehistoryIncomplete ||
         active_.recordsTruncated;
