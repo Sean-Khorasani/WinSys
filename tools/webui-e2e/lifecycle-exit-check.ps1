@@ -8,11 +8,121 @@ $ErrorActionPreference = 'Stop'
 $base = $Url.TrimEnd('/')
 $headers = $null
 $collectorStartRequested = $false
+$unrelatedTraceStarted = $false
+$unrelatedTraceName = $null
+$unrelatedTraceGuid = $null
+$unrelatedTraceHandle = [uint64]0
 $listener = $null
 $clientProcess = $null
 $failure = $null
 $cleanupFailure = $null
 $enginePath = Join-Path (Get-Location).Path 'build\wintcp.exe'
+
+if (-not ('WinTcpEtwFixture' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class WinTcpEtwFixture {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WnodeHeader {
+        public uint BufferSize;
+        public uint ProviderId;
+        public ulong HistoricalContext;
+        public long TimeStamp;
+        public Guid Guid;
+        public uint ClientContext;
+        public uint Flags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TraceProperties {
+        public WnodeHeader Wnode;
+        public uint BufferSize;
+        public uint MinimumBuffers;
+        public uint MaximumBuffers;
+        public uint MaximumFileSize;
+        public uint LogFileMode;
+        public uint FlushTimer;
+        public uint EnableFlags;
+        public int AgeLimit;
+        public uint NumberOfBuffers;
+        public uint FreeBuffers;
+        public uint EventsLost;
+        public uint BuffersWritten;
+        public uint LogBuffersLost;
+        public uint RealTimeBuffersLost;
+        public IntPtr LoggerThreadId;
+        public uint LogFileNameOffset;
+        public uint LoggerNameOffset;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint StartTraceW(out ulong handle, string name,
+                                          IntPtr properties);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint ControlTraceW(ulong handle, string name,
+        IntPtr properties, uint controlCode);
+
+    private const uint RealtimeMode = 0x00000100;
+    private const uint WnodeTracedGuid = 0x00020000;
+
+    private static IntPtr Allocate(string name, Guid ownerGuid) {
+        int propertiesSize = Marshal.SizeOf(typeof(TraceProperties));
+        byte[] encodedName = Encoding.Unicode.GetBytes(name + "\0");
+        IntPtr buffer = Marshal.AllocHGlobal(propertiesSize + encodedName.Length);
+        for (int i = 0; i < propertiesSize + encodedName.Length; ++i)
+            Marshal.WriteByte(buffer, i, 0);
+        TraceProperties properties = new TraceProperties();
+        properties.Wnode.BufferSize = (uint)(propertiesSize + encodedName.Length);
+        properties.Wnode.Guid = ownerGuid;
+        properties.Wnode.ClientContext = 1;
+        properties.Wnode.Flags = WnodeTracedGuid;
+        properties.BufferSize = 64;
+        properties.MinimumBuffers = 2;
+        properties.MaximumBuffers = 4;
+        properties.LogFileMode = RealtimeMode;
+        properties.LoggerNameOffset = (uint)propertiesSize;
+        Marshal.StructureToPtr(properties, buffer, false);
+        Marshal.Copy(encodedName, 0, IntPtr.Add(buffer, propertiesSize),
+                     encodedName.Length);
+        return buffer;
+    }
+
+    public static uint Start(string name, string ownerGuid, out ulong handle) {
+        IntPtr properties = Allocate(name, new Guid(ownerGuid));
+        try { return StartTraceW(out handle, name, properties); }
+        finally { Marshal.FreeHGlobal(properties); }
+    }
+
+    public static uint Query(string name, ulong handle, out string ownerGuid,
+                             out uint logFileMode) {
+        IntPtr properties = Allocate(name, Guid.Empty);
+        try {
+            uint result = ControlTraceW(handle, name, properties, 0);
+            TraceProperties observed = (TraceProperties)Marshal.PtrToStructure(
+                properties, typeof(TraceProperties));
+            ownerGuid = observed.Wnode.Guid.ToString("D");
+            logFileMode = observed.LogFileMode;
+            return result;
+        } finally { Marshal.FreeHGlobal(properties); }
+    }
+
+    public static uint Stop(string name, ulong handle, string expectedGuid) {
+        string actualGuid;
+        uint mode;
+        uint query = Query(name, handle, out actualGuid, out mode);
+        if (query != 0) return query;
+        if (!String.Equals(actualGuid, expectedGuid,
+                           StringComparison.OrdinalIgnoreCase)) return 13;
+        IntPtr properties = Allocate(name, new Guid(expectedGuid));
+        try { return ControlTraceW(handle, name, properties, 1); }
+        finally { Marshal.FreeHGlobal(properties); }
+    }
+}
+'@
+}
 
 function Get-OwnCollectorProcesses {
     return @(Get-CimInstance Win32_Process -Filter "name = 'wintcp.exe'" |
@@ -99,6 +209,15 @@ try {
     }
     $initialLifecycleCount = [uint64]$status.lifecycle.persistedRecords
 
+    $unrelatedTraceName = 'WinTCP.UnrelatedFixture.' + [guid]::NewGuid().ToString('N')
+    $unrelatedTraceGuid = [guid]::NewGuid().ToString('D')
+    $traceStartResult = [WinTcpEtwFixture]::Start($unrelatedTraceName,
+        $unrelatedTraceGuid, [ref]$unrelatedTraceHandle)
+    if ($traceStartResult -ne 0) {
+        throw "Could not start the unrelated ETW fixture safely: Win32=$traceStartResult"
+    }
+    $unrelatedTraceStarted = $true
+
     $collectorStartRequested = $true
     $null = Invoke-EngineOperation '/api/collector/control' @{ action = 'start' }
     $eventsResult = Invoke-EngineOperation '/api/collector/control' @{ action = 'events-start' }
@@ -107,6 +226,14 @@ try {
     }
     if ([int]$eventsResult.events.traceResult -ne 0) {
         throw "Lifecycle trace reported an ETW start error: $($eventsResult.events.traceResult)"
+    }
+    $observedTraceGuid = $null
+    $observedTraceMode = [uint32]0
+    $traceQueryResult = [WinTcpEtwFixture]::Query($unrelatedTraceName,
+        $unrelatedTraceHandle, [ref]$observedTraceGuid, [ref]$observedTraceMode)
+    if ($traceQueryResult -ne 0 -or $observedTraceGuid -ne $unrelatedTraceGuid -or
+        ($observedTraceMode -band 0x00000100) -eq 0) {
+        throw "WinTCP lifecycle start changed or stopped the unrelated ETW session: query=$traceQueryResult guid=$observedTraceGuid mode=$observedTraceMode"
     }
     if (-not $eventsResult.events.clockStable -or
         [uint64]$eventsResult.events.clockMappingGeneration -lt 1 -or
@@ -182,6 +309,11 @@ try {
     if ($eventStopResult.events.running -ne $false -or
         [int]$eventStopResult.events.traceResult -ne 0) {
         throw "Lifecycle trace did not stop cleanly: running=$($eventStopResult.events.running) traceResult=$($eventStopResult.events.traceResult)"
+    }
+    $traceQueryResult = [WinTcpEtwFixture]::Query($unrelatedTraceName,
+        $unrelatedTraceHandle, [ref]$observedTraceGuid, [ref]$observedTraceMode)
+    if ($traceQueryResult -ne 0 -or $observedTraceGuid -ne $unrelatedTraceGuid) {
+        throw "WinTCP events-stop changed or stopped the unrelated ETW session: query=$traceQueryResult guid=$observedTraceGuid"
     }
     foreach ($counter in @('queueLost', 'eventsLost', 'buffersLost', 'historyEvicted')) {
         if ([uint64]$eventStopResult.events.$counter -ne 0) {
@@ -308,8 +440,19 @@ try {
             throw "Offline last-known $counter changed after helper exit."
         }
     }
+    $traceQueryResult = [WinTcpEtwFixture]::Query($unrelatedTraceName,
+        $unrelatedTraceHandle, [ref]$observedTraceGuid, [ref]$observedTraceMode)
+    if ($traceQueryResult -ne 0 -or $observedTraceGuid -ne $unrelatedTraceGuid) {
+        throw "WinTCP collector stop changed or stopped the unrelated ETW session: query=$traceQueryResult guid=$observedTraceGuid"
+    }
+    $traceStopResult = [WinTcpEtwFixture]::Stop($unrelatedTraceName,
+        $unrelatedTraceHandle, $unrelatedTraceGuid)
+    if ($traceStopResult -ne 0) {
+        throw "Could not stop the exact unrelated ETW fixture created by this test: Win32=$traceStopResult"
+    }
+    $unrelatedTraceStarted = $false
     $collectorStartRequested = $false
-    Write-Output "lifecycle-exit-test=PASS shortFlows=$($fixtures.Count) rawConnect=true rawDisconnect=true rawProcessExit=true normalizedSharedHistory=true liveAndFinalLossCounters=true offlineLastKnownCounters=true queueLost=$($offlineLossStatus.queueLost) eventsLost=$($offlineLossStatus.eventsLost) buffersLost=$($offlineLossStatus.buffersLost) identity=$identity destinationPort=$port"
+    Write-Output "lifecycle-exit-test=PASS shortFlows=$($fixtures.Count) rawConnect=true rawDisconnect=true rawProcessExit=true normalizedSharedHistory=true unrelatedEtwSessionPreserved=true liveAndFinalLossCounters=true offlineLastKnownCounters=true queueLost=$($offlineLossStatus.queueLost) eventsLost=$($offlineLossStatus.eventsLost) buffersLost=$($offlineLossStatus.buffersLost) identity=$identity destinationPort=$port"
 }
 catch {
     $failure = $_.Exception.Message
@@ -347,6 +490,21 @@ finally {
                 }
             }
         }
+    }
+    if ($unrelatedTraceStarted) {
+        try {
+            $actualGuid = $null
+            $actualMode = [uint32]0
+            $query = [WinTcpEtwFixture]::Query($unrelatedTraceName,
+                $unrelatedTraceHandle, [ref]$actualGuid, [ref]$actualMode)
+            if ($query -eq 0 -and $actualGuid -eq $unrelatedTraceGuid) {
+                $stop = [WinTcpEtwFixture]::Stop($unrelatedTraceName,
+                    $unrelatedTraceHandle, $unrelatedTraceGuid)
+                if ($stop -ne 0) { throw "exact session stop returned $stop" }
+            } elseif ($query -ne 4201) {
+                throw "owner query failed ($query, guid=$actualGuid); session left untouched"
+            }
+        } catch { $cleanupFailure = "unrelated ETW fixture cleanup failed: $($_.Exception.Message)" }
     }
 }
 
