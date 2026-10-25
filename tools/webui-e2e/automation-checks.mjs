@@ -86,6 +86,94 @@ async function runCollectorLossUiTests(page) {
   }
 }
 
+async function runNotificationEvidenceLinkTests(page) {
+  const snapshotEventId = "fixture-snapshot-event-41";
+  const linkedEventId = "fixture-normalized-event-42";
+  let historyRequests = 0;
+  const notificationRoute = async (route) => route.fulfill({ json: {
+    schemaVersion: 1,
+    items: [
+      { schemaVersion: 1, id: "fixture-passive-notification",
+        recipeId: "fixture-passive-recipe", recipeRevision: "1",
+        eventId: snapshotEventId, occurredAtUtc: "2026-01-01T00:00:00.000Z",
+        reason: "new_remote_tcp_endpoint", message: "Synthetic Passive evidence notice",
+        acknowledged: true, deliveryStatus: "inbox", suppressed: "0" },
+      { schemaVersion: 1, id: "fixture-active-notification",
+        recipeId: "fixture-active-recipe", recipeRevision: "1",
+        eventId: "fixture-action-notice", triggerEventId: linkedEventId,
+        occurredAtUtc: "2026-01-01T00:00:00.000Z",
+        reason: "active_recipe_action_verified",
+        message: "Synthetic Active evidence notice", acknowledged: true,
+        deliveryStatus: "inbox", suppressed: "0" },
+    ],
+    nextCursor: "",
+  } });
+  const historyRoute = async (route) => {
+    historyRequests++;
+    const requestUrl = new URL(route.request().url());
+    const page = !requestUrl.searchParams.has("cursor")
+      ? { schemaVersion: 1, items: [{ schemaVersion: 1,
+        eventId: "unrelated-retained-event", kind: "coverage_gap",
+        reason: "fixture" }], nextCursor: "00112233445566778899aabb:1" }
+      : { schemaVersion: 1, items: [
+        { schemaVersion: 1, eventId: snapshotEventId, kind: "endpoint_observed",
+          occurredAtUtc: "2026-01-01T00:00:00.000Z" },
+        { schemaVersion: 1, eventId: linkedEventId,
+          kind: "connection_established", direction: "outbound",
+          occurredAtUtc: "2026-01-01T00:00:00.000Z",
+          local: { address: "127.0.0.1", port: 43123 },
+          remote: { address: "127.0.0.1", port: 443 } },
+      ], nextCursor: "" };
+    await route.fulfill({ json: page });
+  };
+  const notificationMatcher = (requestUrlText) => {
+    const requestUrl = new URL(requestUrlText);
+    return requestUrl.pathname === "/api/engine/notifications" &&
+      requestUrl.searchParams.get("limit") === "30";
+  };
+  const historyMatcher = (requestUrlText) => {
+    const requestUrl = new URL(requestUrlText);
+    return requestUrl.pathname === "/api/engine/history" &&
+      requestUrl.searchParams.get("limit") === "500";
+  };
+  try {
+    await page.route(notificationMatcher, notificationRoute);
+    await page.route(historyMatcher, historyRoute);
+    await page.goto(`${url}#/automations`, { waitUntil: "networkidle" });
+    await page.getByRole("tab", { name: "Monitors" }).click();
+    await page.getByRole("button", { name: "Load inbox" }).click();
+    const passive = page.locator(".engine-event-row")
+      .filter({ hasText: "Synthetic Passive evidence notice" });
+    await passive.waitFor({ timeout: 5000 });
+    await passive.getByRole("button", { name: "View triggering event" }).click();
+    await page.getByRole("button", { name: "Find linked evidence" }).click();
+    await page.getByText(`Found linked notification evidence: ${snapshotEventId}`)
+      .waitFor({ timeout: 5000 });
+    check("Passive notice links to its eventId in shared history",
+      historyRequests === 2 && await page.locator(".lifecycle-event-linked").count() === 1);
+
+    await page.getByRole("tab", { name: "Monitors" }).click();
+    await page.getByRole("button", { name: "Load inbox" }).click();
+    const active = page.locator(".engine-event-row")
+      .filter({ hasText: "Synthetic Active evidence notice" });
+    await active.waitFor({ timeout: 5000 });
+    await active.getByRole("button", { name: "View triggering event" }).click();
+    await page.getByRole("button", { name: "Find linked evidence" }).click();
+    await page.getByText(`Found linked notification evidence: ${linkedEventId}`)
+      .waitFor({ timeout: 5000 });
+    check("Active notice follows short shared-history pages to its trigger event",
+      historyRequests === 4 && await page.locator(".lifecycle-event-linked").count() === 1 &&
+        await page.locator(".lifecycle-event-linked").innerText().then((text) =>
+          text.includes("127.0.0.1:43123") && text.includes("127.0.0.1:443")));
+  } catch (error) {
+    check("Passive and Active inbox notifications link to shared event evidence",
+      false, error.message);
+  } finally {
+    await page.unroute(notificationMatcher, notificationRoute);
+    await page.unroute(historyMatcher, historyRoute);
+  }
+}
+
 async function runScriptEngineTests(page) {
   await page.goto(`${url}#/`, { waitUntil: "networkidle" });
   await page.waitForTimeout(800);
@@ -1435,6 +1523,8 @@ try {
   await runLifecycleLabelTests(testPage);
   console.log("=== Collector Loss Status ===");
   await runCollectorLossUiTests(testPage);
+  console.log("=== Notification Evidence Links ===");
+  await runNotificationEvidenceLinkTests(testPage);
   console.log("=== Script Engine Unit Tests (edge cases) ===");
   await runScriptEngineTests(testPage);
 
