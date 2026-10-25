@@ -21,6 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -206,7 +207,7 @@ bool ParseUnsigned(const std::string& text, unsigned maximum, unsigned* out) {
 }
 
 bool ParsePreview(const std::string& payload, const Identity& own,
-                  RestrictionPlan* plan) {
+                  RestrictionPlan* plan, std::string* owner) {
     if (plan == nullptr || payload.size() > 2048 ||
         payload.find('\0') != std::string::npos ||
         payload.find('\r') != std::string::npos) return false;
@@ -218,9 +219,9 @@ bool ParsePreview(const std::string& payload, const Identity& own,
             ? end : end - start));
         if (end == std::string::npos) break;
         start = end + 1;
-        if (fields.size() >= 5) return false;
+        if (fields.size() >= 6) return false;
     }
-    if (fields.size() != 5) return false;
+    if ((fields.size() != 5 && fields.size() != 6) || owner == nullptr) return false;
     unsigned port = 0, duration = 0;
     if (!ParseUnsigned(fields[2], 65535, &port) ||
         !ParseUnsigned(fields[4], 1440, &duration)) return false;
@@ -233,6 +234,15 @@ bool ParsePreview(const std::string& payload, const Identity& own,
     if (fields[3] != "tcp" && fields[3] != "udp" && fields[3] != "both")
         return false;
     plan->durationSeconds = duration * 60;
+    *owner = fields.size() == 6 ? fields[5] : "manual";
+    if (*owner != "manual") {
+        if (owner->rfind("recipe:", 0) != 0 || owner->size() > 39) return false;
+        for (std::size_t i = 7; i < owner->size(); ++i) {
+            const char c = (*owner)[i];
+            if ((c < '0' || c > '9') && (c < 'a' || c > 'z') && c != '-') return false;
+        }
+        if (owner->size() <= 7) return false;
+    }
     const std::wstring& sid = own.sidText;
     const int bytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
         sid.c_str(), static_cast<int>(sid.size()), nullptr, 0, nullptr, nullptr);
@@ -282,7 +292,11 @@ std::string EventStatusJson(const ConnectionCollectorStatus& status) {
         "\",\"qpcFrequency\":\"" + std::to_string(status.qpcFrequency) +
         "\",\"attributed\":\"" + std::to_string(status.attributed) +
         "\",\"clockStable\":" + std::string(status.clockStable ? "true" : "false") +
-        ",\"lateRecords\":\"" + std::to_string(status.lateRecords) +
+        ",\"clockMappingGeneration\":\"" +
+            std::to_string(status.clockMappingGeneration) +
+        "\",\"clockRecoveries\":\"" +
+            std::to_string(status.clockRecoveries) +
+        "\",\"lateRecords\":\"" + std::to_string(status.lateRecords) +
         "\",\"flowEvicted\":\"" + std::to_string(status.flowEvicted) +
         "\",\"reorderFlushes\":\"" + std::to_string(status.reorderFlushes) +
         "\",\"published\":\"" + std::to_string(status.published) + "\"" +
@@ -359,14 +373,20 @@ bool Request(unsigned char command, const std::string& payload,
     Identity own;
     if (!OwnIdentity(&own, nullptr)) return false;
     const std::wstring pipeName = PipeName(own);
-    HANDLE pipe = ::CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                0, nullptr, OPEN_EXISTING, SECURITY_SQOS_PRESENT |
-                                SECURITY_IMPERSONATION, nullptr);
-    if (pipe == INVALID_HANDLE_VALUE && ::GetLastError() == ERROR_PIPE_BUSY &&
-        ::WaitNamedPipeW(pipeName.c_str(), 200))
-        pipe = ::CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
-            0, nullptr, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION, nullptr);
-    if (pipe == INVALID_HANDLE_VALUE) return false;
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    const ULONGLONG deadline = ::GetTickCount64() + 2000;
+    for (;;) {
+        if (::WaitNamedPipeW(pipeName.c_str(), 100))
+            pipe = ::CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
+                0, nullptr, OPEN_EXISTING, SECURITY_SQOS_PRESENT |
+                SECURITY_IMPERSONATION, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        const DWORD error = ::GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY &&
+            error != ERROR_SEM_TIMEOUT) return false;
+        if (::GetTickCount64() >= deadline) return false;
+        ::Sleep(10);
+    }
     bool ok = WriteFrame(pipe, std::string("\1\0", 2));
     std::string nonce;
     if (ok) ok = ReadFrame(pipe, &nonce) && nonce.size() == kNonceLength;
@@ -456,7 +476,7 @@ int Run() {
     std::string wfpError;
     bool wfpReady = filters.Open(&wfpError);
     RestrictionLeaseController leases(&filters);
-    ConnectionEventCollector events;
+    ConnectionEventCollector events(own.sidText + L"." + std::to_wstring(own.session));
     std::string eventEpoch = brokerEpoch;
     std::mutex leasesMutex;
     std::mutex eventControlMutex;
@@ -517,9 +537,11 @@ int Run() {
                     const std::string payload = request.substr(2 + kNonceLength);
                     if (request[1] == 1 && payload.empty()) {
                         std::lock_guard<std::mutex> lock(leasesMutex);
+                        const bool enginePaired = leases.HeartbeatCurrent(Now());
                         (void)WriteFrame(pipe, "{\"schemaVersion\":1,\"running\":true,\"activeLeases\":" +
                             std::to_string(leases.Active().size()) +
                             ",\"pairedEngineEpoch\":" + JsonQuote(initialEpoch) +
+                            ",\"enginePaired\":" + (enginePaired ? "true" : "false") +
                             ",\"brokerEpoch\":" + JsonQuote(brokerEpoch) +
                             ",\"finalCursor\":" + JsonQuote(acceptingRestrictions ? "" :
                                 brokerEpoch + ':' + std::to_string(leases.Changes().empty()
@@ -539,7 +561,8 @@ int Run() {
                     } else if (request[1] == 3) {
                         RestrictionPlan plan;
                         std::string error, identity;
-                        if (!ParsePreview(payload, own, &plan) ||
+                        std::string owner;
+                        if (!ParsePreview(payload, own, &plan, &owner) ||
                             !ReviewRestrictionTarget(plan, &error, &identity)) {
                             (void)WriteFrame(pipe, ErrorJson(error.empty()
                                 ? "invalid_restriction_plan" : error));
@@ -553,7 +576,7 @@ int Run() {
                                      ++attempt) {
                                     token = RandomId();
                                     if (!token.empty()) approved = leases.Preview(
-                                        plan, token, Now(), &error);
+                                        plan, token, owner, Now(), &error);
                                 }
                             }
                             const std::string reply = approved
@@ -587,7 +610,7 @@ int Run() {
                             {
                                 std::lock_guard<std::mutex> lock(leasesMutex);
                                 if (!id.empty()) applied = leases.ApplyApproved(payload, id,
-                                    "manual", Now(), &error);
+                                    Now(), &error);
                                 if (applied) { wfpReady = true; wfpError.clear(); }
                                 else if (error.rfind("wfp_", 0) == 0) {
                                     wfpReady = false;
@@ -596,7 +619,9 @@ int Run() {
                                 if (applied) lease = leases.Active().at(id);
                             }
                             (void)WriteFrame(pipe, applied ?
-                                "{\"schemaVersion\":1,\"lease\":" + LeaseJson(lease) + "}" :
+                                "{\"schemaVersion\":1,\"id\":" + JsonQuote(lease.id) +
+                                ",\"owner\":" + JsonQuote(lease.owner) +
+                                ",\"lease\":" + LeaseJson(lease) + "}" :
                                 ErrorJson(error.empty() ? "restriction_apply_failed" : error));
                         }
                     } else if (request[1] == 5 && payload.empty()) {
@@ -663,11 +688,148 @@ int Run() {
                             }
                             else error = "engine_not_paired";
                         }
+                        if (ok && request[1] == 11) {
+                            std::lock_guard<std::mutex> lock(leasesMutex);
+                            std::set<std::string> recipeOwners;
+                            for (const auto& grant : leases.RecipeGrants())
+                                recipeOwners.insert(grant.first);
+                            for (const auto& lease : leases.Active())
+                                if (lease.second.owner.rfind("recipe:", 0) == 0)
+                                    recipeOwners.insert(lease.second.owner);
+                            for (const std::string& owner : recipeOwners)
+                                leases.ReleaseOwner(owner, Now());
+                        }
                         (void)WriteFrame(pipe, ok
                             ? "{\"schemaVersion\":1,\"events\":" + EventStatusJson(events.Status()) + "}"
                             : ErrorJson(error));
                     } else if (request[1] == 12 && payload.size() <= 64) {
                         (void)WriteFrame(pipe, LifecycleWire(events, eventEpoch, payload));
+                    } else if (request[1] == 14) {
+                        std::vector<std::string> fields;
+                        std::size_t start = 0;
+                        for (;;) {
+                            const std::size_t end = payload.find('\n', start);
+                            fields.push_back(payload.substr(start, end == std::string::npos
+                                ? std::string::npos : end - start));
+                            if (end == std::string::npos) break;
+                            start = end + 1;
+                        }
+                        RestrictionPlan plan;
+                        std::string owner, error, identity;
+                        unsigned revision = 0, grantMinutes = 0, leaseMinutes = 0;
+                        unsigned actions = 0, cumulativeMinutes = 0;
+                        std::string base;
+                        if (fields.size() == 11) {
+                            for (std::size_t i = 0; i < 6; ++i) {
+                                if (i != 0) base.push_back('\n');
+                                base += fields[i];
+                            }
+                        }
+                        const bool valid = fields.size() == 11 &&
+                            ParsePreview(base, own, &plan, &owner) &&
+                            ParseUnsigned(fields[6], 0xffffffffU, &revision) && revision != 0 &&
+                            ParseUnsigned(fields[7], 480, &grantMinutes) && grantMinutes >= 1 &&
+                            ParseUnsigned(fields[8], 480, &leaseMinutes) && leaseMinutes >= 1 &&
+                            ParseUnsigned(fields[9], 3, &actions) && actions >= 1 &&
+                            ParseUnsigned(fields[10], 60, &cumulativeMinutes) && cumulativeMinutes >= 1 &&
+                            ReviewRestrictionTarget(plan, &error, &identity);
+                        if (!valid) {
+                            (void)WriteFrame(pipe, ErrorJson(error.empty()
+                                ? "invalid_active_grant" : error));
+                        } else {
+                            plan.imageFileIdentity = identity;
+                            plan.durationSeconds = leaseMinutes * 60;
+                            bool armed = false;
+                            const RestrictionNow armedAt = Now();
+                            {
+                                std::lock_guard<std::mutex> lock(leasesMutex);
+                                armed = acceptingRestrictions && leases.ArmRecipeAction(
+                                    owner, revision, plan, grantMinutes * 60,
+                                    leaseMinutes * 60, actions, cumulativeMinutes * 60,
+                                    armedAt, &error);
+                            }
+                            (void)WriteFrame(pipe, armed
+                                ? "{\"schemaVersion\":1,\"owner\":" + JsonQuote(owner) +
+                                  ",\"recipeRevision\":" + std::to_string(revision) +
+                                  ",\"grantExpiresUtcMs\":" + std::to_string(
+                                      armedAt.utcMs + static_cast<std::uint64_t>(grantMinutes) * 60000ULL) +
+                                  ",\"grantMinutes\":" + std::to_string(grantMinutes) +
+                                  ",\"leaseMinutes\":" + std::to_string(leaseMinutes) +
+                                  ",\"maxActions\":" + std::to_string(actions) +
+                                  ",\"maxCumulativeMinutes\":" + std::to_string(cumulativeMinutes) + "}"
+                                : ErrorJson(error.empty() ? "active_grant_refused" : error));
+                        }
+                    } else if (request[1] == 15) {
+                        std::vector<std::string> fields;
+                        std::size_t start = 0;
+                        for (;;) {
+                            const std::size_t end = payload.find('\n', start);
+                            fields.push_back(payload.substr(start, end == std::string::npos
+                                ? std::string::npos : end - start));
+                            if (end == std::string::npos) break;
+                            start = end + 1;
+                        }
+                        unsigned revision = 0, port = 0;
+                        const bool fieldsValid = fields.size() == 6 &&
+                            ParseUnsigned(fields[1], 0xffffffffU, &revision) && revision != 0 &&
+                            ParseUnsigned(fields[4], 65535, &port) && port != 0 &&
+                            (fields[5] == "tcp" || fields[5] == "udp");
+                        bool applied = false;
+                        RestrictionLease lease;
+                        std::string error;
+                        if (!fieldsValid) error = "invalid_trigger_action";
+                        else {
+                            std::lock_guard<std::mutex> lock(leasesMutex);
+                            const auto grant = leases.RecipeGrants().find(fields[0]);
+                            if (grant == leases.RecipeGrants().end()) error = "active_grant_missing";
+                            else if (grant->second.recipeRevision != revision)
+                                error = "recipe_revision_changed";
+                            else {
+                                RestrictionPlan plan = grant->second.approvedScope;
+                                plan.remoteAddress = fields[3];
+                                plan.remotePort = static_cast<std::uint16_t>(port);
+                                plan.protocol = fields[5] == "tcp"
+                                    ? RestrictionProtocol::Tcp : RestrictionProtocol::Udp;
+                                plan.durationSeconds = grant->second.leaseDurationSeconds;
+                                std::string identity;
+                                if (!ReviewRestrictionTarget(plan, &error, &identity)) {
+                                    // Review failed; no filter installation is attempted.
+                                } else if (identity != plan.imageFileIdentity) {
+                                    error = "approved_image_changed";
+                                } else {
+                                    const std::string id = RandomId();
+                                    applied = !id.empty() && leases.ApplyRecipeAction(
+                                        fields[0], revision, fields[2], id, plan, Now(),
+                                        &lease, &error);
+                                    if (applied) { wfpReady = true; wfpError.clear(); }
+                                }
+                            }
+                        }
+                        if (!applied && error.rfind("wfp_", 0) == 0) {
+                            std::lock_guard<std::mutex> lock(leasesMutex);
+                            wfpReady = false;
+                            wfpError = error;
+                        }
+                        (void)WriteFrame(pipe, applied
+                            ? "{\"schemaVersion\":1,\"activeRecipeAction\":true,\"id\":" +
+                              JsonQuote(lease.id) + ",\"owner\":" + JsonQuote(lease.owner) +
+                              ",\"lease\":" +
+                              LeaseJson(lease) + "}"
+                            : ErrorJson(error.empty() ? "active_action_refused" : error));
+                    } else if (request[1] == 13 && payload.rfind("recipe:", 0) == 0) {
+                        bool valid = payload.size() > 7 && payload.size() <= 39;
+                        for (std::size_t i = 7; valid && i < payload.size(); ++i) {
+                            const char c = payload[i];
+                            valid = (c >= '0' && c <= '9') ||
+                                (c >= 'a' && c <= 'z') || c == '-';
+                        }
+                        if (!valid) (void)WriteFrame(pipe, ErrorJson("invalid_owner"));
+                        else {
+                            std::lock_guard<std::mutex> lock(leasesMutex);
+                            leases.ReleaseOwner(payload, Now());
+                            (void)WriteFrame(pipe, "{\"schemaVersion\":1,\"releasedOwner\":" +
+                                JsonQuote(payload) + "}");
+                        }
                     } else {
                         (void)WriteFrame(pipe, ErrorJson("invalid_collector_operation"));
                     }
@@ -862,12 +1024,70 @@ bool CollectorOperationValid(const std::string& action,
     if (action == "start" || action == "stop" || action == "release-all" ||
         action == "events-start" || action == "events-stop")
         return payload.empty();
+    if (action == "arm-reactive") {
+        std::vector<std::string> fields;
+        std::size_t start = 0;
+        for (;;) {
+            const std::size_t end = payload.find('\n', start);
+            fields.push_back(payload.substr(start, end == std::string::npos
+                ? std::string::npos : end - start));
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        if (fields.size() != 11 || fields[5].rfind("recipe:", 0) != 0) return false;
+        Identity own;
+        RestrictionPlan plan;
+        std::string owner;
+        std::string base;
+        for (std::size_t i = 0; i < 6; ++i) {
+            if (i != 0) base.push_back('\n');
+            base += fields[i];
+        }
+        unsigned revision = 0, grantMinutes = 0, leaseMinutes = 0;
+        unsigned actions = 0, cumulativeMinutes = 0;
+        return OwnIdentity(&own, nullptr) && ParsePreview(base, own, &plan, &owner) &&
+            owner == fields[5] && ParseUnsigned(fields[6], 0xffffffffU, &revision) && revision != 0 &&
+            ParseUnsigned(fields[7], 480, &grantMinutes) && grantMinutes >= 1 &&
+            ParseUnsigned(fields[8], 480, &leaseMinutes) && leaseMinutes >= 1 &&
+            ParseUnsigned(fields[9], 3, &actions) && actions >= 1 &&
+            ParseUnsigned(fields[10], 60, &cumulativeMinutes) && cumulativeMinutes >= leaseMinutes;
+    }
+    if (action == "trigger-reactive") {
+        std::vector<std::string> fields;
+        std::size_t start = 0;
+        for (;;) {
+            const std::size_t end = payload.find('\n', start);
+            fields.push_back(payload.substr(start, end == std::string::npos
+                ? std::string::npos : end - start));
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        unsigned revision = 0, port = 0;
+        return fields.size() == 6 && fields[0].rfind("recipe:", 0) == 0 &&
+            ParseUnsigned(fields[1], 0xffffffffU, &revision) && revision != 0 &&
+            !fields[2].empty() && fields[2].size() <= 128 &&
+            fields[2].find_first_of("\r\n") == std::string::npos &&
+            fields[2].find('\0') == std::string::npos &&
+            !fields[3].empty() && fields[3].size() <= 45 &&
+            ParseUnsigned(fields[4], 65535, &port) && port != 0 &&
+            (fields[5] == "tcp" || fields[5] == "udp");
+    }
     if (action == "apply" || action == "release") return SafeId(payload);
+    if (action == "release-owner") {
+        if (payload.rfind("recipe:", 0) != 0 || payload.size() <= 7 || payload.size() > 39)
+            return false;
+        for (std::size_t i = 7; i < payload.size(); ++i) {
+            const char c = payload[i];
+            if ((c < '0' || c > '9') && (c < 'a' || c > 'z') && c != '-') return false;
+        }
+        return true;
+    }
     if (action != "preview") return false;
     Identity own;
     RestrictionPlan plan;
     std::string error;
-    return OwnIdentity(&own, nullptr) && ParsePreview(payload, own, &plan) &&
+    std::string owner;
+    return OwnIdentity(&own, nullptr) && ParsePreview(payload, own, &plan, &owner) &&
         ValidateRestrictionPlan(plan, &error);
 }
 
@@ -895,7 +1115,9 @@ bool CollectorExecuteOperation(const std::string& action,
         return ok;
     }
     const unsigned char operation = action == "events-start" ? 10 : action == "events-stop" ? 11 :
-        action == "preview" ? 3 :
+        action == "preview" ? 3 : action == "release-owner" ? 13 :
+        action == "arm-reactive" ? 14 :
+        action == "trigger-reactive" ? 15 :
         action == "apply" ? 4 : action == "release" ? 6 : 7;
     if (!Request(operation, payload, result)) {
         *error = "collector_unavailable";
@@ -960,8 +1182,16 @@ bool CollectorStart(std::string* error) {
             if (error != nullptr) *error = "collector_restart_required";
             return false;
         }
-        if (error != nullptr) error->clear();
-        return true;
+        for (unsigned attempt = 0; attempt < 50; ++attempt) {
+            if (response.find("\"enginePaired\":true") != std::string::npos) {
+                if (error != nullptr) error->clear();
+                return true;
+            }
+            ::Sleep(100);
+            if (!CollectorStatus(&response)) break;
+        }
+        if (error != nullptr) *error = "collector_engine_pairing_timeout";
+        return false;
     }
     std::wstring path;
     if (!RuntimeCliPath(&path, error)) return false;
@@ -978,15 +1208,29 @@ bool CollectorStart(std::string* error) {
         return false;
     }
     bool ready = false;
+    bool identityMatched = false;
     for (unsigned attempt = 0; attempt < 50; ++attempt) {
-        if (CollectorStatus(&response)) { ready = true; break; }
+        if (CollectorStatus(&response)) {
+            if (response.find("\"pairedEngineEpoch\":" + JsonQuote(Epoch(engine))) ==
+                std::string::npos) {
+                if (error != nullptr) *error = "collector_restart_required";
+                if (launch.hProcess != nullptr) ::CloseHandle(launch.hProcess);
+                return false;
+            }
+            identityMatched = true;
+            if (response.find("\"enginePaired\":true") != std::string::npos) {
+                ready = true;
+                break;
+            }
+        }
         if (launch.hProcess != nullptr &&
             ::WaitForSingleObject(launch.hProcess, 100) != WAIT_TIMEOUT) break;
         if (launch.hProcess == nullptr) ::Sleep(100);
     }
     if (launch.hProcess != nullptr) ::CloseHandle(launch.hProcess);
     if (!ready && error != nullptr)
-        *error = "collector_identity_mismatch_or_not_reachable";
+        *error = identityMatched ? "collector_engine_pairing_timeout"
+                                 : "collector_identity_mismatch_or_not_reachable";
     if (ready && error != nullptr) error->clear();
     return ready;
 }
