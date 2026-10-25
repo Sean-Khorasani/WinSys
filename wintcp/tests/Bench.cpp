@@ -43,6 +43,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "EngineStore.h"
 #include "EngineOperations.h"
 #include "EngineIdentity.h"
+#include "BoundedQueueBudget.h"
 #include "EngineClock.h"
 #include "CollectorLossModel.h"
 #include "RecipeModel.h"
@@ -2305,6 +2306,32 @@ void CheckEngineIdentity(TestResult& r) {
           !SameEnginePeer(sid, 7, L"S-1-5-21-100-200-300-1002", 7));
     Check(r, "engine-identity.rejects-both-different",
           !SameEnginePeer(sid, 7, L"S-1-5-21-100-200-300-1002", 8));
+}
+
+void CheckBoundedQueueBudget(TestResult& r) {
+    using namespace wintcp;
+    BoundedQueueBudget queue(2, 10);
+    Check(r, "queue-budget.accept-within-capacity", queue.CanAccept(5));
+    if (queue.CanAccept(5)) queue.Accepted(5);
+    if (queue.CanAccept(5)) queue.Accepted(5);
+    Check(r, "queue-budget.rejects-record-cap",
+          !queue.CanAccept(1) && queue.Records() == 2);
+    queue.RecordDrop();
+    queue.Removed(5);
+    Check(r, "queue-budget.drain-restores-record-slot",
+          queue.CanAccept(5) && queue.Records() == 1 && queue.Bytes() == 5);
+    if (queue.CanAccept(5)) queue.Accepted(5);
+    Check(r, "queue-budget.rejects-byte-cap",
+          !queue.CanAccept(1) && queue.Lost() == 1);
+    queue.RecordDrop();
+    Check(r, "queue-budget.reports-rejected-records", queue.Lost() == 2);
+    queue.DropPending();
+    Check(r, "queue-budget.shutdown-counts-discarded-records",
+          queue.Lost() == 4 && queue.Records() == 0 && queue.Bytes() == 0);
+    Check(r, "queue-budget.capacity-recovers-after-discard", queue.CanAccept(10));
+    queue.Reset();
+    Check(r, "queue-budget.reset-starts-new-collector-epoch",
+          queue.Lost() == 0 && queue.CanAccept(10));
 }
 
 void CheckEngineClock(TestResult& r) {
@@ -12078,6 +12105,7 @@ static const unsigned char kClientHello[] = {
     CheckEngineStore(r);
     CheckEngineOperations(r);
     CheckEngineIdentity(r);
+    CheckBoundedQueueBudget(r);
     CheckEngineClock(r);
     CheckCollectorLossModel(r);
     CheckQpcClockMapper(r);
