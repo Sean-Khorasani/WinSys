@@ -147,30 +147,36 @@ try {
     # to every Windows build's local-interface routing path.
     $testAddress = '127.0.0.1'
     $port = ([uri]$base).Port
-    $listener = [System.Net.Sockets.TcpListener]::new(
-        [System.Net.IPAddress]::Parse($testAddress), 0)
-    $listener.Start()
-    $sourcePort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
-    $listener.Stop()
-    $listener = $null
-
     $curlPath = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
     if (-not $curlPath) { throw 'Windows curl.exe is required for the local ETW fixture.' }
-    $clientProcess = Start-Process -FilePath $curlPath `
-        -ArgumentList @('--silent', '--show-error', '--max-time', '10',
-            '--local-port', [string]$sourcePort, '--output', 'NUL', ($base + '/')) `
-        -WindowStyle Hidden -PassThru
-    $clientPid = $clientProcess.Id
-    if (-not $clientProcess.WaitForExit(15000)) {
-        Stop-Process -Id $clientPid -Force
-        throw 'The disposable local curl client did not exit in time.'
+    # Use separate short-lived processes so PID reuse and process-exit ordering
+    # are exercised alongside a burst of independently closed TCP tuples.
+    $fixtures = [System.Collections.Generic.List[object]]::new()
+    for ($fixtureIndex = 0; $fixtureIndex -lt 12; $fixtureIndex++) {
+        $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Parse($testAddress), 0)
+        $listener.Start()
+        $sourcePort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $listener.Stop()
+        $listener = $null
+        $clientProcess = Start-Process -FilePath $curlPath `
+            -ArgumentList @('--silent', '--show-error', '--max-time', '10',
+                '--local-port', [string]$sourcePort, '--output', 'NUL', ($base + '/')) `
+            -WindowStyle Hidden -PassThru
+        $clientPid = $clientProcess.Id
+        if (-not $clientProcess.WaitForExit(15000)) {
+            Stop-Process -Id $clientPid -Force
+            throw "Disposable local curl fixture $fixtureIndex did not exit in time."
+        }
+        if ($clientProcess.ExitCode -ne 0) {
+            throw "Disposable local curl fixture $fixtureIndex failed (exit=$($clientProcess.ExitCode))."
+        }
+        $fixtures.Add([pscustomobject]@{ pid = [uint32]$clientPid; sourcePort = $sourcePort })
     }
-    if ($clientProcess.ExitCode -ne 0) {
-        throw "The disposable local curl client failed before closing its flow (exit=$($clientProcess.ExitCode))."
+    $fixtureEvents = @{}
+    foreach ($fixture in $fixtures) {
+        $fixtureEvents[[string]$fixture.pid] = @{ connect = $null; disconnect = $null; exit = $null }
     }
-    $connect = $null
-    $disconnect = $null
-    $processExit = $null
     $testPortEvents = [System.Collections.Generic.List[string]]::new()
     $eventStopResult = Invoke-EngineOperation '/api/collector/control' @{ action = 'events-stop' }
     if ($eventStopResult.events.running -ne $false -or
@@ -221,50 +227,48 @@ try {
         if ($page.code) { throw "Lifecycle history query failed: $($page.code)" }
         foreach ($event in $page.items) {
             $pidValue = [uint32]$event.process.pid
-            if ($testPortEvents.Count -lt 20 -and (Has-TestPort $event $sourcePort)) {
+            if ($testPortEvents.Count -lt 60 -and
+                @($fixtures | Where-Object { Has-TestPort $event $_.sourcePort }).Count -gt 0) {
                 $testPortEvents.Add("$($event.kind):$pidValue")
             }
-            if ($pidValue -eq $clientPid -and $event.kind -eq 'process_exit') {
-                $processExit = $event
-            }
-            if (-not (Has-TestPort $event $sourcePort) -or $pidValue -ne $clientPid) {
+            $pidKey = [string]$pidValue
+            if (-not $fixtureEvents.ContainsKey($pidKey)) { continue }
+            if ($event.kind -eq 'process_exit') {
+                $fixtureEvents[$pidKey].exit = $event
                 continue
             }
-            if ($event.kind -eq 'tcp_connect') { $connect = $event }
-            if ($event.kind -eq 'tcp_disconnect') { $disconnect = $event }
+            $fixture = $fixtures | Where-Object { $_.pid -eq $pidValue } | Select-Object -First 1
+            if (-not (Has-TestPort $event $fixture.sourcePort)) {
+                continue
+            }
+            if ($event.kind -eq 'tcp_connect') { $fixtureEvents[$pidKey].connect = $event }
+            if ($event.kind -eq 'tcp_disconnect') { $fixtureEvents[$pidKey].disconnect = $event }
         }
         $next = [string]$page.nextCursor
         if (@($page.items).Count -eq 0 -or -not $next -or $next -eq $cursor) { break }
         $cursor = $next
     }
-    if (-not $connect) {
-        throw "No TCP connect record for the exited local client was retained (pid=$clientPid sourcePort=$sourcePort observed=$($testPortEvents -join ','))."
-    }
-    if (-not $disconnect) {
-        throw "No TCP disconnect record for the exited local client was retained (pid=$clientPid sourcePort=$sourcePort observed=$($testPortEvents -join ','))."
-    }
-    if (-not $processExit) {
-        throw "No process-exit record for the disposable client was retained (pid=$clientPid port=$port)."
-    }
-    if ($connect.derived.kind -ne 'connection_established' -or
-        $disconnect.derived.kind -ne 'connection_closed') {
-        throw 'The raw TCP lifecycle was not normalized into established/closed history.'
-    }
-    if ($processExit.derived.kind -ne 'process_exited') {
-        throw 'The raw process-exit record was not normalized into process history.'
-    }
-    foreach ($event in @($connect, $disconnect, $processExit)) {
-        $mappingGeneration = [uint64]$event.clockMappingGeneration
-        if ($mappingGeneration -lt 1 -or
-            $event.timebaseId -notlike "*:qpc-$mappingGeneration" -or
-            $event.clockMappingRecovered -isnot [bool]) {
-            throw "ETW record $($event.eventId) lacks explicit clock-generation evidence."
+    $expectedEventIds = [System.Collections.Generic.List[string]]::new()
+    foreach ($fixture in $fixtures) {
+        $records = $fixtureEvents[[string]$fixture.pid]
+        if (-not $records.connect -or -not $records.disconnect -or -not $records.exit) {
+            throw "Incomplete short-flow burst evidence for pid=$($fixture.pid) port=$($fixture.sourcePort): connect=$([bool]$records.connect) disconnect=$([bool]$records.disconnect) exit=$([bool]$records.exit); observed=$($testPortEvents -join ',')"
+        }
+        if ($records.connect.derived.kind -ne 'connection_established' -or
+            $records.disconnect.derived.kind -ne 'connection_closed' -or
+            $records.exit.derived.kind -ne 'process_exited') {
+            throw "Raw lifecycle events for pid=$($fixture.pid) were not normalized."
+        }
+        foreach ($event in @($records.connect, $records.disconnect, $records.exit)) {
+            $mappingGeneration = [uint64]$event.clockMappingGeneration
+            if ($mappingGeneration -lt 1 -or
+                $event.timebaseId -notlike "*:qpc-$mappingGeneration" -or
+                $event.clockMappingRecovered -isnot [bool]) {
+                throw "ETW record $($event.eventId) lacks explicit clock-generation evidence."
+            }
+            $expectedEventIds.Add([string]$event.derived.eventId)
         }
     }
-    $expectedEventIds = @(
-        [string]$connect.derived.eventId,
-        [string]$disconnect.derived.eventId,
-        [string]$processExit.derived.eventId)
     $sharedHistory = $false
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         $sharedEvents = Get-Api '/api/engine/events?limit=500'
@@ -280,7 +284,8 @@ try {
         $missingEventIds = @($expectedEventIds | Where-Object { $retainedIds -notcontains $_ })
         throw "Normalized lifecycle events did not reach shared engine history; missing=$($missingEventIds -join ',') retainedCount=$($retainedIds.Count)."
     }
-    $process = $connect.process
+    $firstConnect = $fixtureEvents[[string]$fixtures[0].pid].connect
+    $process = $firstConnect.process
     $hasIdentityEvidence = $process.imagePath -or $process.observedImageName -or
         $process.identityReason
     if (-not $hasIdentityEvidence) {
@@ -304,7 +309,7 @@ try {
         }
     }
     $collectorStartRequested = $false
-    Write-Output "lifecycle-exit-test=PASS pid=$clientPid rawConnect=true rawDisconnect=true rawProcessExit=true normalizedSharedHistory=true liveAndFinalLossCounters=true offlineLastKnownCounters=true queueLost=$($offlineLossStatus.queueLost) eventsLost=$($offlineLossStatus.eventsLost) buffersLost=$($offlineLossStatus.buffersLost) identity=$identity sourcePort=$sourcePort destinationPort=$port"
+    Write-Output "lifecycle-exit-test=PASS shortFlows=$($fixtures.Count) rawConnect=true rawDisconnect=true rawProcessExit=true normalizedSharedHistory=true liveAndFinalLossCounters=true offlineLastKnownCounters=true queueLost=$($offlineLossStatus.queueLost) eventsLost=$($offlineLossStatus.eventsLost) buffersLost=$($offlineLossStatus.buffersLost) identity=$identity destinationPort=$port"
 }
 catch {
     $failure = $_.Exception.Message
