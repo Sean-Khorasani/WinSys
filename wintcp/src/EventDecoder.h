@@ -30,6 +30,7 @@ struct DecodedLifecycleRecord {
     NetworkEndpoint destination;
     std::uint64_t correlationKey = 0;
     bool correlationKeyKnown = false;
+    std::string observedImageName;  // Kernel process-event text; may be only a basename.
     std::uint32_t bytes = 0;
     bool bytesKnown = false;
 };
@@ -59,9 +60,12 @@ struct TraceObservation {
     USHORT headerFlags = 0;
     DecodedLifecycleRecord decoded;
     NetworkProcessIdentity process;
+    std::string observedImageName;  // Unverified event source label; never an action identity.
     std::string identityReason = "attribution_pending";
     std::uint64_t occurredFileTime = 0;
     std::string timeReason = "qpc_mapping_pending";
+    std::uint64_t clockMappingGeneration = 0;
+    bool clockMappingRecovered = false;
     LifecycleAnnotation lifecycle;
 };
 
@@ -71,6 +75,9 @@ class EventPropertyReader {
 public:
     virtual ~EventPropertyReader() = default;
     virtual bool Read(const wchar_t* name, std::vector<unsigned char>* bytes) = 0;
+    // String properties retain their TDH wire encoding so the decoder never
+    // guesses from payload bytes whether a field is ANSI or UTF-16.
+    virtual bool ReadText(const wchar_t*, std::vector<unsigned char>*, bool*) { return false; }
 };
 
 LifecycleType ClassifyLifecycleEvent(const EVENT_HEADER& header);
