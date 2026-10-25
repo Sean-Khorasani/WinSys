@@ -3146,6 +3146,11 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
             response.body = "{\"code\":\"method_not_allowed\"}";
             return response;
         }
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
         if (!AuthenticateMutation(context, request, &response)) {
             response.body = ErrorJson("mutation authorization failed");
             return response;
@@ -3562,6 +3567,183 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
                  std::string::npos) response.status = 400;
         else if (response.body.find("\"code\":") != std::string::npos)
             response.status = 503;
+        else response.status = 202;
+        return response;
+    }
+    const std::string archiveCollection = "/api/engine/incidents/archives";
+    const std::string archivePrefix = archiveCollection + "/";
+    if (path == archiveCollection || path.rfind(archivePrefix, 0) == 0) {
+        if (request.method != "GET" && request.method != "HEAD") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        const auto token = request.headers.find("x-wintcp-token");
+        if (token == request.headers.end() ||
+            !SecureEquals(token->second, context.token)) {
+            response.status = 403;
+            response.body = "{\"code\":\"session_token_required\"}";
+            return response;
+        }
+        std::string action;
+        std::string archiveId;
+        std::uint64_t offset = 0;
+        unsigned limit = 20;
+        if (path == archiveCollection) {
+            action = "archives";
+            if (query != std::string::npos) {
+                std::map<std::string, std::string> parameters;
+                std::uint64_t parsed = 0;
+                if (!ParseForm(request.target.substr(query + 1), &parameters) ||
+                    parameters.size() != 1 || !parameters.count("limit") ||
+                    !ParseUint64Strict(parameters["limit"], &parsed) ||
+                    parsed == 0 || parsed > 100) {
+                    response.status = 400;
+                    response.body = "{\"code\":\"bad_query\"}";
+                    return response;
+                }
+                limit = static_cast<unsigned>(parsed);
+            }
+        } else {
+            action = "archiveRead";
+            archiveId = path.substr(archivePrefix.size());
+            if (archiveId.size() != 32 ||
+                archiveId.find_first_not_of("0123456789abcdef") != std::string::npos) {
+                response.status = 404;
+                response.body = "{\"code\":\"incident_archive_not_found\"}";
+                return response;
+            }
+            std::map<std::string, std::string> parameters;
+            std::uint64_t parsedLimit = 0;
+            if (query == std::string::npos ||
+                !ParseForm(request.target.substr(query + 1), &parameters) ||
+                parameters.size() != 2 || !parameters.count("offset") ||
+                !parameters.count("limit") ||
+                !ParseUint64Strict(parameters["offset"], &offset) ||
+                offset > 1000000 ||
+                !ParseUint64Strict(parameters["limit"], &parsedLimit) ||
+                parsedLimit == 0 || parsedLimit > 100) {
+                response.status = 400;
+                response.body = "{\"code\":\"bad_query\"}";
+                return response;
+            }
+            limit = static_cast<unsigned>(parsedLimit);
+        }
+        if (!EngineIncidentRequest(action, "", archiveId, "", offset, limit,
+                                   &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable\"}";
+        } else if (response.body.find("\"code\":\"incident_archive_not_found_or_invalid\"") !=
+                   std::string::npos ||
+                   response.body.find("\"code\":\"incident_archive_not_found\"") !=
+                   std::string::npos) response.status = 404;
+        else if (response.body.find("\"code\":\"incident_archive_integrity_failed\"") !=
+                 std::string::npos) response.status = 422;
+        else if (response.body.find("\"code\":") != std::string::npos)
+            response.status = 400;
+        else response.status = 200;
+        return response;
+    }
+    if (path == "/api/engine/incidents") {
+        const auto token = request.headers.find("x-wintcp-token");
+        if (request.method == "GET" || request.method == "HEAD") {
+            if (token == request.headers.end() ||
+                !SecureEquals(token->second, context.token)) {
+                response.status = 403;
+                response.body = "{\"code\":\"session_token_required\"}";
+                return response;
+            }
+            std::string action = "status";
+            std::uint64_t offset = 0;
+            unsigned limit = 0;
+            if (query != std::string::npos) {
+                std::map<std::string, std::string> parameters;
+                if (!ParseForm(request.target.substr(query + 1), &parameters) ||
+                    parameters.size() != 2 || !parameters.count("offset") ||
+                    !parameters.count("limit") ||
+                    !ParseUint64Strict(parameters["offset"], &offset) ||
+                    offset > 1000000) {
+                    response.status = 400;
+                    response.body = "{\"code\":\"bad_query\"}";
+                    return response;
+                }
+                std::uint64_t parsedLimit = 0;
+                if (!ParseUint64Strict(parameters["limit"], &parsedLimit) ||
+                    parsedLimit == 0 || parsedLimit > 100) {
+                    response.status = 400;
+                    response.body = "{\"code\":\"bad_limit\"}";
+                    return response;
+                }
+                action = "read";
+                limit = static_cast<unsigned>(parsedLimit);
+            }
+            if (!EngineIncidentRequest(action, "", "", "", offset, limit,
+                                       &response.body)) {
+                response.status = 503;
+                response.body = "{\"code\":\"engine_unavailable\"}";
+            } else if (response.body.find("\"code\":\"incident_not_found\"") !=
+                       std::string::npos) response.status = 404;
+            else if (response.body.find("\"code\":\"invalid_incident_page\"") !=
+                     std::string::npos ||
+                     response.body.find("\"code\":\"incident_record_too_large\"") !=
+                     std::string::npos) response.status = 400;
+            else response.status = 200;
+            return response;
+        }
+        if (request.method != "POST") {
+            response.status = 405;
+            response.body = "{\"code\":\"method_not_allowed\"}";
+            return response;
+        }
+        if (query != std::string::npos) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_query\"}";
+            return response;
+        }
+        if (!AuthenticateMutation(context, request, &response)) {
+            response.body = ErrorJson("mutation authorization failed");
+            return response;
+        }
+        if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+            response.status = 415;
+            response.body = "{\"code\":\"form_required\"}";
+            return response;
+        }
+        std::map<std::string, std::string> fields;
+        if (!ParseForm(request.body, &fields) || !fields.count("action") ||
+            !fields.count("requestId") || fields["requestId"].empty() ||
+            fields["requestId"].size() > 64 ||
+            (fields["action"] == "trigger"
+                ? (fields.size() != 4 || !fields.count("triggerId") ||
+                   !fields.count("reason"))
+                : ((fields["action"] != "arm" && fields["action"] != "disarm" &&
+                    fields["action"] != "discard" && fields["action"] != "save") ||
+                   fields.size() != 2))) {
+            response.status = 400;
+            response.body = "{\"code\":\"bad_request\"}";
+            return response;
+        }
+        const std::string triggerId = fields.count("triggerId")
+            ? fields["triggerId"] : "";
+        const std::string reason = fields.count("reason") ? fields["reason"] : "";
+        if (!EngineIncidentRequest(fields["action"], fields["requestId"],
+                triggerId, reason, 0, 0, &response.body)) {
+            response.status = 503;
+            response.body = "{\"code\":\"engine_unavailable_or_invalid_request\"}";
+        } else if (response.body.find("\"code\":\"request_id_reused\"") !=
+                   std::string::npos) response.status = 409;
+        else if (response.body.find("\"code\":\"incident_exists\"") !=
+                     std::string::npos ||
+                 response.body.find("\"code\":\"incident_recorder_not_armed\"") !=
+                     std::string::npos ||
+                 response.body.find("\"code\":\"incident_trigger_refused\"") !=
+                     std::string::npos ||
+                 response.body.find("\"code\":\"incident_active\"") !=
+                     std::string::npos) response.status = 409;
+        else if (response.body.find("\"archiveError\":\"") != std::string::npos)
+            response.status = 507;
+        else if (response.body.find("\"code\":") != std::string::npos)
+            response.status = 400;
         else response.status = 202;
         return response;
     }
