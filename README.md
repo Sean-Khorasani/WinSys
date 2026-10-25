@@ -7,7 +7,7 @@
 [![Win32](https://img.shields.io/badge/API-Win32-informational)](https://learn.microsoft.com/windows/win32/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-WinTCP reads Windows networking tables directly and associates endpoints with process details. It also provides searchable tables, traffic and TCP health metrics, GeoIP enrichment, connection monitoring, and guarded actions such as closing a connection or blocking a peer.
+WinTCP reads Windows networking tables directly and associates endpoints with process details. It also provides searchable tables, traffic and TCP health metrics, GeoIP enrichment, persistent monitoring recipes, local incident recording, and guarded network actions.
 
 ## Download
 
@@ -18,6 +18,11 @@ Download the [Windows x64 release](https://github.com/Sean-Khorasani/WinSys/rele
 - Start the optional browser dashboard with `webui-service.bat start`. The command prints its loopback URL. Use `webui-service.bat status` and `webui-service.bat stop` to manage it.
 
 The CLI and GUI are separate applications; neither launches or depends on the other. The Web UI additionally needs the adjacent `webui` asset folder.
+The Automations page can start and manage the optional per-user engine. Enabled
+Passive recipes and their durable inbox continue while the dashboard is closed.
+ETW lifecycle capture and temporary Active restrictions use a separate optional
+elevated collector; neither starts automatically, and Active restrictions
+require explicit scope review and authorization.
 
 ## Screenshots
 
@@ -43,7 +48,9 @@ The map can switch between a globe and a 2D projection. It groups remote connect
 - **Traffic and health:** Per-process byte totals, connection age, per-socket rate, and TCP metrics such as RTT and retransmits where Windows exposes them. ETW can add UDP totals when run elevated.
 - **Process context:** CPU, memory, I/O, parent process, integrity, and signature information, with table, tree, and treemap views in the Web UI.
 - **Enrichment:** Optional reverse DNS uses the Windows resolver; country and autonomous system results come from a local GeoIP database.
-- **Monitoring and response:** CLI connection monitors and change feeds, saved views, on-demand Web UI CLI playbooks, firewall-rule review, and explicit confirmation for sensitive actions. Web UI playbooks are not active monitors.
+- **Monitoring and response:** Persistent exact-application Passive recipes, cooldowns and weekly schedules, a durable local notification inbox, and optional event-triggered temporary restrictions after explicit review. Snapshot observations are not proof of connection attempts; Active event collection and blocking require the optional elevated collector.
+- **Incident investigation:** An opt-in local flight recorder saves bounded event and snapshot checkpoints into integrity-checked archives. Archives support private export, untrusted local import, and offline read-only replay; replay does not contact external services or perform actions.
+- **Browser notifications:** Best-effort desktop toasts for new inbox entries while the dashboard is open and notification permission is granted. The local engine inbox remains the durable record.
 - **Portable runtime:** No installer, third-party runtime, or network service is required. The Web UI binds to loopback and uses local assets.
 
 ## Quick examples
@@ -72,6 +79,9 @@ WinTCP supports Windows 10 and 11 on x64. It has no runtime dependencies. The co
 |---|---|
 | Per-socket TCP counters and health metrics | Windows 10 version 1703 or later; available without elevation when supported by the socket. |
 | ETW traffic counters, including UDP | Administrator rights. Without ETW, WinTCP uses the available TCP per-socket counters. |
+| Persistent Passive recipes and incident recording | The optional same-user engine; no elevation required. The Web UI may be closed after the engine is running. |
+| ETW lifecycle tracking and Active recipe restrictions | Explicitly started elevated collector plus an explicit user-approved scope; administrator rights required. No automatic elevation or automatic re-arming after restart. |
+| Browser desktop notifications | Browser notification permission and an open Web UI; delivery is best-effort, while the engine inbox is durable. |
 | Close a connection | Administrator rights; Windows supports this operation for IPv4 only. |
 | Add or remove firewall rules | Administrator rights and explicit confirmation. |
 | Packet capture | Administrator rights and the Windows packet-capture components. |
@@ -116,6 +126,17 @@ build.bat -Test
 cmake -S . -B build-cmake -G "Visual Studio 17 2022" -A x64
 cmake --build build-cmake --config Release
 ```
+
+To assemble the curated Windows x64 release ZIP after a successful `build.bat`
+run, use:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\package-release.ps1
+```
+
+The script verifies the CLI, GUI, and application manifest versions, checks the
+archive contents, excludes machine-specific and development files, and writes
+the ZIP plus a SHA-256 sidecar under `release/`.
 
 ## Troubleshooting
 
