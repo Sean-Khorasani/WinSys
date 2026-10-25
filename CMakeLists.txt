@@ -92,6 +92,8 @@ wintcp/src/TrayIcon.cpp
     wintcp/src/RestrictionLease.h
     wintcp/src/CollectorRuntime.cpp
     wintcp/src/CollectorRuntime.h
+    wintcp/src/CollectorLossModel.cpp
+    wintcp/src/CollectorLossModel.h
     wintcp/src/EventDecoder.cpp
     wintcp/src/EventDecoder.h
     wintcp/src/ConnectionEventCollector.cpp
