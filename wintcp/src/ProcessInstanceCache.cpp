@@ -86,4 +86,18 @@ bool ProcessInstanceCache::Find(std::uint32_t pid, std::uint64_t eventQpc,
     *identity = match->identity;
     return true;
 }
+
+void ProcessInstanceCache::EndAt(std::uint32_t pid, std::uint64_t eventQpc) {
+    if (pid == 0 || eventQpc == 0) return;
+    auto it = records_.lower_bound({pid, 0});
+    while (it != records_.end() && it->first.first == pid) {
+        if (it->second.first >= eventQpc) {
+            it = records_.erase(it);
+        } else {
+            if (it->second.last >= eventQpc)
+                it->second.last = eventQpc - 1;
+            ++it;
+        }
+    }
+}
 }  // namespace wintcp
