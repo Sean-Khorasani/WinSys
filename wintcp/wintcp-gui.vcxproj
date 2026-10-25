@@ -102,6 +102,7 @@
     <ClCompile Include="src\EngineStore.cpp" />
     <ClCompile Include="src\EngineOperations.cpp" />
     <ClCompile Include="src\EngineClock.cpp" />
+    <ClCompile Include="src\CollectorLossModel.cpp" />
     <ClCompile Include="src\RecipeModel.cpp" />
     <ClCompile Include="src\RestrictionModel.cpp" />
     <ClCompile Include="src\RestrictionLease.cpp" />
