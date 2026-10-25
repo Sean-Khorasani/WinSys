@@ -3,9 +3,8 @@
 #pragma once
 #include "EventDecoder.h"
 #include "ProcessInstanceCache.h"
-#include "BoundedQueueBudget.h"
+#include "BoundedEventQueue.h"
 #include <atomic>
-#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <memory>
@@ -134,10 +133,7 @@ private:
     std::string epoch_;
     std::unique_ptr<LifecycleFlowModel> normalizer_;
     std::atomic<std::uint64_t> published_{0}, lateRecords_{0}, flowEvicted_{0}, reorderFlushes_{0};
-    std::mutex queueMutex_;
-    std::condition_variable ready_;
-    std::deque<RawRecord> queue_;
-    BoundedQueueBudget queueBudget_{16384, 8 * 1024 * 1024};
+    BoundedEventQueue<RawRecord> queue_{16384, 8 * 1024 * 1024};
     mutable std::mutex historyMutex_;
     std::deque<TraceObservation> history_;
     std::size_t historyBytes_ = 0;
