@@ -739,10 +739,11 @@ live cursors expire when the engine restarts. The engine also writes bounded
 NDJSON event segments under `%LOCALAPPDATA%\WinTCP\Engine` (up to 64 MiB in
 two rotating segments). These contain sensitive endpoint/process observations;
 the current `events` command still reads the live ring, not old segments.
-The engine now evaluates saved Passive recipes against sampled TCP endpoint
-appearances and retains a bounded notification inbox. It does not yet deliver
-desktop alerts or apply temporary restrictions. The Web UI can start/stop the
-engine and manage these recipes without administrator rights.
+The engine evaluates saved Passive recipes against sampled TCP endpoint
+appearances and retains a bounded notification inbox. The Web UI can start or
+stop it, manage recipes, and review/acknowledge notifications without
+administrator rights. Inbox notifications are retained in the engine; this
+does not imply a Windows desktop notification.
 
 On first start, the engine creates
 `%LOCALAPPDATA%\WinTCP\Engine\config.txt` with versioned defaults. Its
@@ -756,11 +757,18 @@ Snapshot events mean a row was observed or disappeared during a sample. They
 do not prove a connection attempt, failure, denial, or UDP handshake. The
 engine orders events by monotonic time and tags them with a UTC mapping ID.
 A wall-clock jump creates a new mapping and a `clock_adjusted` coverage-gap
-record; UTC display times are never used to reorder an existing flow.
+record; UTC display times are never used to reorder an existing flow. A
+sampling pause longer than both five seconds and five configured intervals
+creates a `sampling_gap` record and resets the snapshot comparison baseline.
+Endpoint transitions during that interval are unknown; the first post-gap
+snapshot is not treated as a new connection or listener alert.
 The Web UI's token-protected `/api/engine` and `/api/engine/events` endpoints read
-the same process. Event-based collection, incident recording, Active recipe
-enforcement, and comparison sessions remain unimplemented. Manual temporary
-restrictions use the separate explicitly approved collector workflow below.
+the same process. Optional lifecycle collection and temporary restrictions
+require the explicitly started elevated collector described below. Active
+recipe automation is available through the Web UI's reviewed arm/disarm
+workflow for supported outbound-activity recipes; snapshot-only observations
+never authorize a block. Incident recording and comparison sessions remain
+outside this implementation scope.
 
 ## `collector` (experimental helper lifecycle)
 
@@ -774,21 +782,41 @@ uses a local SID/session-restricted pipe and releases its dynamic WFP session
 on exit or when the paired engine's heartbeat is lost. Starting it alone does
 not install filters or enable Active recipes. A different administrator account cannot
 pair with the original user's engine.
+The start command reports ready only after the helper confirms the current
+engine epoch and heartbeat; WFP capability is reported separately, so a
+firewall-degraded helper may still be used for lifecycle tracing.
 Normal stop first releases its leases and gives the engine up to five seconds
 to persist the final change cursor. It still stops if the audit store is
 unavailable, reporting `collector_stopped_audit_incomplete` rather than
-pretending every final outcome was retained.
+pretending every final outcome was retained. Engine operation capacity for
+stop/release controls is reserved separately from recipe/configuration work
+and prioritized over queued previews/reactive actions; a saturated lane is
+reported as queue-full rather than accepting a lost command.
 
 `collector events-start` explicitly enables the experimental lifecycle trace
 inside the running helper; `collector events-stop` stops only its owned trace.
-The trace uses a unique system-logger GUID/name and never stops another tool's
-session. `collector status` includes decoded, queue-loss, schema-rejection,
-ETW-loss, and retained-history counters. Capture callbacks copy bounded raw
+On a clean stop, WinTCP stops the ETW session, consumes the final trace buffers,
+drains its bounded decode queue, and flushes pending normalized flows before
+reporting completion. Loss counters remain visible when bounded queues or ETW
+buffers overflow.
+The trace name and owner GUID are scoped to the helper's Windows SID and logon
+session. On start, WinTCP queries only that exact name and recovers a leftover
+session only when its owner GUID matches; a same-name session with a different
+GUID is left running and reported as a conflict. Normal stop uses the exact
+session created by this helper. `collector status` includes decoded, queue-loss, schema-rejection,
+ETW-loss, retained-history, clock-mapping generation, and recovery counters.
+After a QPC-to-UTC discontinuity, the new generation remains unmapped until two
+consistent reliable clock samples confirm it; records in that interval retain
+raw QPC evidence but are not time-attributed. Capture callbacks copy bounded raw
 records; a separate worker decodes named TDH properties. Starting the helper
-alone does not enable tracing. Process attribution and normalized flow history
-are not complete yet, so normalized lifecycle capabilities remain unavailable
-and this capture cannot authorize Active recipes. Raw decoded evidence is now
-retained by the engine and can be inspected in the Web UI Event history tab.
+alone does not enable tracing. Process-start image-name strings are retained
+as kernel-event evidence and may annotate matching PID/QPC intervals after
+the process exits. The string may be only a basename; it is not presented as
+a verified executable path and carries no verified creation time. It is never
+sufficient for an Active action; only a live-handle-verified process instance
+can authorize one. Missing or ambiguous lifecycle evidence remains
+explicitly unknown. Raw decoded and normalized flow evidence is retained by
+the engine and can be inspected in the Web UI Event history tab.
 
 `restrict preview --app "C:\Apps\Example.exe" --minutes 15` validates and shows
 the exact executable, user SID, scope, and a one-use confirmation token. Copy
@@ -799,10 +827,12 @@ collector's active leases and filter IDs. `restrict release ID --yes` removes
 one lease; `restrict release-all --yes` ends every temporary restriction owned
 by this collector. The helper's dynamic WFP session also removes its filters
 if the helper exits or crashes. These commands do not alter permanent Windows
-Firewall rules. All current and future matching app instances for this user
-may be affected; existing flows may continue. A manual preview is not a
-confirmed connection-attempt observation, and Active recipe automation remains
-unimplemented. No elevated WFP operation has yet been integration-tested here.
+Firewall rules. Matching app instances for this user may be affected; existing
+flows may continue. A manual preview is not a confirmed connection-attempt
+observation. The Web UI also supports explicitly reviewed, expiring recipe
+grants for eligible normalized outbound events; grants are revision-bound,
+budgeted, and are not restored after engine or broker restart. An active action
+is reported only after the broker verifies the temporary filter installation.
 
 ## `recipe` (Passive snapshot monitors)
 
