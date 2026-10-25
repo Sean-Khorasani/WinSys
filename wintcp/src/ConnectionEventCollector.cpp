@@ -339,11 +339,7 @@ bool ConnectionEventCollector::Start(std::string* error) {
     }
     nextSequence_ = 0; decoded_ = 0; rejected_ = 0;
     eventsLost_ = 0; buffersLost_ = 0; historyEvicted_ = 0;
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        queue_.clear();
-        queueBudget_.Reset();
-    }
+    queue_.Reset();
     traceResult_ = ERROR_SUCCESS;
     published_ = 0; lateRecords_ = 0; flowEvicted_ = 0; reorderFlushes_ = 0;
     stopping_ = false;
@@ -399,7 +395,7 @@ bool ConnectionEventCollector::Stop(std::string* error) {
         trace_ = INVALID_PROCESSTRACE_HANDLE;
     }
     stopping_ = true;
-    ready_.notify_all();
+    queue_.WakeAll();
     if (decoderThread_ != nullptr) {
         if (::WaitForSingleObject(decoderThread_, 5000) != WAIT_OBJECT_0) {
             if (error) *error = "trace_worker_stop_timeout";
@@ -408,11 +404,7 @@ bool ConnectionEventCollector::Stop(std::string* error) {
         ::CloseHandle(decoderThread_);
         decoderThread_ = nullptr;
     }
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        queueBudget_.DropPending();
-        queue_.clear();
-    }
+    queue_.DropPending();
     running_ = false;
     if (error) error->clear();
     return true;
@@ -438,7 +430,7 @@ void ConnectionEventCollector::OnEvent(EVENT_RECORD* record) noexcept {
     try {
         const std::uint64_t sequence = ++nextSequence_;
         if (record->UserData == nullptr || record->UserDataLength == 0 ||
-            record->UserDataLength > 4096) { queueBudget_.RecordDrop(); return; }
+            record->UserDataLength > 4096) { queue_.RecordDrop(); return; }
         RawRecord copied;
         copied.header = record->EventHeader;
         copied.context = record->BufferContext;
@@ -452,16 +444,8 @@ void ConnectionEventCollector::OnEvent(EVENT_RECORD* record) noexcept {
         const auto* bytes = static_cast<const unsigned char*>(record->UserData);
         copied.payload.assign(bytes, bytes + record->UserDataLength);
         const std::size_t size = sizeof(RawRecord) + copied.payload.size();
-        {
-            std::lock_guard<std::mutex> lock(queueMutex_);
-            if (!queueBudget_.CanAccept(size)) {
-                queueBudget_.RecordDrop(); return;
-            }
-            queue_.push_back(std::move(copied));
-            queueBudget_.Accepted(size);
-        }
-        ready_.notify_one();
-    } catch (...) { queueBudget_.RecordDrop(); }
+        (void)queue_.TryPush(std::move(copied), size);
+    } catch (...) { queue_.RecordDrop(); }
 }
 
 DWORD WINAPI ConnectionEventCollector::TraceThread(void* context) {
@@ -472,7 +456,7 @@ DWORD WINAPI ConnectionEventCollector::TraceThread(void* context) {
         ? ERROR_SUCCESS : result;
     owner->running_ = false;
     owner->stopping_ = true;
-    owner->ready_.notify_all();
+    owner->queue_.WakeAll();
     return 0;
 }
 
@@ -483,7 +467,7 @@ DWORD WINAPI ConnectionEventCollector::DecodeThread(void* context) {
         owner->traceResult_ = ERROR_UNHANDLED_EXCEPTION;
         owner->running_ = false;
         owner->stopping_ = true;
-        owner->ready_.notify_all();
+        owner->queue_.WakeAll();
     }
     return 0;
 }
@@ -492,17 +476,12 @@ void ConnectionEventCollector::DecodeLoop() {
     for (;;) {
         RawRecord raw;
         bool haveRecord = false, finish = false;
-        {
-            std::unique_lock<std::mutex> lock(queueMutex_);
-            ready_.wait_for(lock, std::chrono::milliseconds(50),
-                [this] { return stopping_.load() || !queue_.empty(); });
-            if (!queue_.empty()) {
-                const std::size_t size = sizeof(RawRecord) + queue_.front().payload.size();
-                raw = std::move(queue_.front());
-                queue_.pop_front();
-                queueBudget_.Removed(size);
-                haveRecord = true;
-            } else finish = stopping_.load();
+        haveRecord = queue_.TryPop(&raw);
+        if (!haveRecord) {
+            queue_.WaitForDataFor(std::chrono::milliseconds(50),
+                [this] { return stopping_.load(); });
+            haveRecord = queue_.TryPop(&raw);
+            finish = !haveRecord && stopping_.load();
         }
         LARGE_INTEGER clock = {};
         (void)::QueryPerformanceCounter(&clock);
@@ -560,7 +539,7 @@ void ConnectionEventCollector::Publish(std::vector<TraceObservation> observation
 }
 
 ConnectionCollectorStatus ConnectionEventCollector::Status() const {
-    return {running_.load(), decoded_.load(), queueBudget_.Lost(), rejected_.load(),
+    return {running_.load(), decoded_.load(), queue_.Lost(), rejected_.load(),
         eventsLost_.load(), buffersLost_.load(), historyEvicted_.load(),
         qpcFrequency_.load(), traceResult_.load(), attributed_.load(), clockStable_.load(),
         clockMappingGeneration_.load(), clockRecoveries_.load(),
