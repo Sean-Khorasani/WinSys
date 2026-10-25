@@ -41,6 +41,7 @@
 #include "EngineOperations.h"
 #include "CollectorRuntime.h"
 #include "RecipeModel.h"
+#include "RecipeScheduleWindows.h"
 #include "Snapshot.h"
 #include "SnapshotEvents.h"
 #include "Utils.h"
@@ -492,6 +493,74 @@ ClockSample SampleClock() {
     return sample;
 }
 
+bool ParseEventUtcMillis(const std::string& text, std::uint64_t* utcMs) {
+    if (utcMs == nullptr || text.size() < 20 || text[4] != '-' ||
+        text[7] != '-' || text[10] != 'T' || text[13] != ':' ||
+        text[16] != ':') return false;
+    const auto digits = [&text](std::size_t at, std::size_t count,
+                                unsigned* value) {
+        unsigned parsed = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const char c = text[at + i];
+            if (c < '0' || c > '9') return false;
+            parsed = parsed * 10 + static_cast<unsigned>(c - '0');
+        }
+        *value = parsed;
+        return true;
+    };
+    SYSTEMTIME value = {};
+    unsigned year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (!digits(0, 4, &year) || !digits(5, 2, &month) ||
+        !digits(8, 2, &day) || !digits(11, 2, &hour) ||
+        !digits(14, 2, &minute) || !digits(17, 2, &second)) return false;
+    value.wYear = static_cast<WORD>(year);
+    value.wMonth = static_cast<WORD>(month);
+    value.wDay = static_cast<WORD>(day);
+    value.wHour = static_cast<WORD>(hour);
+    value.wMinute = static_cast<WORD>(minute);
+    value.wSecond = static_cast<WORD>(second);
+    std::size_t at = 19;
+    if (at < text.size() && text[at] == '.') {
+        ++at;
+        unsigned fraction = 0, scale = 100;
+        std::size_t count = 0;
+        while (at < text.size() && text[at] >= '0' && text[at] <= '9') {
+            if (count < 3) {
+                fraction += static_cast<unsigned>(text[at] - '0') * scale;
+                scale /= 10;
+            }
+            ++count;
+            ++at;
+        }
+        if (count == 0) return false;
+        value.wMilliseconds = static_cast<WORD>(fraction);
+    }
+    if (at + 1 != text.size() || text[at] != 'Z') return false;
+    FILETIME fileTime = {};
+    if (!::SystemTimeToFileTime(&value, &fileTime)) return false;
+    const std::uint64_t ticks =
+        (static_cast<std::uint64_t>(fileTime.dwHighDateTime) << 32) |
+        fileTime.dwLowDateTime;
+    constexpr std::uint64_t kUnixEpochFileTimeTicks = 116444736000000000ULL;
+    if (ticks < kUnixEpochFileTimeTicks) return false;
+    *utcMs = (ticks - kUnixEpochFileTimeTicks) / 10000ULL;
+    return true;
+}
+
+bool RecipeScheduleActiveForEvent(const RecipeSchedule& schedule,
+                                  const NetworkEvent& event,
+                                  std::uint64_t nowUtcMs,
+                                  bool rejectStale = true) {
+    if (schedule.type == RecipeScheduleType::Always) return true;
+    std::uint64_t eventUtcMs = 0;
+    if (!ParseEventUtcMillis(event.occurredAtUtc, &eventUtcMs)) return false;
+    if (rejectStale &&
+        ((eventUtcMs > nowUtcMs && eventUtcMs - nowUtcMs > 120000ULL) ||
+         (nowUtcMs >= eventUtcMs && nowUtcMs - eventUtcMs > 10000ULL)))
+        return false;
+    return WindowsRecipeScheduleActiveAtUtc(schedule, eventUtcMs);
+}
+
 struct RecipeCooldownRecovery {
     std::string key;
     std::uint64_t remainingNs = 0;
@@ -523,6 +592,15 @@ struct State {
     std::mutex actionGrantsMutex;
     std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> armedActionRecipes;
     std::set<std::string> pendingActionRecipes;
+    std::mutex scheduleMutex;
+    std::map<std::string, bool> scheduleWindowActive;
+    std::set<std::string> scheduleReleaseNeeded;
+    std::set<std::string> scheduleReleasePending;
+    std::set<std::string> scheduleReleaseCompleted;
+    std::map<std::string, std::uint64_t> scheduleReleaseRetryAfterMs;
+    std::map<std::string, std::string> scheduleReleaseErrors;
+    std::map<std::string, std::string> scheduleReleaseOperationOwners;
+    std::uint64_t scheduleReleaseSequence = 0;
     std::uint64_t reactiveActionQueueLost = 0;
     std::uint64_t reactiveActionFailures = 0;
     std::string reactiveActionLastFailure;
@@ -656,6 +734,10 @@ std::string IncidentJson(bool armed, const IncidentRecorderModel* recorder,
             std::to_string(summary.startMonotonicNs) + "\"" +
         ",\"firstTriggerMonotonicNs\":\"" +
             std::to_string(summary.firstTriggerMonotonicNs) + "\"" +
+        ",\"prehistoryWindowNs\":\"" +
+            std::to_string(summary.prehistoryWindowNs) + "\"" +
+        ",\"prehistoryRetainedNs\":\"" +
+            std::to_string(summary.prehistoryRetainedNs) + "\"" +
         ",\"postDeadlineMonotonicNs\":\"" +
             std::to_string(summary.postDeadlineMonotonicNs) + "\"" +
         ",\"endMonotonicNs\":\"" +
@@ -724,7 +806,11 @@ std::string IncidentArchivesJson(State* state, unsigned limit) {
     for (const IncidentArchiveInfo& archive : archives) {
         if (response.back() != '[') response += ',';
         response += "{\"id\":" + NetworkJsonQuote(archive.id) +
-            ",\"manifest\":" + archive.manifestJson + "}";
+            ",\"manifest\":" + archive.manifestJson +
+            ",\"bytes\":\"" + std::to_string(archive.bytes) +
+            "\",\"createdFileTime\":\"" +
+            std::to_string(archive.createdFileTime) +
+            "\",\"pinned\":" + (archive.pinned ? "true" : "false") + "}";
     }
     return response + "]}";
 }
@@ -743,7 +829,9 @@ std::string IncidentArchivePageJson(State* state, const std::string& id,
         if (response.back() != '[') response += ',';
         response += item;
     }
-    return response + "],\"nextOffset\":" + std::to_string(page.nextOffset) +
+    return response + "],\"totalRecords\":" +
+        std::to_string(page.totalRecords) + ",\"nextOffset\":" +
+        std::to_string(page.nextOffset) +
         ",\"hasMore\":" + (page.hasMore ? "true" : "false") + "}";
 }
 
@@ -767,18 +855,24 @@ std::string IncidentControlJson(State* state, const std::string& payload) {
         !ParseUnsignedField(fields[5], &limit) || limit > 100)
         return "{\"schemaVersion\":1,\"code\":\"bad_request\"}";
     const bool archiveRead = action == "archiveRead";
+    const bool archivePin = action == "archivePin";
+    const bool archiveUnpin = action == "archiveUnpin";
+    const bool archivePinMutation = archivePin || archiveUnpin;
     const bool readOnly = action == "status" || action == "read" ||
         action == "archives" || archiveRead;
     if ((action != "status" && action != "read" && action != "arm" &&
          action != "disarm" && action != "trigger" && action != "discard" &&
-         action != "save" && action != "archives" && !archiveRead) ||
+         action != "save" && action != "archives" && !archiveRead &&
+         !archivePinMutation) ||
         (readOnly ? (!requestId.empty() || !reason.empty() ||
             (!archiveRead && !triggerId.empty()))
                   : !SafeId(requestId, 64)) ||
         (action == "trigger" && (!SafeId(triggerId, 64) || reason.empty() ||
             reason.size() > 512 || reason.find_first_of("\r\n") != std::string::npos)) ||
         (action != "trigger" && !reason.empty()) ||
-        (action != "trigger" && !archiveRead && !triggerId.empty()) ||
+        (action != "trigger" && !archiveRead && !archivePinMutation &&
+            !triggerId.empty()) ||
+        (archivePinMutation && !SafeId(triggerId, 32)) ||
         (action == "read" ? (limit == 0) :
          ((action == "archives" || archiveRead) ?
             (limit == 0 || (action == "archives" && offset != 0) ||
@@ -790,6 +884,34 @@ std::string IncidentControlJson(State* state, const std::string& payload) {
         static_cast<unsigned>(limit));
     if (archiveRead) return IncidentArchivePageJson(state, triggerId, offset,
         static_cast<unsigned>(limit));
+
+    if (archivePinMutation) {
+        std::lock_guard<std::mutex> lock(state->incidentMutex);
+        const std::string signature = action + '\n' + triggerId;
+        const auto previous = state->incidentRequests.find(requestId);
+        if (previous != state->incidentRequests.end())
+            return previous->second.first == signature ? previous->second.second
+                : "{\"schemaVersion\":1,\"code\":\"request_id_reused\"}";
+        std::string error;
+        const bool pinned = archivePin;
+        const bool changed = state->incidentSecurity != nullptr &&
+            SetIncidentArchivePinned(state->incidentArchiveDirectory, triggerId,
+                pinned, *state->incidentSecurity, &error);
+        std::string response = changed
+            ? "{\"schemaVersion\":1,\"id\":" + NetworkJsonQuote(triggerId) +
+                ",\"pinned\":" + (pinned ? "true" : "false") + "}"
+            : "{\"schemaVersion\":1,\"code\":" + NetworkJsonQuote(
+                error.empty() ? "incident_archive_storage_unavailable" : error) + "}";
+        constexpr std::size_t kIncidentRequestLimit = 256;
+        while (state->incidentRequestOrder.size() >= kIncidentRequestLimit) {
+            state->incidentRequests.erase(state->incidentRequestOrder.front());
+            state->incidentRequestOrder.pop_front();
+        }
+        state->incidentRequestOrder.push_back(requestId);
+        state->incidentRequests.emplace(requestId,
+            std::make_pair(signature, response));
+        return response;
+    }
 
     std::lock_guard<std::mutex> lock(state->incidentMutex);
     const std::string signature = action + '\n' + triggerId + '\n' + reason +
@@ -909,6 +1031,32 @@ void IncidentObserve(State* state, const NetworkEvent& event) {
         state->incidentCaptureEnabled.store(false, std::memory_order_release);
 }
 
+void IncidentObserveCheckpoint(State* state, const std::string& payload,
+                               std::uint64_t monotonicNs) {
+    if (state == nullptr || payload.empty() ||
+        !state->incidentCaptureEnabled.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(state->incidentMutex);
+    if (!state->incidentRecorder) {
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        return;
+    }
+    if (!state->incidentArmed && state->incidentRecorder->IsActive() &&
+        monotonicNs > state->incidentRecorder->Summary().postDeadlineMonotonicNs) {
+        state->incidentRecorder->Close(monotonicNs);
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        return;
+    }
+    if (!state->incidentArmed && !state->incidentRecorder->IsActive()) {
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        return;
+    }
+    (void)state->incidentRecorder->Observe(
+        {monotonicNs, "state_checkpoint", payload});
+    state->incidentRecorder->Close(monotonicNs);
+    if (!state->incidentArmed && !state->incidentRecorder->IsActive())
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+}
+
 void IncidentTick(State* state, std::uint64_t nowNs) {
     if (state == nullptr ||
         !state->incidentCaptureEnabled.load(std::memory_order_acquire)) return;
@@ -920,6 +1068,17 @@ void IncidentTick(State* state, std::uint64_t nowNs) {
     state->incidentRecorder->Close(nowNs);
     if (!state->incidentArmed && !state->incidentRecorder->IsActive())
         state->incidentCaptureEnabled.store(false, std::memory_order_release);
+}
+
+void IncidentTriggerFromRecipe(State* state, const std::string& triggerId,
+                               const std::string& reason) {
+    if (state == nullptr || triggerId.empty() || reason.empty() ||
+        !state->incidentCaptureEnabled.load(std::memory_order_acquire)) return;
+    const std::uint64_t nowNs = SampleClock().monotonicMs * 1000000ULL;
+    if (nowNs == 0) return;
+    std::lock_guard<std::mutex> lock(state->incidentMutex);
+    if (!state->incidentArmed || !state->incidentRecorder) return;
+    (void)state->incidentRecorder->Trigger({nowNs, triggerId, reason}, true);
 }
 
 std::string NotificationEvidenceKey(const std::string& recipeId,
@@ -1272,6 +1431,7 @@ std::string ConfigJson(const EngineConfig& config,
 
 std::string RecipesJson(State* state) {
     const std::uint64_t nowNs = ::GetTickCount64() * 1000000ULL;
+    const std::uint64_t nowUtcMs = SampleClock().utcMs;
     bool degraded = false, starting = false;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
@@ -1317,17 +1477,64 @@ std::string RecipesJson(State* state) {
         const RecipeDef& recipe = row.first;
         if (result.back() != '[') result += ',';
         const RecipeRuntimeStatus& runtime = row.second;
+        const bool scheduleTimeZoneAvailable =
+            WindowsRecipeTimeZoneAvailable(recipe.schedule);
+        const bool scheduleActive = scheduleTimeZoneAvailable &&
+            WindowsRecipeScheduleActiveAtUtc(recipe.schedule, nowUtcMs);
+        std::uint64_t nextTransitionUtcMs = 0;
+        bool activeAfterTransition = false;
+        const bool hasNextTransition = scheduleTimeZoneAvailable &&
+            WindowsRecipeScheduleNextTransitionAtUtc(recipe.schedule,
+                nowUtcMs, &nextTransitionUtcMs, &activeAfterTransition);
+        std::string scheduleReleaseState =
+            recipe.schedule.type == RecipeScheduleType::Always
+                ? "not_applicable" : scheduleActive ? "window_active" : "not_started";
+        std::string scheduleReleaseError;
+        if (recipe.schedule.type == RecipeScheduleType::WeeklyWindow) {
+            const std::string owner = "recipe:" + recipe.id;
+            std::lock_guard<std::mutex> scheduleLock(state->scheduleMutex);
+            if (state->scheduleReleasePending.count(owner) != 0)
+                scheduleReleaseState = "releasing";
+            else if (state->scheduleReleaseErrors.find(owner) !=
+                     state->scheduleReleaseErrors.end()) {
+                scheduleReleaseState = "error";
+                scheduleReleaseError = state->scheduleReleaseErrors.at(owner);
+            } else if (!scheduleActive &&
+                       state->scheduleReleaseCompleted.count(owner) != 0)
+                scheduleReleaseState = "released";
+            else if (!scheduleActive &&
+                     state->scheduleReleaseNeeded.count(owner) != 0)
+                scheduleReleaseState = "pending";
+        }
         const bool cooldown = recipe.enabled && runtime.revision == recipe.revision &&
             runtime.cooldownUntilMonotonicNs > nowNs;
         const std::string stateName = !recipe.enabled ? "disabled" :
-            degraded ? "degraded" : starting ? "starting" : "running";
+            (degraded || !scheduleTimeZoneAvailable) ? "degraded" :
+                starting ? "starting" : "running";
         const std::string condition = !recipe.enabled ? "clear" :
-            cooldown ? "cooldown" : "clear";
+            !scheduleTimeZoneAvailable ? "schedule_unavailable" :
+            !scheduleActive ? "out_of_schedule" : cooldown ? "cooldown" : "clear";
         std::string item = RecipeJson(recipe);
         if (!item.empty() && item.back() == '}') item.pop_back();
         result += item + ",\"runtime\":{\"state\":" +
             NetworkJsonQuote(stateName) + ",\"condition\":" +
-            NetworkJsonQuote(condition) + ",\"lastTriggeredAtUtc\":" +
+            NetworkJsonQuote(condition) +
+            ",\"scheduleTimeZoneAvailable\":" +
+            (scheduleTimeZoneAvailable ? "true" : "false") +
+            ",\"scheduleActive\":" +
+            (scheduleTimeZoneAvailable ?
+                (scheduleActive ? "true" : "false") : "null") +
+            ",\"nextScheduleTransitionUtcMs\":" +
+            (hasNextTransition ? NetworkJsonQuote(
+                std::to_string(nextTransitionUtcMs)) : "null") +
+            ",\"scheduleActiveAfterTransition\":" +
+            (hasNextTransition ? (activeAfterTransition ? "true" : "false") : "null") +
+            ",\"scheduleLeaseReleaseState\":" +
+            NetworkJsonQuote(scheduleReleaseState) +
+            ",\"scheduleLeaseReleaseError\":" +
+            (scheduleReleaseError.empty() ? "null" :
+                NetworkJsonQuote(scheduleReleaseError)) +
+            ",\"lastTriggeredAtUtc\":" +
             (runtime.lastOccurredAtUtc.empty() ? "null" :
                 NetworkJsonQuote(runtime.lastOccurredAtUtc)) +
             ",\"lastEventId\":" + (runtime.lastEventId.empty() ? "null" :
@@ -1426,6 +1633,9 @@ std::string SubmitRecipes(State* state, const std::string& payload,
     if (!SafeId(requestId, 64) || !RevisionSyntax(expected) ||
         !ParseRecipes(recipeText, &next, &error))
         return "{\"schemaVersion\":1,\"code\":\"bad_request\"}";
+    for (const RecipeDef& recipe : next)
+        if (!WindowsRecipeTimeZoneAvailable(recipe.schedule))
+            return "{\"schemaVersion\":1,\"code\":\"invalid_time_zone_id\"}";
     const std::uint64_t now = ::GetTickCount64();
     OperationSubmission existing;
     {
@@ -1674,6 +1884,25 @@ void OperationLoop(State* state, const std::wstring& sid,
                 state->armedActionRecipes.erase(configText);
                 state->pendingActionRecipes.erase(configText);
             }
+            {
+                std::lock_guard<std::mutex> scheduleLock(state->scheduleMutex);
+                const auto scheduled = state->scheduleReleaseOperationOwners.find(id);
+                if (scheduled != state->scheduleReleaseOperationOwners.end()) {
+                    const std::string owner = scheduled->second;
+                    state->scheduleReleaseOperationOwners.erase(scheduled);
+                    state->scheduleReleasePending.erase(owner);
+                    if (error.empty()) {
+                        state->scheduleReleaseNeeded.erase(owner);
+                        state->scheduleReleaseRetryAfterMs.erase(owner);
+                        state->scheduleReleaseErrors.erase(owner);
+                        state->scheduleReleaseCompleted.insert(owner);
+                    } else {
+                        state->scheduleReleaseRetryAfterMs[owner] =
+                            ::GetTickCount64() + 5000ULL;
+                        state->scheduleReleaseErrors[owner] = error;
+                    }
+                }
+            }
             if (action == "trigger-reactive") {
                 const std::size_t ownerEnd = configText.find('\n');
                 const std::size_t revisionEnd = ownerEnd == std::string::npos
@@ -1851,17 +2080,113 @@ void OperationLoop(State* state, const std::wstring& sid,
     }
 }
 
+void ReconcileRecipeScheduleReleases(State* state, std::uint64_t utcMs,
+                                     std::uint64_t monotonicMs) {
+    std::vector<RecipeDef> recipes;
+    {
+        std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
+        recipes = state->recipes;
+    }
+    std::set<std::string> scheduledOwners;
+    struct ScheduleState { std::string owner; bool active; };
+    std::vector<ScheduleState> scheduleStates;
+    for (const RecipeDef& recipe : recipes) {
+        if (!recipe.enabled || recipe.schedule.type !=
+                RecipeScheduleType::WeeklyWindow) continue;
+        const std::string owner = "recipe:" + recipe.id;
+        scheduledOwners.insert(owner);
+        const bool active = WindowsRecipeTimeZoneAvailable(recipe.schedule) &&
+            WindowsRecipeScheduleActiveAtUtc(recipe.schedule, utcMs);
+        scheduleStates.push_back({owner, active});
+    }
+
+    std::vector<std::string> releaseOwners;
+    {
+        std::lock_guard<std::mutex> scheduleLock(state->scheduleMutex);
+        for (auto it = state->scheduleWindowActive.begin();
+             it != state->scheduleWindowActive.end();) {
+            if (scheduledOwners.find(it->first) == scheduledOwners.end())
+                it = state->scheduleWindowActive.erase(it);
+            else ++it;
+        }
+        const auto staleOwner = [&state, &scheduledOwners](const std::string& owner) {
+            return scheduledOwners.find(owner) == scheduledOwners.end() &&
+                state->scheduleReleasePending.find(owner) ==
+                    state->scheduleReleasePending.end();
+        };
+        for (auto it = state->scheduleReleaseNeeded.begin();
+             it != state->scheduleReleaseNeeded.end();) {
+            if (staleOwner(*it)) it = state->scheduleReleaseNeeded.erase(it);
+            else ++it;
+        }
+        for (auto it = state->scheduleReleaseCompleted.begin();
+             it != state->scheduleReleaseCompleted.end();) {
+            if (staleOwner(*it)) it = state->scheduleReleaseCompleted.erase(it);
+            else ++it;
+        }
+        for (auto it = state->scheduleReleaseRetryAfterMs.begin();
+             it != state->scheduleReleaseRetryAfterMs.end();) {
+            if (staleOwner(it->first)) it = state->scheduleReleaseRetryAfterMs.erase(it);
+            else ++it;
+        }
+        for (auto it = state->scheduleReleaseErrors.begin();
+             it != state->scheduleReleaseErrors.end();) {
+            if (staleOwner(it->first)) it = state->scheduleReleaseErrors.erase(it);
+            else ++it;
+        }
+        for (const ScheduleState& item : scheduleStates) {
+            const auto previous = state->scheduleWindowActive.find(item.owner);
+            if (!item.active && (previous == state->scheduleWindowActive.end() ||
+                                 previous->second)) {
+                state->scheduleReleaseNeeded.insert(item.owner);
+                state->scheduleReleaseCompleted.erase(item.owner);
+            }
+            state->scheduleWindowActive[item.owner] = item.active;
+            if (state->scheduleReleaseNeeded.find(item.owner) ==
+                    state->scheduleReleaseNeeded.end() ||
+                state->scheduleReleasePending.find(item.owner) !=
+                    state->scheduleReleasePending.end()) continue;
+            const auto retry = state->scheduleReleaseRetryAfterMs.find(item.owner);
+            if (retry != state->scheduleReleaseRetryAfterMs.end() &&
+                monotonicMs < retry->second) continue;
+            state->scheduleReleasePending.insert(item.owner);
+            releaseOwners.push_back(item.owner);
+        }
+    }
+
+    for (const std::string& owner : releaseOwners) {
+        std::lock_guard<std::mutex> operationLock(state->operationsMutex);
+        const std::string requestId = "sched" + std::to_string(monotonicMs) +
+            std::to_string(++state->scheduleReleaseSequence);
+        const OperationSubmission submitted = state->operations.Submit(
+            requestId, "", owner, monotonicMs, "collector.release-owner");
+        std::lock_guard<std::mutex> scheduleLock(state->scheduleMutex);
+        if (submitted.disposition == OperationDisposition::Created ||
+            submitted.disposition == OperationDisposition::Duplicate) {
+            state->scheduleReleaseOperationOwners[submitted.id] = owner;
+        } else {
+            state->scheduleReleasePending.erase(owner);
+            state->scheduleReleaseRetryAfterMs[owner] = monotonicMs + 5000ULL;
+            state->scheduleReleaseErrors[owner] = "operation_queue_full";
+        }
+    }
+    if (!releaseOwners.empty()) state->operationsReady.notify_all();
+}
+
 void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES* security) {
     SnapshotSource source;
     SnapshotEventAdapter adapter(state->epoch);
     EngineClock clock(state->epoch);
     std::uint64_t samplingGapSequence = 0;
+    std::uint64_t lastIncidentCheckpointNs = 0;
     SnapshotOptions options;
     options.resolveProcesses = true;
     while (::WaitForSingleObject(state->stopEvent, 0) == WAIT_TIMEOUT) {
         Snapshot snapshot;
         const bool success = source.Build(options, &snapshot);
         const ClockSample sampled = SampleClock();
+        ReconcileRecipeScheduleReleases(state, sampled.utcMs,
+                                        sampled.monotonicMs);
         const ClockObservation mapping = clock.Observe(sampled.utcMs,
             sampled.monotonicMs, state->config.snapshotIntervalMs);
         const std::string& utc = sampled.utc;
@@ -1933,12 +2258,16 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
         }
         std::vector<std::string> notices;
         std::vector<std::string> noticeKeys;
+        std::vector<std::pair<std::string, std::string>> incidentTriggers;
         std::string cooldownCheckpoint;
         std::unique_lock<std::mutex> recipeCommitLock(state->recipeCommitMutex);
         {
             std::lock_guard<std::mutex> recipeLock(state->recipesMutex);
             for (const NetworkEvent& event : events) {
                 for (const RecipeDef& recipe : state->recipes) {
+                    if (!RecipeScheduleActiveForEvent(recipe.schedule, event,
+                                                       sampled.utcMs))
+                        continue;
                     const RecipeHit hit = state->recipeEvaluator.Evaluate(recipe,
                                                                            event);
                     if (hit.matched) state->recipeCooldownDirty = true;
@@ -1949,6 +2278,8 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
                         hit, id, monoNs, sampled.utcMs));
                     noticeKeys.push_back(NotificationEvidenceKey(recipe.id,
                         std::to_string(recipe.revision), event.eventId));
+                    incidentTriggers.emplace_back(id,
+                        "Recipe " + recipe.name + ": " + hit.reason);
                 }
             }
             if (state->recipeCooldownDirty) {
@@ -1986,6 +2317,23 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
         }
         recipeCommitLock.unlock();
         for (const NetworkEvent& event : events) IncidentObserve(state, event);
+        for (const auto& trigger : incidentTriggers)
+            IncidentTriggerFromRecipe(state, trigger.first, trigger.second);
+        const bool incidentCapture = state->incidentCaptureEnabled.load(
+            std::memory_order_acquire);
+        if (!incidentCapture) lastIncidentCheckpointNs = 0;
+        else if (success && !limitGap) {
+            const ClockSample checkpointTime = SampleClock();
+            const std::uint64_t checkpointNs =
+                checkpointTime.monotonicMs * 1000000ULL;
+            if (lastIncidentCheckpointNs == 0 || checkpointNs < lastIncidentCheckpointNs ||
+                checkpointNs - lastIncidentCheckpointNs >=
+                    5 * IncidentRecorderModel::kSecondNs) {
+                IncidentObserveCheckpoint(state, adapter.CheckpointJson(
+                    checkpointTime.utc, checkpointNs), checkpointNs);
+                lastIncidentCheckpointNs = checkpointNs;
+            }
+        }
         IncidentTick(state, sampled.monotonicMs * 1000000ULL);
         {
             std::lock_guard<std::mutex> lock(state->mutex);
@@ -2520,6 +2868,7 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
             for (const NetworkEvent& event : accepted)
                 IncidentObserve(state, event);
             std::vector<std::string> notices, noticeKeys;
+            std::vector<std::pair<std::string, std::string>> incidentTriggers;
             std::vector<std::pair<RecipeDef, NetworkEvent>> reactiveCandidates;
             std::string cooldownCheckpoint;
             RecipeEvaluator evaluatorBefore;
@@ -2530,6 +2879,9 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
                 evaluatorBefore = state->recipeEvaluator;
                 for (const NetworkEvent& event : normalizedEvents) {
                     for (const RecipeDef& recipe : state->recipes) {
+                        if (!RecipeScheduleActiveForEvent(recipe.schedule, event,
+                                                          sample.utcMs))
+                            continue;
                         const RecipeHit hit = state->recipeEvaluator.Evaluate(recipe, event);
                         if (hit.matched) state->recipeCooldownDirty = true;
                         // A Passive cooldown governs inbox delivery only. An
@@ -2545,6 +2897,8 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
                             hit, noticeId, monotonicNs, sample.utcMs));
                         noticeKeys.push_back(NotificationEvidenceKey(recipe.id,
                             std::to_string(recipe.revision), event.eventId));
+                        incidentTriggers.emplace_back(noticeId,
+                            "Recipe " + recipe.name + ": " + hit.reason);
                     }
                 }
                 if (state->recipeCooldownDirty) {
@@ -2571,6 +2925,8 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
             }
             recipeCommitLock.unlock();
             if (batchStored) {
+                for (const auto& trigger : incidentTriggers)
+                    IncidentTriggerFromRecipe(state, trigger.first, trigger.second);
                 for (const auto& candidate : reactiveCandidates)
                     QueueReactiveAction(state, candidate.first, candidate.second);
             }
@@ -2827,11 +3183,14 @@ std::string TestRecipeJson(State* state, const std::string& id) {
     }
     recipe.enabled = true;  // Simulation also works before first enable.
     RecipeEvaluator evaluator;
+    const std::uint64_t evaluationUtcMs = SampleClock().utcMs;
     std::uint64_t matched = 0;
     std::uint64_t wouldNotify = 0;
     std::string examples;
     unsigned included = 0;
     for (const NetworkEvent& event : page.items) {
+        if (!RecipeScheduleActiveForEvent(recipe.schedule, event,
+                                           evaluationUtcMs, false)) continue;
         const RecipeHit hit = evaluator.Evaluate(recipe, event);
         if (!hit.matched) continue;
         ++matched;
@@ -2848,6 +3207,9 @@ std::string TestRecipeJson(State* state, const std::string& id) {
     }
     return "{\"schemaVersion\":1,\"recipeId\":\"" + recipe.id +
         "\",\"simulation\":true,\"effectsApplied\":false," +
+        "\"scheduleActive\":" +
+            (WindowsRecipeScheduleActiveAtUtc(recipe.schedule, evaluationUtcMs)
+                ? "true" : "false") + "," +
         "\"source\":\"last_500_retained_snapshot_events\"," +
         "\"examined\":" + std::to_string(page.items.size()) +
         ",\"matched\":" + std::to_string(matched) +
@@ -2943,7 +3305,8 @@ std::string NotificationsJson(State* state, const std::string& cursor,
         result += item;
     }
     result += "],\"nextCursor\":\"" + page.nextCursor +
-        "\",\"partialTail\":" + (page.partialTail ? "true" : "false") + "}";
+        "\",\"hasMore\":" + (page.hasMore ? "true" : "false") +
+        ",\"partialTail\":" + (page.partialTail ? "true" : "false") + "}";
     return result;
 }
 
@@ -3347,17 +3710,20 @@ bool EngineIncidentRequest(const std::string& action,
                            std::uint64_t offset, unsigned limit,
                            std::string* response) {
     const bool archiveRead = action == "archiveRead";
+    const bool archivePinMutation = action == "archivePin" || action == "archiveUnpin";
     const bool readOnly = action == "status" || action == "read" ||
         action == "archives" || archiveRead;
     if ((action != "status" && action != "read" && action != "arm" &&
          action != "disarm" && action != "trigger" && action != "discard" &&
-         action != "save" && action != "archives" && !archiveRead) ||
+         action != "save" && action != "archives" && !archiveRead &&
+         !archivePinMutation) ||
         (readOnly ? (!requestId.empty() ||
             (!archiveRead && !triggerId.empty())) : !SafeId(requestId, 64)) ||
         (action == "trigger" ? (!SafeId(triggerId, 64) || reason.empty() ||
             reason.size() > 512 || reason.find_first_of("\r\n") != std::string::npos)
             : !reason.empty()) ||
         (action == "archiveRead" && !SafeId(triggerId, 32)) ||
+        (archivePinMutation && !SafeId(triggerId, 32)) ||
         (action == "read" ? (limit == 0 || limit > 100 || offset > 1000000) :
          archiveRead ? (limit == 0 || limit > 100 || offset > 1000000) :
          action == "archives" ? (limit == 0 || limit > 100 || offset != 0) :
