@@ -3573,6 +3573,52 @@ HttpResponse HandleRequest(ServerContext& context, const HttpRequest& request) {
     const std::string archiveCollection = "/api/engine/incidents/archives";
     const std::string archivePrefix = archiveCollection + "/";
     if (path == archiveCollection || path.rfind(archivePrefix, 0) == 0) {
+        if (path.rfind(archivePrefix, 0) == 0 && request.method == "POST") {
+            const std::string suffix = path.substr(archivePrefix.size());
+            const std::size_t slash = suffix.find('/');
+            const std::string archiveId = slash == std::string::npos
+                ? std::string() : suffix.substr(0, slash);
+            const std::string verb = slash == std::string::npos
+                ? std::string() : suffix.substr(slash + 1);
+            const std::string action = verb == "pin" ? "archivePin" :
+                verb == "unpin" ? "archiveUnpin" : std::string();
+            if (action.empty() || archiveId.size() != 32 ||
+                archiveId.find_first_not_of("0123456789abcdef") != std::string::npos ||
+                query != std::string::npos) {
+                response.status = 404;
+                response.body = "{\"code\":\"incident_archive_not_found\"}";
+                return response;
+            }
+            if (!AuthenticateMutation(context, request, &response)) {
+                response.body = ErrorJson("mutation authorization failed");
+                return response;
+            }
+            if (!ContentTypeIs(request, "application/x-www-form-urlencoded")) {
+                response.status = 415;
+                response.body = "{\"code\":\"form_required\"}";
+                return response;
+            }
+            std::map<std::string, std::string> fields;
+            if (!ParseForm(request.body, &fields) || fields.size() != 1 ||
+                !fields.count("requestId") || fields["requestId"].empty() ||
+                fields["requestId"].size() > 64) {
+                response.status = 400;
+                response.body = "{\"code\":\"bad_request\"}";
+                return response;
+            }
+            if (!EngineIncidentRequest(action, fields["requestId"], archiveId,
+                                       "", 0, 0, &response.body)) {
+                response.status = 503;
+                response.body = "{\"code\":\"engine_unavailable\"}";
+            } else if (response.body.find("\"code\":\"request_id_reused\"") !=
+                       std::string::npos) response.status = 409;
+            else if (response.body.find("\"code\":\"incident_archive_not_found_or_invalid\"") !=
+                     std::string::npos) response.status = 404;
+            else if (response.body.find("\"code\":") != std::string::npos)
+                response.status = 400;
+            else response.status = 200;
+            return response;
+        }
         if (request.method != "GET" && request.method != "HEAD") {
             response.status = 405;
             response.body = "{\"code\":\"method_not_allowed\"}";
