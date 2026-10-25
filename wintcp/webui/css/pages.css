@@ -475,6 +475,12 @@ body.sidebar-collapsed .app-shell { padding-left: 3rem; }
 .engine-monitor-row > * { min-width: 0; overflow-wrap: anywhere; }
 .engine-monitor-row .engine-event-target { flex: 1 1 12rem; }
 .engine-monitor-row small { flex: 1 1 100%; }
+.incident-replay { display: grid; gap: 0.5rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.incident-replay h3 { margin: 0; font-size: 0.95rem; }
+.incident-replay-controls { display: grid; grid-template-columns: auto minmax(5rem, auto) minmax(8rem, auto) minmax(12rem, 1fr); align-items: center; gap: 0.5rem; }
+.incident-replay-range { width: 100%; accent-color: var(--primary); }
+.incident-replay .lifecycle-event { padding: 0.5rem; }
+@media (max-width: 700px) { .incident-replay-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 700px) { .engine-event-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 .auto-layout {
   display: flex;
