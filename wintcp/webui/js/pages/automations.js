@@ -947,6 +947,21 @@ export async function renderAutomations(page, store) {
 
   async function renderLifecycle() {
     const status = h("p", { class: "muted text-sm", role: "status" });
+    const incidentStatus = h("p", { class: "muted text-sm", role: "status" },
+      "Incident recorder is not armed.");
+    const incidentRecords = h("div", { class: "engine-events" });
+    const archiveStatus = h("p", { class: "muted text-sm", role: "status" },
+      "Saved incident archives are not loaded.");
+    const archiveRecords = h("div", { class: "engine-events" });
+    const archiveSelect = h("select", { "aria-label": "Saved incident archive" },
+      h("option", { value: "" }, "Select a saved incident"));
+    let selectedArchiveId = "";
+    let archiveOffset = 0;
+    let incidentArmed = false;
+    let incidentExists = false;
+    let incidentActive = false;
+    let incidentDurable = false;
+    let incidentOffset = 0;
     const lossStatus = h("p", { class: "muted text-sm", role: "status" },
       "Checking collector loss counters…");
     const history = h("div", { class: "engine-events" });
@@ -1102,8 +1117,189 @@ export async function renderAutomations(page, store) {
     }, linkedEventId ? "Find linked evidence" : "Load retained events");
     const refreshLoss = h("button", { class: "btn btn-quiet", type: "button",
       onclick: () => { void refreshLossStatus(); } }, "Refresh loss status");
+    async function refreshIncident() {
+      try {
+        const result = await api.get("/api/engine/incidents", { signal: requests.signal });
+        if (disposed) return;
+        incidentArmed = result.armed === true;
+        incidentExists = !!result.incident;
+        incidentActive = result.incident?.active === true;
+        incidentDurable = result.durable === true;
+        incidentStatus.textContent = !incidentExists
+          ? (result.durable
+            ? `The in-memory view was cleared. Saved archive ${result.archiveId} remains on disk; offline replay is not available yet.`
+            : incidentArmed
+              ? "Armed: retaining a 120-second volatile pre-trigger window of observed metadata."
+              : "Not armed. No incident data is being retained.")
+          : `Incident ${result.incident.id}: ${incidentActive ? "capturing post-trigger events" : "stopped"}; ${result.incident.recordCount} records; ${result.incident.prehistoryIncomplete ? "prehistory incomplete" : "prehistory available"}; ${result.incident.postWindowIncomplete ? "post-window incomplete" : "post-window status recorded"}.${incidentDurable ? ` Saved archive ${result.archiveId}; read-only replay is not available yet.` : " Memory only; save explicitly to retain it on disk."}${result.archiveError ? ` Save error: ${result.archiveError}.` : ""}`;
+        armIncident.disabled = incidentArmed || incidentExists;
+        triggerIncident.disabled = !incidentArmed;
+        disarmIncident.disabled = !incidentArmed && !incidentActive;
+        discardIncident.disabled = !incidentExists || incidentActive;
+        saveIncident.disabled = !incidentExists || incidentActive || incidentDurable;
+        loadIncident.disabled = !incidentExists;
+      } catch (error) {
+        if (!disposed) incidentStatus.textContent = error.message || "Incident status unavailable.";
+      }
+    }
+    async function runIncidentAction(action, extra = {}) {
+      const button = action === "arm" ? armIncident
+        : action === "trigger" ? triggerIncident
+          : action === "disarm" ? disarmIncident
+            : action === "save" ? saveIncident : discardIncident;
+      button.disabled = true;
+      try {
+        const result = await api.postForm("/api/engine/incidents", {
+          action, requestId: crypto.randomUUID().replaceAll("-", ""), ...extra,
+        });
+        if (result.code) throw new Error(result.code);
+        if (action === "arm" || action === "trigger") incidentOffset = 0;
+        incidentStatus.textContent = action === "arm"
+          ? "Incident recorder armed. Metadata is volatile and not yet saved to disk."
+          : action === "trigger" ? "Incident triggered; collecting the post-trigger window."
+            : action === "disarm" ? "Capture stopped. The remaining post-trigger window is marked incomplete."
+              : action === "save" ? `Incident saved as archive ${result.archiveId || "(ID unavailable)"}. Offline replay is not available yet.`
+                : "The in-memory incident was discarded.";
+        if (action === "discard") clear(incidentRecords);
+        await refreshIncident();
+      } catch (error) {
+        if (!disposed) incidentStatus.textContent = error.message || "Incident operation failed.";
+      } finally { if (!disposed) await refreshIncident(); }
+    }
+    const armIncident = h("button", { class: "btn btn-outline", type: "button",
+      onclick: () => { void runIncidentAction("arm"); } }, "Arm recorder");
+    const triggerIncident = h("button", { class: "btn btn-outline", type: "button",
+      onclick: () => {
+        const reason = prompt("Why capture this incident?", "Manual investigation");
+        if (reason == null || !reason.trim()) return;
+        void runIncidentAction("trigger", {
+          triggerId: `manual-${crypto.randomUUID().slice(0, 12)}`,
+          reason: reason.trim().slice(0, 512),
+        });
+      } }, "Capture incident now");
+    const disarmIncident = h("button", { class: "btn btn-quiet", type: "button",
+      onclick: () => { void runIncidentAction("disarm"); } }, "Stop capture");
+    const saveIncident = h("button", { class: "btn btn-outline", type: "button",
+      onclick: () => { void runIncidentAction("save"); } }, "Save incident");
+    const discardIncident = h("button", { class: "btn btn-quiet", type: "button",
+      onclick: () => {
+        if (!confirm(incidentDurable
+          ? "Clear this incident from the current session? The saved archive will remain on disk."
+          : "Discard the in-memory incident? It has not been saved to disk.")) return;
+        void runIncidentAction("discard");
+      } }, "Discard incident");
+    const loadIncident = h("button", { class: "btn btn-outline", type: "button",
+      onclick: async () => {
+        loadIncident.disabled = true;
+        try {
+          const page = await api.get(`/api/engine/incidents?offset=${incidentOffset}&limit=100`,
+            { signal: requests.signal });
+          if (disposed) return;
+          clear(incidentRecords);
+          const items = page.incident?.items || [];
+          for (const item of items) {
+            incidentRecords.append(h("article", { class: "lifecycle-event" },
+              h("header", {}, badge({ variant: "outline" }, item.event?.kind || "Unknown event"),
+                h("strong", {}, processEvidenceLabel(item.event))),
+              h("p", {}, item.event?.remote?.address
+                ? `${item.event.remote.address}:${item.event.remote.port}`
+                : item.event?.lossReason || "No remote peer observed"),
+              h("details", {}, h("summary", {}, "Recorded evidence"),
+                h("pre", { class: "lifecycle-evidence" }, JSON.stringify(item, null, 2)))));
+          }
+          incidentOffset = page.incident?.nextOffset || 0;
+          loadIncident.textContent = page.incident?.hasMore
+            ? "Load next incident page" : "Reload incident events";
+          if (!items.length) incidentRecords.append(h("p", { class: "muted text-sm" },
+            "No more records in this incident page."));
+        } catch (error) {
+          if (!disposed) incidentStatus.textContent = error.message || "Incident records unavailable.";
+        } finally { if (!disposed) await refreshIncident(); }
+      } }, "Load incident events");
+    const loadArchive = h("button", { class: "btn btn-outline", type: "button",
+      onclick: async () => {
+        if (!selectedArchiveId) return;
+        loadArchive.disabled = true;
+        archiveOffset = 0;
+        await loadArchivePage();
+        if (!disposed) loadArchive.disabled = false;
+      } }, "Open read-only archive");
+    const nextArchivePage = h("button", { class: "btn btn-quiet", type: "button",
+      disabled: true,
+      onclick: async () => { await loadArchivePage(); } }, "Next archive events");
+    async function refreshArchives() {
+      try {
+        const result = await api.get("/api/engine/incidents/archives?limit=50",
+          { signal: requests.signal });
+        if (disposed) return;
+        const previous = selectedArchiveId;
+        clear(archiveSelect);
+        archiveSelect.append(h("option", { value: "" }, "Select a saved incident"));
+        for (const archive of result.items || []) {
+          const manifest = archive.manifest || {};
+          archiveSelect.append(h("option", { value: archive.id },
+            `${archive.id} — ${manifest.recordCount || 0} events${manifest.postWindowIncomplete ? " — partial" : ""}`));
+        }
+        selectedArchiveId = (result.items || []).some((item) => item.id === previous)
+          ? previous : "";
+        archiveSelect.value = selectedArchiveId;
+        archiveStatus.textContent = result.items?.length
+          ? `${result.items.length} saved archive(s) found. Archives are read-only; live actions and external lookups are unavailable.`
+          : "No saved incident archives found.";
+      } catch (error) {
+        if (!disposed) archiveStatus.textContent = error.message || "Saved archives unavailable.";
+      }
+    }
+    async function loadArchivePage() {
+      if (!selectedArchiveId || disposed) return;
+      nextArchivePage.disabled = true;
+      try {
+        const page = await api.get(`/api/engine/incidents/archives/${selectedArchiveId}?offset=${archiveOffset}&limit=100`,
+          { signal: requests.signal });
+        if (disposed) return;
+        clear(archiveRecords);
+        archiveStatus.textContent = `Recorded / Read-only — archive ${selectedArchiveId}. ${page.manifest?.recordCount || 0} recorded events; replay is event inspection only because state checkpoints are not yet available.`;
+        for (const raw of page.items || []) {
+          const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+          const event = item.event || {};
+          archiveRecords.append(h("article", { class: "lifecycle-event" },
+            h("header", {}, badge({ variant: "secondary" }, "Recorded / Read-only"),
+              badge({ variant: "outline" }, event.kind || "Recorded event"),
+              h("strong", {}, processEvidenceLabel(event))),
+            h("p", {}, event.remote?.address
+              ? `${event.remote.address}:${event.remote.port}`
+              : event.lossReason || "No remote peer observed"),
+            h("details", {}, h("summary", {}, "Recorded evidence"),
+              h("pre", { class: "lifecycle-evidence" }, JSON.stringify(item, null, 2)))));
+        }
+        archiveOffset = page.nextOffset || 0;
+        nextArchivePage.disabled = !page.hasMore;
+        if (!(page.items || []).length)
+          archiveRecords.append(h("p", { class: "muted text-sm" }, "No events in this archive page."));
+      } catch (error) {
+        if (!disposed) archiveStatus.textContent = error.message || "Archive verification failed.";
+      } finally {
+        if (!disposed && nextArchivePage.disabled === false && archiveOffset === 0)
+          nextArchivePage.disabled = true;
+      }
+    }
+    archiveSelect.addEventListener("change", () => {
+      selectedArchiveId = archiveSelect.value;
+      archiveOffset = 0;
+      clear(archiveRecords);
+      loadArchive.disabled = !selectedArchiveId;
+      nextArchivePage.disabled = true;
+      if (selectedArchiveId) archiveStatus.textContent = "Selected archive. Open it to verify and read its recorded events.";
+    });
     void refreshLossStatus();
+    void refreshIncident();
+    void refreshArchives();
     return h("div", { class: "tab-panel-body" },
+      card({}, cardHeader({}, cardTitle({}, "Incident flight recorder"),
+        cardDescription({}, "Optional in-memory metadata window. Nothing is exported yet.")),
+        cardContent({}, incidentStatus,
+          h("div", { class: "template-actions" }, armIncident, triggerIncident,
+            disarmIncident, saveIncident, discardIncident, loadIncident), incidentRecords)),
       card({}, cardHeader({}, cardTitle({}, "Event-based connection evidence"),
         cardDescription({}, "Optional metadata collection can retain activity between endpoint snapshots.")),
         cardContent({}, h("p", { class: "muted text-sm" },
@@ -1114,6 +1310,13 @@ export async function renderAutomations(page, store) {
             controlButton("Enable event tracking", "events-start"),
             controlButton("Stop event tracking", "events-stop"), refreshLoss), status,
           lossStatus)),
+      card({}, cardHeader({}, cardTitle({}, "Saved incident library"),
+        cardDescription({}, "Integrity-checked, recorded evidence. This view is read-only and performs no DNS or live process lookup.")),
+        cardContent({}, archiveStatus,
+          h("div", { class: "template-actions" }, archiveSelect,
+            h("button", { class: "btn btn-quiet", type: "button",
+              onclick: () => { void refreshArchives(); } }, "Refresh archives"),
+            loadArchive, nextArchivePage), archiveRecords)),
       card({}, cardHeader({}, cardTitle({}, "Retained lifecycle history")),
         cardContent({}, linkedEventStatus, history), cardFooter({}, load)));
   }
