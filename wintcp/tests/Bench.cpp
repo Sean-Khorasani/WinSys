@@ -54,6 +54,7 @@ void CheckMetricsJson(TestResult& r); // JSON emitters + integer parsing (T-1)
 #include "ProcessInstanceCache.h"
 #include "LifecycleFlowModel.h"
 #include "IncidentRecorderModel.h"
+#include "IncidentArchive.h"
 #include "SnapshotEvents.h"
 #include "WebProcesses.h"
 
@@ -3093,18 +3094,36 @@ void CheckIncidentRecorderModel(TestResult& r) {
           pre.records[0].eventId == "e2" && pre.records[1].eventId == "e3");
 
     const bool merged = recorder.Trigger({35, "related-1", "recipe"});
+    const bool duplicateTriggerId = recorder.Trigger(
+        {36, "related-1", "recipe"});
     const bool unrelatedRejected = !recorder.Trigger(
         {36, "unrelated", "manual"}, false);
     const bool postObserved = observe(40, "e4");
     auto mergedSnapshot = recorder.Snapshot();
+    const auto page = recorder.ReadPage(1, 1, 1024);
     recorder.Close(45);
     const auto completed = recorder.TakeSnapshot();
     Check(r, "incident.related-trigger-merges-with-capped-deadline",
-          merged && unrelatedRejected && postObserved && mergedSnapshot.active &&
+          merged && duplicateTriggerId && unrelatedRejected && postObserved &&
+          mergedSnapshot.active &&
           mergedSnapshot.triggers.size() == 2 &&
           mergedSnapshot.postDeadlineMonotonicNs == 45 &&
           mergedSnapshot.records.size() == 3 && !completed.active &&
+          page.incident.records.size() == 1 &&
+          page.incident.records[0].eventId == "e3" && page.hasMore &&
+          page.nextOffset == 2 &&
           !recorder.Snapshot().active);
+
+    IncidentRecorderModel interrupted(2048, 20, 10, 25);
+    (void)interrupted.Observe({5, "before", "{}"});
+    const bool interruptionArmed = interrupted.Trigger(
+        {10, "incident-stop", "manual"});
+    interrupted.Stop(12);
+    Check(r, "incident.explicit-stop-marks-post-window-incomplete",
+          interruptionArmed && !interrupted.IsActive() &&
+          interrupted.Summary().postWindowIncomplete &&
+          interrupted.Summary().endMonotonicNs == 12 &&
+          interrupted.Snapshot().records.size() == 1);
 
     IncidentRecorderModel rollover(1024, 50, 10, 20);
     bool accepted = true;
@@ -3137,6 +3156,80 @@ void CheckIncidentRecorderModel(TestResult& r) {
           triggerSummary.triggers.size() ==
               IncidentRecorderModel::kMaxTriggersPerIncident &&
           triggerSummary.triggersTruncated && triggerSummary.lostTriggers == 1);
+}
+
+void CheckIncidentArchive(TestResult& r) {
+    using namespace wintcp;
+    wchar_t tempPath[MAX_PATH + 1] = {};
+    const DWORD tempLength = ::GetTempPathW(MAX_PATH, tempPath);
+    const std::wstring root = tempLength == 0 || tempLength > MAX_PATH
+        ? std::wstring() : std::wstring(tempPath) + L"WinTCP-Incident-Test-" +
+            std::to_wstring(::GetCurrentProcessId()) + L"-" +
+            std::to_wstring(::GetTickCount64());
+    SECURITY_ATTRIBUTES security = {sizeof(security), nullptr, FALSE};
+    const bool rootReady = !root.empty() && ::CreateDirectoryW(root.c_str(), &security);
+    IncidentSnapshot incident;
+    incident.id = "synthetic-incident";
+    incident.startMonotonicNs = 10;
+    incident.firstTriggerMonotonicNs = 20;
+    incident.endMonotonicNs = 30;
+    incident.triggers.push_back({20, "trigger-1", "synthetic test"});
+    incident.records.push_back({20, "event-1", "{\"kind\":\"event\"}"});
+    std::string archiveId, error;
+    const bool saved = rootReady && SaveIncidentArchive(root, security, incident,
+        &archiveId, &error);
+    std::vector<IncidentArchiveInfo> archives = saved
+        ? ListIncidentArchives(root, 10, &error) : std::vector<IncidentArchiveInfo>();
+    IncidentArchivePage page = saved
+        ? ReadIncidentArchivePage(root, archiveId, 0, 10, 65536)
+        : IncidentArchivePage{};
+    const bool roundtrip = saved && archives.size() == 1 &&
+        archives[0].id == archiveId &&
+        archives[0].manifestJson.find("\"replayReady\":false") != std::string::npos &&
+        page.error.empty() && page.records.size() == 1 &&
+        page.records[0].find("\"eventId\":\"event-1\"") != std::string::npos;
+    Check(r, "incident-archive.atomic-save-and-bounded-read", roundtrip,
+          error.empty() ? page.error : error);
+
+    bool tamperRejected = false;
+    std::wstring archiveDirectory;
+    if (saved) {
+        archiveDirectory = root + L"\\incident-" +
+            std::wstring(archiveId.begin(), archiveId.end());
+        const std::wstring eventPath = archiveDirectory + L"\\events.ndjson";
+        HANDLE file = ::CreateFileW(eventPath.c_str(), GENERIC_WRITE, 0, nullptr,
+            TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            const char corrupted[] = "{} \n";
+            DWORD written = 0;
+            const bool corruptWrite = ::WriteFile(file, corrupted,
+                static_cast<DWORD>(sizeof(corrupted) - 1), &written, nullptr) &&
+                written == sizeof(corrupted) - 1;
+            ::CloseHandle(file);
+            const auto corruptRead = ReadIncidentArchivePage(root, archiveId, 0, 10, 65536);
+            tamperRejected = corruptWrite &&
+                corruptRead.error == "incident_archive_integrity_failed";
+        }
+        file = ::CreateFileW(eventPath.c_str(), GENERIC_WRITE, 0, nullptr,
+            TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            const std::string original = "{\"captureMonotonicNs\":\"20\",\"eventId\":\"event-1\",\"event\":{\"kind\":\"event\"}}\n";
+            DWORD written = 0;
+            (void)::WriteFile(file, original.data(), static_cast<DWORD>(original.size()),
+                              &written, nullptr);
+            ::CloseHandle(file);
+        }
+    }
+    Check(r, "incident-archive.tampered-payload-refused", tamperRejected);
+
+    if (saved) {
+        const wchar_t* files[] = {L"manifest.json", L"events.ndjson",
+            L"checkpoints.ndjson", L"index.json"};
+        for (const wchar_t* name : files)
+            (void)::DeleteFileW((archiveDirectory + L"\\" + name).c_str());
+        (void)::RemoveDirectoryW(archiveDirectory.c_str());
+    }
+    if (rootReady) (void)::RemoveDirectoryW(root.c_str());
 }
 
 void CheckProcessInstances(TestResult& r) {
@@ -12392,6 +12485,7 @@ static const unsigned char kClientHello[] = {
     CheckProcessInstances(r);
     CheckLifecycleFlows(r);
     CheckIncidentRecorderModel(r);
+    CheckIncidentArchive(r);
     CheckT08Evaluator(r);
     CheckT11Evaluator(r);
     CheckT12Evaluator(r);
