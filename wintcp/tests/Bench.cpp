@@ -1973,6 +1973,21 @@ void CheckNetworkEvents(TestResult& r) {
     event.process.creationTimeFileTime = 123;
     Check(r, "events.verified-process", ProcessActionable(event.process));
 
+    const std::string lifecycle = R"({"normalizedFields":{"eventId":"trace:normalized-17","sourceSequence":"17","source":"etw_tcp","kind":"connection_established","occurredAtUtc":"2026-10-24T12:00:01.000Z","monotonicNs":"900","timebaseId":"trace:engine-monotonic","receivedAtUtc":"2026-10-24T12:00:01.010Z","pid":43,"creationTimeFileTime":"456","imagePath":"C:\\Apps\\Example.exe","observedImageName":"node.exe","flowId":"trace:flow-2","flowGeneration":"2","lateArrival":false,"incompleteChronology":false,"chronologyReason":null,"endpointRoleConfidence":"source_semantics","firstObservedMidSession":false,"transport":"tcp","tcpState":"established","family":"ipv4","localAddress":"192.0.2.10","localPort":50000,"localScopeId":0,"remoteAddress":"198.51.100.20","remotePort":443,"remoteScopeId":0,"direction":"outbound","interfaceGuid":null,"interfaceReason":"not_reported_by_source","confidence":"source_semantics","evidenceId":"trace:etw-17","coverageId":"trace"}})";
+    NetworkEvent normalized;
+    std::string parseError;
+    Check(r, "events.normalized-lifecycle-parse",
+          ParseLifecycleDerivedEvent(lifecycle, &normalized, &parseError) &&
+          normalized.kind == NetworkEventKind::ConnectionEstablished &&
+          normalized.direction == "outbound" && normalized.process.pid == 43 &&
+          normalized.process.observedImageName == "node.exe" &&
+          normalized.remote.address == "198.51.100.20" &&
+          normalized.evidenceIds.size() == 1 &&
+          normalized.evidenceIds[0] == "trace:etw-17");
+    Check(r, "events.normalized-lifecycle-rejects-malformed",
+          !ParseLifecycleDerivedEvent("{\"normalizedFields\":null}",
+                                      &normalized, &parseError));
+
     NetworkEventJournal journal(2, 4096);
     journal.Append(event);
     const NetworkEventPage first = journal.Read("", 1);
@@ -1981,6 +1996,8 @@ void CheckNetworkEvents(TestResult& r) {
     journal.Append(event);
     event.eventId = "epoch:3";
     journal.Append(event);
+    Check(r, "events.duplicate-evidence-ignored",
+          !journal.Append(event) && journal.Size() == 2);
     Check(r, "events.bounded", journal.Size() == 2 && journal.EvictedRecords() == 1);
     Check(r, "events.expired-cursor", journal.Read(first.nextCursor.substr(0, first.nextCursor.find(':') + 1) + "0", 5).cursorExpired);
     Check(r, "events.remaining-page", journal.Read(first.nextCursor, 5).items.size() == 2);
@@ -2024,6 +2041,14 @@ void CheckSnapshotEvents(TestResult& r) {
     Check(r, "snapshot.tuple-reuse-new-flow", reappeared.size() == 1 &&
           reappeared[0].flowId != reused[0].flowId &&
           !reappeared[0].firstObservedMidSession);
+    const std::string preGapFlow = reappeared[0].flowId;
+    adapter.Reset();
+    const auto postGapBaseline = adapter.Observe({row}, "after-gap", 600);
+    Check(r, "snapshot.reset-baseline-suppresses-retroactive-alerts",
+          postGapBaseline.size() == 1 &&
+          postGapBaseline[0].kind == NetworkEventKind::EndpointObserved &&
+          postGapBaseline[0].firstObservedMidSession &&
+          postGapBaseline[0].flowId != preGapFlow);
 }
 
 void CheckEngineConfig(TestResult& r) {
@@ -2155,6 +2180,8 @@ void CheckEngineOperations(TestResult& r) {
     EngineOperations separate;
     separate.SetEpoch("separate");
     const auto collector = separate.Submit("uac", "", "", 0, "collector.start");
+    const auto safety = separate.Submit("release", "", "", 1,
+                                        "collector.events-stop");
     const auto general = separate.Submit("save", "rev", "config", 0);
     EngineOperation* generalNext = separate.TakeNextQueued(EngineOperationQueue::General);
     Check(r, "engine-ops.collector-does-not-block-general",
@@ -2162,8 +2189,11 @@ void CheckEngineOperations(TestResult& r) {
           separate.HasQueued(EngineOperationQueue::Collector) &&
           !separate.HasQueued(EngineOperationQueue::General));
     EngineOperation* collectorNext = separate.TakeNextQueued(EngineOperationQueue::Collector);
-    Check(r, "engine-ops.collector-queue-selection", collectorNext != nullptr &&
-          collectorNext->id == collector.id && !separate.HasQueued());
+    const bool safetyFirst = collectorNext != nullptr && collectorNext->id == safety.id;
+    collectorNext = separate.TakeNextQueued(EngineOperationQueue::Collector);
+    Check(r, "engine-ops.collector-safety-priority", safetyFirst &&
+          collectorNext != nullptr && collectorNext->id == collector.id &&
+          !separate.HasQueued());
     EngineOperations ordered;
     ordered.SetEpoch("ordered");
     const auto a = ordered.Submit("a", "rev", "a", 100);
@@ -2201,19 +2231,57 @@ void CheckEngineOperations(TestResult& r) {
           journal.Find(first.id, 50) != nullptr &&
           journal.Find(first.id, 3600099) != nullptr &&
           journal.Find(first.id, 3600100) == nullptr);
-    for (unsigned i = 0; i < 1000; ++i)
-        (void)journal.Submit("pending-" + std::to_string(i), "rev-1",
-                             "config-a", 3600101);
-    Check(r, "engine-ops.bounded-pending", journal.Size() == 1000 &&
-          journal.Submit("overflow", "rev-1", "config-a", 3600102).disposition ==
-              OperationDisposition::Full);
+    std::string lastGeneralId;
+    for (unsigned i = 0; i < 900; ++i) {
+        const OperationSubmission submitted = journal.Submit(
+            "pending-" + std::to_string(i), "rev-1", "config-a", 3600101);
+        if (submitted.disposition == OperationDisposition::Created)
+            lastGeneralId = submitted.id;
+    }
+    Check(r, "engine-ops.general-lane-bounded", journal.Size() == 900 &&
+          journal.Submit("general-overflow", "rev-1", "config-a", 3600102)
+              .disposition == OperationDisposition::Full);
+    bool collectorLaneFilled = true;
+    for (unsigned i = 0; i < 36; ++i) {
+        const OperationSubmission submitted = journal.Submit(
+            "collector-work-" + std::to_string(i), "", "preview", 3600103,
+            "collector.preview");
+        collectorLaneFilled = collectorLaneFilled &&
+            submitted.disposition == OperationDisposition::Created;
+    }
+    Check(r, "engine-ops.collector-work-lane-bounded",
+          collectorLaneFilled && journal.Size() == 936 &&
+          journal.Submit("collector-work-overflow", "", "preview", 3600104,
+              "collector.preview").disposition == OperationDisposition::Full);
+    OperationSubmission firstSafetyControl;
+    bool safetyLaneFilled = true;
+    for (unsigned i = 0; i < 64; ++i) {
+        const OperationSubmission submitted = journal.Submit(
+            "collector-release-" + std::to_string(i), "", "release", 3600105,
+            "collector.release");
+        if (i == 0) firstSafetyControl = submitted;
+        safetyLaneFilled = safetyLaneFilled &&
+            submitted.disposition == OperationDisposition::Created;
+    }
+    Check(r, "engine-ops.safety-lane-survives-other-queue-overload",
+          safetyLaneFilled && journal.Size() == 1000 &&
+          journal.HasQueued(EngineOperationQueue::General) &&
+          journal.HasQueued(EngineOperationQueue::Collector));
+    Check(r, "engine-ops.safety-lane-bounded",
+          journal.Submit("safety-overflow", "", "release", 3600106,
+              "collector.release").disposition == OperationDisposition::Full);
+    EngineOperation* runningCollector =
+        journal.TakeNextQueued(EngineOperationQueue::Collector);
+    Check(r, "engine-ops.release-prioritized-over-reactive-work",
+          runningCollector != nullptr && runningCollector->id == firstSafetyControl.id);
+    Check(r, "engine-ops.running-safety-work-keeps-lane-full",
+          journal.Submit("safety-overflow-running", "", "release", 3600107,
+              "collector.release").disposition == OperationDisposition::Full);
     // Pending work remains addressable even after the completed-result TTL.
     Check(r, "engine-ops.pending-not-expired",
           journal.Find("test-epoch-2", 9000000) != nullptr);
-    EngineOperation* completed = journal.LatestQueued();
-    std::string completedId;
+    EngineOperation* completed = journal.FindMutable(lastGeneralId, 9000000);
     if (completed != nullptr) {
-        completedId = completed->id;
         completed->status = "failed";
         completed->completedAtMs = 9000000;
     }
@@ -2221,7 +2289,7 @@ void CheckEngineOperations(TestResult& r) {
           journal.Submit("after-complete", "rev-1", "config-a", 9000001)
               .disposition == OperationDisposition::Created &&
           journal.Size() == 1000 &&
-          journal.Find(completedId, 9000001) == nullptr);
+          journal.Find(lastGeneralId, 9000001) == nullptr);
 }
 
 void CheckEngineClock(TestResult& r) {
@@ -2245,6 +2313,61 @@ void CheckEngineClock(TestResult& r) {
     const ClockObservation monotonicReset = clock.Observe(101000, 4000);
     Check(r, "engine-clock.monotonic-reset", monotonicReset.changed &&
           monotonicReset.changes == 3);
+
+    EngineClock pauseClock("pause-epoch");
+    const ClockObservation pauseFirst = pauseClock.Observe(100000, 1000, 1000);
+    const ClockObservation normalDelay = pauseClock.Observe(102000, 3000, 1000);
+    const ClockObservation resumed = pauseClock.Observe(108001, 9001, 1000);
+    Check(r, "engine-clock.normal-sample-gap-not-raised",
+          !pauseFirst.samplingGap && !normalDelay.samplingGap &&
+          normalDelay.elapsedMonotonicMs == 2000);
+    Check(r, "engine-clock.extended-pause-reported",
+          resumed.samplingGap && resumed.elapsedMonotonicMs == 6001);
+
+    EngineClock slowClock("slow-epoch");
+    slowClock.Observe(100000, 1000, 10000);
+    const ClockObservation slowCadence = slowClock.Observe(145000, 46000, 10000);
+    Check(r, "engine-clock.threshold-scales-with-sampling-cadence",
+          !slowCadence.samplingGap);
+}
+
+void CheckQpcClockMapper(TestResult& r) {
+    using namespace wintcp;
+    QpcClockMapper mapper;
+    Check(r, "qpc-clock.initial-anchor", mapper.Reset(1000, 10000000, 1000) &&
+          mapper.Stable() && mapper.Generation() == 1);
+    const QpcClockUpdate steady = mapper.Observe(2000, 20000000, true);
+    Check(r, "qpc-clock.steady-pair", steady.sampleAccepted && steady.stable &&
+          !steady.mappingChanged && steady.generation == 1);
+
+    const QpcClockUpdate jump = mapper.Observe(3000, 35000000, true);
+    std::uint64_t projected = 0;
+    Check(r, "qpc-clock.discontinuity-starts-segment",
+          jump.mappingChanged && !jump.sampleAccepted && !jump.stable &&
+          jump.generation == 2 && !mapper.Project(3000, &projected));
+    const QpcClockUpdate firstStable = mapper.Observe(4000, 45000000, true);
+    Check(r, "qpc-clock.one-pair-does-not-recover",
+          firstStable.sampleAccepted && !firstStable.stable &&
+          !firstStable.recovered);
+    const QpcClockUpdate recovered = mapper.Observe(5000, 55000000, true);
+    Check(r, "qpc-clock-recovers-after-corroboration",
+          recovered.sampleAccepted && recovered.stable && recovered.recovered &&
+          recovered.generation == 2 && mapper.Recoveries() == 1 &&
+          mapper.Project(5000, &projected) && projected == 55000000);
+
+    const QpcClockUpdate unreliable = mapper.Observe(6000, 90000000, false);
+    Check(r, "qpc-clock-unreliable-pair-does-not-reanchor",
+          !unreliable.sampleAccepted && unreliable.stable &&
+          unreliable.generation == 2 && mapper.Project(6000, &projected) &&
+          projected == 65000000);
+    const QpcClockUpdate reset = mapper.Observe(400, 56000000, true);
+    Check(r, "qpc-clock-counter-reset-starts-new-segment",
+          reset.mappingChanged && !reset.stable && reset.generation == 3);
+    const QpcClockUpdate resetFirst = mapper.Observe(1400, 66000000, true);
+    const QpcClockUpdate resetRecovered = mapper.Observe(2400, 76000000, true);
+    Check(r, "qpc-clock-counter-reset-recovers",
+          !resetFirst.stable && resetRecovered.recovered &&
+          resetRecovered.stable && resetRecovered.generation == 3);
 }
 
 void CheckRecipeModel(TestResult& r) {
@@ -2295,6 +2418,25 @@ void CheckRecipeModel(TestResult& r) {
     Check(r, "recipe.update-new-disabled",
           !ValidateRecipeUpdate({}, {recipe}, &error) &&
           error == "new_recipe_must_start_disabled");
+    Check(r, "recipe.active-grant-retained-for-unchanged-revision",
+          RecipeOwnersToInvalidate({recipe}, {recipe}).empty());
+    RecipeDef renamed = recipe;
+    renamed.name = "Renamed app";
+    ++renamed.revision;
+    const auto revisionInvalidation = RecipeOwnersToInvalidate({recipe}, {renamed});
+    Check(r, "recipe.active-grant-invalidated-on-revision-change",
+          revisionInvalidation.size() == 1 &&
+          revisionInvalidation[0] == "recipe:watch-app");
+    RecipeDef disabledRevision = recipe;
+    disabledRevision.enabled = false;
+    ++disabledRevision.revision;
+    const auto disableInvalidation = RecipeOwnersToInvalidate(
+        {recipe}, {disabledRevision});
+    Check(r, "recipe.active-grant-invalidated-on-disable",
+          disableInvalidation.size() == 1 &&
+          disableInvalidation[0] == "recipe:watch-app");
+    Check(r, "recipe.active-grant-invalidated-on-delete",
+          RecipeOwnersToInvalidate({recipe}, {}).size() == 1);
     Check(r, "recipe.unknown-trigger-rejected",
           !ParseRecipes("WinTCP-Recipes:1\nwatch-app|1|1|arbitrary|60|" +
                         std::string("416263") + "|433a5c412e657865\n",
@@ -2312,8 +2454,44 @@ void CheckRecipeModel(TestResult& r) {
     event.process.creationTimeKnown = true;
     event.process.creationTimeFileTime = 123;
     event.process.imagePath = recipe.imagePath;
+    event.local = {"192.0.2.10", 51000, 0, true};
     event.remote = {"198.51.100.20", 443, 0, true};
     event.monotonicNs = 1000000000ULL;
+    event.eventId = "fixture:endpoint";
+    event.occurredAtUtc = "2026-10-24T12:00:00.000Z";
+    NetworkEvent actionEvent = event;
+    actionEvent.kind = NetworkEventKind::ConnectionEstablished;
+    actionEvent.direction = "outbound";
+    actionEvent.endpointRoleConfidence = "source_semantics";
+    Check(r, "recipe.action-eligible-verified-outbound-tcp",
+          RecipeActionEventEligible(recipe, actionEvent, true));
+    Check(r, "recipe.action-requires-current-user",
+          !RecipeActionEventEligible(recipe, actionEvent, false));
+    NetworkEvent ineligible = actionEvent;
+    ineligible.kind = NetworkEventKind::EndpointObserved;
+    Check(r, "recipe.action-rejects-snapshot-evidence",
+          !RecipeActionEventEligible(recipe, ineligible, true));
+    ineligible = actionEvent;
+    ineligible.direction = "inbound";
+    Check(r, "recipe.action-rejects-inbound-evidence",
+          !RecipeActionEventEligible(recipe, ineligible, true));
+    ineligible = actionEvent;
+    ineligible.incompleteChronology = true;
+    Check(r, "recipe.action-rejects-incomplete-chronology",
+          !RecipeActionEventEligible(recipe, ineligible, true));
+    ineligible = actionEvent;
+    ineligible.endpointRoleConfidence = "inferred";
+    Check(r, "recipe.action-requires-source-semantics",
+          !RecipeActionEventEligible(recipe, ineligible, true));
+    ineligible = actionEvent;
+    ineligible.transport = "udp";
+    Check(r, "recipe.action-rejects-transport-kind-mismatch",
+          !RecipeActionEventEligible(recipe, ineligible, true));
+    NetworkEvent udpAction = actionEvent;
+    udpAction.kind = NetworkEventKind::UdpActivity;
+    udpAction.transport = "udp";
+    Check(r, "recipe.action-eligible-verified-outbound-udp",
+          RecipeActionEventEligible(recipe, udpAction, true));
     RecipeEvaluator evaluator;
     event.firstObservedMidSession = true;
     Check(r, "recipe.no-baseline-storm", !evaluator.Evaluate(recipe, event).fire);
@@ -2322,13 +2500,127 @@ void CheckRecipeModel(TestResult& r) {
     Check(r, "recipe.snapshot-coverage-honest", first.fire &&
           first.coverage == "snapshot_tcp_appearance_direction_unknown");
     const std::string notice = RecipeNotificationJson(recipe, event, first,
-                                                        "epoch:notification-1");
+        "epoch:notification-1", event.monotonicNs, 10000);
     Check(r, "recipe.notification-honest", notice.find("direction and connection attempt are not established") != std::string::npos &&
-          notice.find("\"acknowledged\":false") != std::string::npos);
+          notice.find("\"acknowledged\":false") != std::string::npos &&
+          notice.find("\"deliveryStatus\":\"inbox\"") != std::string::npos &&
+          notice.find("\"recoveryCooldownKey\":") != std::string::npos &&
+          notice.find("\"recoverySavedUtcMs\":\"10000\"") != std::string::npos);
+    const std::uint64_t recoverySavedNs = event.monotonicNs + 1000000000ULL;
+    const std::uint64_t recoverySavedUtcMs = 11000;
+    const std::uint64_t remainingCooldownNs = first.cooldownUntilMonotonicNs >
+        recoverySavedNs ? first.cooldownUntilMonotonicNs - recoverySavedNs : 0;
+    RecipeEvaluator recoveredAfterNoticeOnly;
+    Check(r, "recipe.notification-recovers-missing-checkpoint",
+        remainingCooldownNs > 0 && recoveredAfterNoticeOnly.RecoverFiredCooldown(
+            first.cooldownKey, remainingCooldownNs, recoverySavedNs,
+            recoverySavedUtcMs, recoverySavedNs + 1000000000ULL,
+            recoverySavedUtcMs + 1000) && [&]() {
+                NetworkEvent retry = event;
+                retry.monotonicNs = recoverySavedNs + 1000000000ULL;
+                return !recoveredAfterNoticeOnly.Evaluate(recipe, retry).fire;
+            }());
+    RecipeEvaluator recoveredAfterClockRollback;
+    Check(r, "recipe.notification-recovery-clock-rollback-conservative",
+        recoveredAfterClockRollback.RecoverFiredCooldown(first.cooldownKey,
+            remainingCooldownNs, recoverySavedNs, recoverySavedUtcMs,
+            recoverySavedNs - 1000000000ULL, recoverySavedUtcMs + 1000) && [&]() {
+                NetworkEvent retry = event;
+                retry.monotonicNs = recoverySavedNs - 1000000000ULL;
+                return !recoveredAfterClockRollback.Evaluate(recipe, retry).fire;
+            }());
+    RecipeEvaluator expiredNoticeRecovery;
+    Check(r, "recipe.notification-recovery-expired-cooldown",
+        expiredNoticeRecovery.RecoverFiredCooldown(first.cooldownKey,
+            remainingCooldownNs, recoverySavedNs, recoverySavedUtcMs,
+            recoverySavedNs + remainingCooldownNs + 1,
+            recoverySavedUtcMs + remainingCooldownNs / 1000000ULL + 1) &&
+        expiredNoticeRecovery.RememberedKeys() == 0);
+    RecipeEvaluator lifecycleEvaluator;
+    NetworkEvent established = event;
+    established.eventId = "trace:normalized-1";
+    established.kind = NetworkEventKind::ConnectionEstablished;
+    established.source = "etw_tcp";
+    established.direction = "outbound";
+    established.endpointRoleConfidence = "source_semantics";
+    established.firstObservedMidSession = false;
+    established.monotonicNs = 9000000000ULL;
+    const RecipeHit lifecycleHit = lifecycleEvaluator.Evaluate(recipe, established);
+    Check(r, "recipe.normalized-outbound-lifecycle-fires",
+          lifecycleHit.fire && lifecycleHit.reason == "outbound_tcp_connection_established" &&
+          lifecycleHit.coverage == "etw_tcp_lifecycle_normalized");
+    RecipeEvaluator crossSourceEvaluator;
+    const RecipeHit snapshotNotice = crossSourceEvaluator.Evaluate(recipe, event);
+    NetworkEvent lifecycleAfterSnapshot = established;
+    lifecycleAfterSnapshot.monotonicNs = event.monotonicNs + 1000000000ULL;
+    const RecipeHit lifecycleSuppressed = crossSourceEvaluator.Evaluate(
+        recipe, lifecycleAfterSnapshot);
+    Check(r, "recipe.active-candidate-survives-passive-cooldown",
+          snapshotNotice.fire && lifecycleSuppressed.matched &&
+          !lifecycleSuppressed.fire && RecipeActionCandidateEligible(
+              lifecycleSuppressed, recipe, lifecycleAfterSnapshot),
+          "snapshotFire=" + std::to_string(snapshotNotice.fire) +
+          " eventMatched=" + std::to_string(lifecycleSuppressed.matched) +
+          " eventFire=" + std::to_string(lifecycleSuppressed.fire) +
+          " actionEligible=" + std::to_string(RecipeActionEventEligible(
+              recipe, lifecycleAfterSnapshot, true)));
+    RecipeDef exactDedupRecipe = recipe;
+    exactDedupRecipe.cooldownSeconds = 0;
+    RecipeEvaluator exactDedup;
+    const RecipeHit exactSnapshot = exactDedup.Evaluate(exactDedupRecipe, event);
+    NetworkEvent exactLifecycle = established;
+    exactLifecycle.monotonicNs = event.monotonicNs + 60000000000ULL;
+    const RecipeHit exactEtw = exactDedup.Evaluate(exactDedupRecipe, exactLifecycle);
+    Check(r, "recipe.snapshot-etw-same-flow-notifies-once",
+          exactSnapshot.fire && exactEtw.matched && !exactEtw.fire &&
+          exactEtw.suppressed == 1 && RecipeActionCandidateEligible(
+              exactEtw, exactDedupRecipe, exactLifecycle));
+    RecipeEvaluator reverseDedup;
+    const RecipeHit etwFirst = reverseDedup.Evaluate(exactDedupRecipe, established);
+    NetworkEvent snapshotAfterEtw = event;
+    snapshotAfterEtw.monotonicNs = established.monotonicNs + 60000000000ULL;
+    const RecipeHit snapshotSecond = reverseDedup.Evaluate(exactDedupRecipe,
+                                                            snapshotAfterEtw);
+    Check(r, "recipe.etw-snapshot-same-flow-notifies-once",
+          etwFirst.fire && snapshotSecond.matched && !snapshotSecond.fire);
+    RecipeEvaluator separateFlow;
+    Check(r, "recipe.different-flow-not-cross-source-deduped",
+          separateFlow.Evaluate(exactDedupRecipe, event).fire && [&]() {
+              NetworkEvent otherFlow = established;
+              otherFlow.remote.port = 8443;
+              otherFlow.monotonicNs = event.monotonicNs + 1000000000ULL;
+              return separateFlow.Evaluate(exactDedupRecipe, otherFlow).fire;
+          }());
+    RecipeEvaluator expiredDedup;
+    Check(r, "recipe.cross-source-window-expires",
+          expiredDedup.Evaluate(exactDedupRecipe, event).fire && [&]() {
+              NetworkEvent later = established;
+              later.monotonicNs = event.monotonicNs + 121000000000ULL;
+              return expiredDedup.Evaluate(exactDedupRecipe, later).fire;
+          }());
+    established.eventId = "trace:inbound-1";
+    established.direction = "inbound";
+    Check(r, "recipe.normalized-inbound-is-not-outbound",
+          !lifecycleEvaluator.Evaluate(recipe, established).matched);
+    NetworkEvent udp = established;
+    udp.eventId = "trace:udp-send-1";
+    udp.kind = NetworkEventKind::UdpActivity;
+    udp.transport = "udp";
+    udp.direction = "outbound";
+    udp.process.pid = 44;
+    udp.monotonicNs = 10000000000ULL;
+    const RecipeHit udpHit = lifecycleEvaluator.Evaluate(recipe, udp);
+    Check(r, "recipe.normalized-outbound-udp-fires",
+          udpHit.fire && udpHit.reason == "outbound_udp_activity" &&
+          udpHit.coverage == "etw_udp_send_normalized");
     event.monotonicNs += 1000000000ULL;
     const RecipeHit duplicate = evaluator.Evaluate(recipe, event);
     Check(r, "recipe.cooldown", duplicate.matched && !duplicate.fire &&
           duplicate.suppressed == 1);
+    const auto runtime = evaluator.Status(recipe.id, recipe.revision);
+    Check(r, "recipe.runtime-last-trigger-and-suppression",
+        runtime.lastEventId == event.eventId && runtime.lastReason == "new_remote_tcp_endpoint" &&
+        runtime.suppressed == 1 && runtime.revision == recipe.revision);
     const auto checkpoint = evaluator.Checkpoint(event.monotonicNs, 10000);
     RecipeEvaluator resumed;
     Check(r, "recipe.cooldown-checkpoint-restores", resumed.Restore(checkpoint,
@@ -2338,6 +2630,10 @@ void CheckRecipeModel(TestResult& r) {
     const auto resumedHit = resumed.Evaluate(recipe, resumedEvent);
     Check(r, "recipe.restart-retains-cooldown-and-count", !resumedHit.fire &&
         resumedHit.suppressed == 2);
+    const auto resumedRuntime = resumed.Status(recipe.id, recipe.revision);
+    Check(r, "recipe.runtime-restores-cooldown-and-suppression",
+        resumedRuntime.cooldownUntilMonotonicNs > resumedEvent.monotonicNs &&
+        resumedRuntime.suppressed == 2);
     RecipeEvaluator rolledBack;
     Check(r, "recipe.clock-rollback-conservative", rolledBack.Restore(checkpoint,
         event.monotonicNs, 9000, &error) && !rolledBack.Evaluate(recipe, event).fire);
@@ -2405,6 +2701,25 @@ void CheckLifecycleFlows(TestResult& r) {
           first[0].lifecycle.kind == NetworkEventKind::ConnectionEstablished &&
           first[1].lifecycle.kind == NetworkEventKind::ConnectionClosed &&
           !first[1].lifecycle.midSession && first[0].lifecycle.roleConfidence == "source_semantics");
+    LifecycleFlowModel nameOnlyModel("name-only", 1000);
+    auto namedConnect = observation(LifecycleType::TcpConnect, 1, 1000);
+    namedConnect.process.creationTimeKnown = false;
+    namedConnect.process.creationTimeFileTime = 0;
+    namedConnect.process.imagePath.clear();
+    namedConnect.process.observedImageName = "node.exe";
+    namedConnect.observedImageName = "node.exe";
+    auto unnamedClose = observation(LifecycleType::TcpDisconnect, 2, 1100);
+    unnamedClose.process.creationTimeKnown = false;
+    unnamedClose.process.creationTimeFileTime = 0;
+    unnamedClose.process.imagePath.clear();
+    (void)nameOnlyModel.Push(namedConnect, 10000);
+    (void)nameOnlyModel.Push(unnamedClose, 10001);
+    const auto nameOnlyFlow = nameOnlyModel.Drain(10300);
+    Check(r, "lifecycle-flow.close-retains-only-correlated-image-name",
+          nameOnlyFlow.size() == 2 &&
+          nameOnlyFlow[1].process.observedImageName == "node.exe" &&
+          nameOnlyFlow[1].identityReason == "flow_correlated_image_name_only" &&
+          !ProcessActionable(nameOnlyFlow[1].process));
     (void)model.Push(observation(LifecycleType::TcpDisconnect, 3, 2100), 11000);
     (void)model.Push(observation(LifecycleType::TcpConnect, 4, 2000), 11001);
     const auto reordered = model.Drain(11300);
@@ -2471,10 +2786,23 @@ void CheckProcessInstances(TestResult& r) {
           cache.Remember(old, 100, 200) && cache.Find(42, 150, &found) &&
           found.creationTimeFileTime == 1000 && !cache.Find(42, 99, &found) &&
           !cache.Find(42, 201, &found));
+    NetworkProcessIdentity nameOnly;
+    nameOnly.pid = 42;
+    nameOnly.observedImageName = "node.exe";
+    Check(r, "process-instance.image-name-is-not-actionable",
+          !ProcessActionable(nameOnly));
     Check(r, "process-instance.pid-reuse-keeps-historical-owner",
           cache.Remember(current, 300, 400) && cache.Find(42, 150, &found) &&
           found.imagePath == old.imagePath && cache.Find(42, 350, &found) &&
           found.imagePath == current.imagePath && !cache.Find(42, 250, &found));
+    ProcessInstanceCache boundary;
+    Check(r, "process-instance.lifecycle-boundary-preserves-history",
+          boundary.Remember(old, 100, 250),
+          "insert old interval before lifecycle boundary");
+    boundary.EndAt(42, 200);
+    Check(r, "process-instance.lifecycle-boundary-closes-old-owner",
+          boundary.Find(42, 150, &found) && found.imagePath == old.imagePath &&
+          !boundary.Find(42, 200, &found));
     Check(r, "process-instance.live-handle-revalidation",
           cache.RevalidateLive(old, 210, 240) && cache.Find(42, 230, &found) &&
           found.creationTimeFileTime == old.creationTimeFileTime);
@@ -2503,12 +2831,28 @@ void CheckProcessInstances(TestResult& r) {
 
 void CheckLifecycleDecoder(TestResult& r) {
     using namespace wintcp;
+    const GUID lifecycleOwnerA = LifecycleSessionOwnerGuid(L"S-1-5-21-1-2-3-1001.7");
+    const GUID lifecycleOwnerAAgain = LifecycleSessionOwnerGuid(L"S-1-5-21-1-2-3-1001.7");
+    const GUID lifecycleOwnerB = LifecycleSessionOwnerGuid(L"S-1-5-21-1-2-3-1001.8");
+    Check(r, "lifecycle.owner-guid-is-stable-and-session-scoped",
+          !::IsEqualGUID(lifecycleOwnerA, GUID_NULL) &&
+          ::IsEqualGUID(lifecycleOwnerA, lifecycleOwnerAAgain) &&
+          !::IsEqualGUID(lifecycleOwnerA, lifecycleOwnerB) &&
+          LifecycleSessionOwnerMatches(lifecycleOwnerA, lifecycleOwnerA) &&
+          !LifecycleSessionOwnerMatches(lifecycleOwnerB, lifecycleOwnerA) &&
+          !LifecycleSessionOwnerMatches(lifecycleOwnerA, GUID_NULL));
     struct Fields final : EventPropertyReader {
         std::map<std::wstring, std::vector<unsigned char>> values;
         bool Read(const wchar_t* name, std::vector<unsigned char>* bytes) override {
             const auto found = values.find(name);
             if (found == values.end()) return false;
             *bytes = found->second;
+            return true;
+        }
+        bool ReadText(const wchar_t* name, std::vector<unsigned char>* bytes,
+                      bool* unicode) override {
+            if (!Read(name, bytes)) return false;
+            *unicode = true;
             return true;
         }
     } fields;
@@ -2590,8 +2934,28 @@ void CheckLifecycleDecoder(TestResult& r) {
           decoded.destination.address == "2001:db8::1");
     header.ProviderId = kProcessEventProviderGuid;
     header.EventDescriptor.Version = 4;
-    header.EventDescriptor.Opcode = 3;
+    header.EventDescriptor.Opcode = 1;
     fields.values[L"ProcessId"] = {84, 0, 0, 0};
+    fields.values[L"ImageFileName"] = {'C',0,':',0,'\\',0,'A',0,'p',0,'p',0,'s',0,'\\',0,
+                                        'S',0,'h',0,'o',0,'r',0,'t',0,'.',0,'e',0,'x',0,'e',0,0,0};
+    Check(r, "lifecycle.process-start-image-is-decoded",
+          DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Decoded &&
+          decoded.type == LifecycleType::ProcessStart && decoded.pid == 84 &&
+          decoded.observedImageName == "C:\\Apps\\Short.exe");
+    TraceObservation shortProcess;
+    shortProcess.sequence = 8;
+    shortProcess.decoded = decoded;
+    shortProcess.process.pid = decoded.pid;
+    shortProcess.observedImageName = decoded.observedImageName;
+    shortProcess.process.observedImageName = decoded.observedImageName;
+    shortProcess.identityReason = "kernel_process_start_image_name_only";
+    const auto shortEvidence = TraceObservationJson(shortProcess, "fixture", 10000000);
+    Check(r, "lifecycle.process-start-image-remains-unverified",
+          shortEvidence.find("\"imagePath\":null") != std::string::npos &&
+          shortEvidence.find("\"observedImageName\":\"C:\\\\Apps\\\\Short.exe\"") != std::string::npos &&
+          shortEvidence.find("kernel_process_start_image_name_only") != std::string::npos &&
+          shortEvidence.find("\"creationTimeFileTime\":null") != std::string::npos);
+    header.EventDescriptor.Opcode = 3;
     Check(r, "lifecycle.process-rundown-is-not-start",
           DecodeLifecycleFields(header, fields, &decoded, &error) == EventDecodeResult::Decoded &&
           decoded.type == LifecycleType::ProcessRundown && decoded.pid == 84 &&
@@ -2616,6 +2980,13 @@ void CheckRestrictionModel(TestResult& r) {
     plan.remotePort = 443;
     Check(r, "restriction.literal-peer", ValidateRestrictionPlan(plan, &error) &&
           RestrictionPlanHash(plan) != appHash);
+    plan.remoteAddress = "2001:db8::20";
+    Check(r, "restriction.ipv6-literal-peer",
+          ValidateRestrictionPlan(plan, &error));
+    plan.remoteAddress = "fe80::20%12";
+    Check(r, "restriction.scoped-ipv6-refused-without-interface-binding",
+          !ValidateRestrictionPlan(plan, &error) &&
+          error == "peer_must_be_literal_ip");
     plan.remoteAddress = "example.com";
     Check(r, "restriction.reject-hostname",
           !ValidateRestrictionPlan(plan, &error) &&
@@ -2666,7 +3037,7 @@ void CheckRestrictionLease(TestResult& r) {
     plan.durationSeconds = 60;
     std::string error;
     broker.Heartbeat({1000, 100000});
-    Check(r, "restriction.preview", broker.Preview(plan, "grant-1", {1000, 100000}, &error));
+    Check(r, "restriction.preview", broker.Preview(plan, "grant-1", "manual", {1000, 100000}, &error));
     RestrictionPlan changed = plan;
     changed.durationSeconds = 300;
     Check(r, "restriction.plan-bound-one-use",
@@ -2674,10 +3045,10 @@ void CheckRestrictionLease(TestResult& r) {
           error == "approval_expired_or_changed" &&
           !broker.Apply(plan, "grant-1", "lease-1", "manual", {1001, 100001}, &error));
     Check(r, "restriction.two-independent-leases",
-          broker.Preview(plan, "grant-2", {1002, 100002}, &error) &&
+          broker.Preview(plan, "grant-2", "manual", {1002, 100002}, &error) &&
           broker.Apply(plan, "grant-2", "lease-1", "manual", {1003, 100003}, &error) &&
-          broker.Preview(plan, "grant-3", {1004, 100004}, &error) &&
-          broker.ApplyApproved("grant-3", "lease-2", "recipe", {1005, 100005}, &error) &&
+          broker.Preview(plan, "grant-3", "manual", {1004, 100004}, &error) &&
+          broker.ApplyApproved("grant-3", "lease-2", {1005, 100005}, &error) &&
           filters.installed.size() == 2);
     Check(r, "restriction.release-only-owned-lease",
           broker.Release("lease-1", &error) && filters.installed.size() == 1 &&
@@ -2687,12 +3058,12 @@ void CheckRestrictionLease(TestResult& r) {
     Check(r, "restriction.monotonic-expiry",
           filters.installed.empty() && broker.Active().empty());
     Check(r, "restriction.approval-timeout",
-          broker.Preview(plan, "grant-4", {70000, 160000}, &error) &&
+          broker.Preview(plan, "grant-4", "manual", {70000, 160000}, &error) &&
           !broker.Apply(plan, "grant-4", "lease-3", "manual", {100001, 190001}, &error) &&
           error == "engine_heartbeat_missing");
     broker.Heartbeat({200000, 290000});
     Check(r, "restriction.heartbeat-close",
-          broker.Preview(plan, "grant-5", {200000, 290000}, &error) &&
+          broker.Preview(plan, "grant-5", "manual", {200000, 290000}, &error) &&
           broker.Apply(plan, "grant-5", "lease-4", "manual", {200001, 290001}, &error));
     broker.Sweep({210000, 300000});
     Check(r, "restriction.heartbeat-close-state",
@@ -2710,6 +3081,82 @@ void CheckRestrictionLease(TestResult& r) {
         sawManualRelease = sawManualRelease || change.reason == "manual_release";
     }
     Check(r, "restriction.distinct-ordered-outcomes", ordered && sawExpiry && sawManualRelease);
+    FakeFilters ownerFilters;
+    RestrictionLeaseController ownerBroker(&ownerFilters);
+    ownerBroker.Heartbeat({1000, 100000});
+    const bool ownerPreviewed = ownerBroker.Preview(plan, "owner-grant",
+        "recipe:monitor-1", {1000, 100000}, &error);
+    const bool duplicateOwnerPreviewRefused = !ownerBroker.Preview(plan,
+        "owner-grant-2", "recipe:monitor-1", {1000, 100000}, &error) &&
+        error == "owner_approval_pending";
+    const bool ownerApplied = ownerPreviewed && ownerBroker.ApplyApproved(
+        "owner-grant", "owner-lease", {1001, 100001}, &error);
+    const bool alreadyArmedRefused = !ownerBroker.Preview(plan, "owner-grant-3",
+        "recipe:monitor-1", {1001, 100001}, &error) &&
+        error == "owner_already_armed";
+    ownerBroker.ReleaseOwner("recipe:monitor-1", {1002, 100002});
+    Check(r, "restriction.owner-disarm-releases-only-recipe-lease",
+          ownerPreviewed && duplicateOwnerPreviewRefused && ownerApplied &&
+          alreadyArmedRefused && ownerBroker.Active().empty() &&
+          ownerFilters.installed.empty() &&
+          ownerBroker.Changes().back().reason == "owner_disarmed");
+    FakeFilters reactiveFilters;
+    RestrictionLeaseController reactiveBroker(&reactiveFilters);
+    RestrictionPlan approvedScope = plan;
+    approvedScope.imageFileIdentity = "123:456";
+    approvedScope.protocol = RestrictionProtocol::TcpAndUdp;
+    const RestrictionNow reactiveNow{2000, 101000};
+    reactiveBroker.Heartbeat(reactiveNow);
+    const bool reactiveArmed = reactiveBroker.ArmRecipeAction(
+        "recipe:monitor-2", 1, approvedScope, 7200, 600, 1, 600,
+        reactiveNow, &error);
+    RestrictionPlan actionPlan = approvedScope;
+    actionPlan.remoteAddress = "198.51.100.20";
+    actionPlan.remotePort = 443;
+    actionPlan.protocol = RestrictionProtocol::Tcp;
+    actionPlan.durationSeconds = 600;
+    RestrictionPlan outsideScope = actionPlan;
+    outsideScope.imagePath = "C:\\Apps\\Other.exe";
+    RestrictionLease reactiveLease;
+    const bool outsideRefused = !reactiveBroker.ApplyRecipeAction(
+        "recipe:monitor-2", 1, "trace:event-1", "reactive-lease-1",
+        outsideScope, {2001, 101001}, &reactiveLease, &error) &&
+        error == "active_action_outside_approved_scope";
+    const bool revisionRefused = !reactiveBroker.ApplyRecipeAction(
+        "recipe:monitor-2", 2, "trace:event-revision", "reactive-lease-revision",
+        actionPlan, {2001, 101001}, &reactiveLease, &error) &&
+        error == "recipe_revision_changed";
+    const bool reactiveApplied = reactiveBroker.ApplyRecipeAction(
+        "recipe:monitor-2", 1, "trace:event-1", "reactive-lease-1",
+        actionPlan, {2001, 101001}, &reactiveLease, &error);
+    const bool reactiveReplayRefused = !reactiveBroker.ApplyRecipeAction(
+        "recipe:monitor-2", 1, "trace:event-1", "reactive-lease-2",
+        actionPlan, {2002, 101002}, &reactiveLease, &error) &&
+        error == "trigger_event_replayed";
+    reactiveBroker.Heartbeat({602001, 701001});
+    reactiveBroker.Sweep({602001, 701001});
+    reactiveBroker.Heartbeat({602002, 701002});
+    const bool actionBudgetEnforced = !reactiveBroker.ApplyRecipeAction(
+        "recipe:monitor-2", 1, "trace:event-2", "reactive-lease-2",
+        actionPlan, {602002, 701002}, &reactiveLease, &error) &&
+        error == "active_action_budget_exhausted";
+    Check(r, "restriction.reactive-grant-binds-revision-scope-replay-and-budget",
+          reactiveArmed && outsideRefused && revisionRefused && reactiveApplied &&
+          reactiveReplayRefused && actionBudgetEnforced &&
+          reactiveBroker.Active().empty() && reactiveFilters.installed.empty());
+    reactiveBroker.ReleaseOwner("recipe:monitor-2", {602003, 701003});
+    const bool grantExpires = reactiveBroker.ArmRecipeAction(
+        "recipe:monitor-2", 2, approvedScope, 60, 60, 1, 60,
+        {602004, 701004}, &error);
+    reactiveBroker.Heartbeat({662004, 761004});
+    reactiveBroker.Sweep({662004, 761004});
+    const bool grantRearmed = reactiveBroker.ArmRecipeAction(
+        "recipe:monitor-2", 2, approvedScope, 60, 60, 1, 60,
+        {662005, 761005}, &error);
+    reactiveBroker.ReleaseOwner("recipe:monitor-2", {662006, 761006});
+    Check(r, "restriction.reactive-grant-expires-and-disarm-cancels",
+          grantExpires && reactiveBroker.RecipeGrants().empty() &&
+          grantRearmed && reactiveBroker.RecipeGrants().empty());
     FakeFilters rateFilters;
     RestrictionLeaseController rateBroker(&rateFilters);
     unsigned created = 0;
@@ -2717,8 +3164,8 @@ void CheckRestrictionLease(TestResult& r) {
         const RestrictionNow time{1000 + i, 100000 + i};
         rateBroker.Heartbeat(time);
         const std::string id = "rate-" + std::to_string(i);
-        if (rateBroker.Preview(plan, id, time, &error) &&
-            rateBroker.ApplyApproved(id, id, "manual", time, &error)) ++created;
+        if (rateBroker.Preview(plan, id, "manual", time, &error) &&
+            rateBroker.ApplyApproved(id, id, time, &error)) ++created;
     }
     Check(r, "restriction.creation-rate-limit", created == 32 &&
           error == "restriction_creation_rate_limited");
@@ -11565,6 +12012,7 @@ static const unsigned char kClientHello[] = {
     CheckEngineStore(r);
     CheckEngineOperations(r);
     CheckEngineClock(r);
+    CheckQpcClockMapper(r);
     CheckRecipeModel(r);
     CheckRestrictionModel(r);
     CheckRestrictionLease(r);
