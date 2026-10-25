@@ -217,9 +217,11 @@ The Processes page lists the process snapshot, not only processes that own a con
 
 The Network connection menu also offers **Block this executable to this peer** when the selected live TCP connection has a known process lifetime and readable image path. The review scopes the rule to that executable, remote IP and remote port; the API revalidates the complete connection tuple and owning process lifetime before offering a one-use create action. This affects every instance of the executable for that peer and leaves existing connections open. When Windows also reports a service short name for that connection, **Block this service to this peer** adds both the executable and service scopes, which can distinguish one service hosted by `svchost.exe`. Scoped IPv6 literals that include a zone identifier are currently refused rather than risking loss of the interface scope.
 
-The Automations page includes **Monitors**, **Engine**, **Restrictions**, **Event history**, scenario-oriented CLI playbooks, a workbench for local WinTCP scripts, and the audit trail. Monitors are persistent exact-executable rules managed by the optional per-user engine; currently supported triggers are sampled TCP endpoint appearances and TCP listeners. They generate entries in the local notification inbox, but do not yet send desktop alerts or automatically apply restrictions. Snapshot sightings can miss short connections and do not establish direction or connection attempts. The playbooks remain on-demand command examples, not active detectors. Scripts execute the adjacent `wintcp.exe` with bounded arguments and output. Sensitive actions require a separate confirmation and can still require administrator rights. For packet-level connection-change logging, use the CLI `monitor start` command described in the [CLI guide](cli.md). This page does not provide a general-purpose task scheduler, cloud service, or remote notification service.
+The Automations page includes **Monitors**, **Engine**, **Restrictions**, **Event history**, scenario-oriented CLI playbooks, a workbench for local WinTCP scripts, and the audit trail. Monitors are persistent exact-executable rules managed by the optional per-user engine; sampled TCP sightings and TCP listeners remain passive, while the optional ETW collector can provide outbound TCP-established and UDP-activity events. Snapshot sightings can miss short connections and never establish direction or connection attempts. ETW process-start image-name strings can annotate PID/QPC-matched short-lived processes, but may be only basenames; they are not shown as verified executable paths and have no verified creation time, so they cannot authorize actions. Ambiguous or missing identity remains unknown. A supported outbound monitor can be explicitly armed either as a preemptive block or as a bounded event-triggered action. Event-triggered actions require the elevated collector, an enabled recipe, a live ETW event source, and a separate explicit confirmation; the first observed flow may already be established, and the temporary rule blocks subsequent matching traffic. Passive notification cooldown suppresses inbox alerts only; it does not suppress a separately approved action for a complete eligible lifecycle event. Grants are memory-only, revision-bound, expire within eight hours, and enforce action/duration budgets. They are not restored after engine or broker restart. The playbooks remain on-demand command examples, not active detectors. Scripts execute the adjacent `wintcp.exe` with bounded arguments and output. Sensitive actions require a separate confirmation and can still require administrator rights. For packet-level connection-change logging, use the CLI `monitor start` command described in the [CLI guide](cli.md). This page does not provide a general-purpose task scheduler, cloud service, or remote notification service.
 
 Firewall actions are explicit. The UI shows a preview before a supported rule is applied, records the action in the local audit trail, and does not elevate the process. Review the target and scope before confirming. Connection close is a separate action: it does not create a firewall rule.
+
+For outbound TCP recipe notifications, a snapshot sighting and an ETW-established event with the same complete tuple and verified process lifetime are correlated for up to two maximum snapshot intervals (120 seconds). The paired observations produce at most one recipe notification, while both source records remain visible in Event history. Correlation does not change Active eligibility: only a complete eligible ETW lifecycle event can enter the separately approved action path.
 
 ## Local data and privacy
 
@@ -275,21 +277,89 @@ shows its actual sample state and a small recent-events page. Start or stop it
 from the Engine or Monitors tab, or use `wintcp.exe engine start|stop`. The Web
 UI starts it as the current user without requesting elevation.
 
+The Monitors list shows whether each rule is disabled, starting, running, or
+degraded, its current cooldown state, and the latest trigger recorded in this
+engine session. Suppression counts cover matching observations skipped by that
+rule's cooldown; the inbox remains the durable trigger history across restarts.
+`deliveryStatus: "inbox"` means the notice was appended to WinTCP's local
+durable inbox; it does not claim that a browser or operating-system toast was
+shown. Older retained rows that used to say `pending` are normalized to `inbox`
+in the read view; the append-only on-disk history is not rewritten.
+Acknowledgment is a separate persisted user action.
+Lifecycle capability becomes available when event tracking is running, before
+any matching connection has occurred, so an active recipe can be armed in
+advance.
+**Arm notify + block** explicitly approves an outbound-activity recipe's exact
+executable, optional peer/port, approval lifetime, per-action lease duration,
+and action budget. The elevated broker holds the approved scope; the engine
+keeps a nonpersistent revision/expiry marker for trigger validation and UI
+status. Both are bound to the saved recipe revision and are not restored after
+restart. Only an actionable, normalized outbound TCP
+established or UDP activity event for that same executable can consume it; the
+broker rechecks the executable's file identity and verified WFP filters before
+reporting success. The notice is recorded in the inbox with the resulting lease
+ID and a direct link to its triggering retained event. This is post-observation
+mitigation, not prevention of the first attempt.
+The current UI exposes a one-action budget per arm; the broker also enforces
+the grant lifetime and cumulative-duration limits. Disarm, recipe edit/disable/
+delete, heartbeat loss, broker exit, and restart invalidate the grant and
+release owned temporary filters. After the action or restart, review and arm
+again if desired.
+Stopping event tracking also cancels recipe grants and releases their active
+recipe-owned leases, without affecting manual temporary leases.
+The Monitors page reports trigger-queue losses and failed active actions for
+the current engine session instead of implying that every observed trigger
+became a verified block.
+
 Automations **Restrictions** manages temporary outbound blocks separately from
 permanent Firewall Rules. Start the engine, then click **Start collector (UAC)**
 or explicitly launch `wintcp.exe collector run` from an elevated terminal for
 that same Windows user; opening the dashboard alone never requests elevation.
+The start operation completes only after the elevated helper confirms its
+same-user engine heartbeat. A ready helper may still report WFP unavailable;
+in that state lifecycle tracing can be used, but restriction actions stay
+disabled with the reported capability reason.
 Preview an exact
-executable and optional literal peer/port/protocol, review the user SID and
-duration, and apply within 30 seconds. The panel lists active leases, filter
-counts, expiry countdowns, individual release, and release-all. Collector exit
-removes its dynamic filters; existing connections may continue. Active
-monitor recipes are not yet connected to this manual restriction flow.
+executable and optional literal IPv4 or IPv6 peer/port/protocol, review the user SID and
+duration, and apply within 30 seconds. IPv6 zone-scoped literals are not accepted.
+An enabled outbound-activity monitor can
+be explicitly armed; its card shows the broker-reported **ARMED** state and
+lease expiry. Successful recipe-owned application creates a durable inbox
+notification linked to the restriction lease ID; it says the block was
+verified at apply time, while the Restrictions panel remains authoritative for
+current state. The Monitors card offers **Arm preemptive
+block** for supported outbound-activity recipes: the user chooses peer scope
+and a 1–480 minute lease, reviews the exact executable/scope/duration, and
+confirms separately. This is an explicit preemptive lease, not an automatic
+reaction to a snapshot observation. The engine also invalidates a recipe-owned
+approval/lease before accepting edits, disable, or deletion, regardless of
+whether the change came from Web UI or CLI. **Disarm** and recipe disable/edit/delete
+release only leases and pending approvals owned by that recipe; manual leases
+are unaffected. The engine attempts owner release whenever the same-user broker
+is reachable, even if its current WFP capability is degraded; if it is
+unreachable, broker heartbeat-loss and lease expiry remain the cleanup path. A
+broker restart drops its in-memory approvals and dynamic
+filters and grants, so recipe-owned blocks must be explicitly re-armed. The panel lists active leases, filter
+counts, expiry countdowns, individual release, and release-all. When a prior
+recipe-owned apply is retained in the inbox but no matching live lease is
+reported, the monitor shows **Needs re-arm**. If the collector inventory is
+unavailable, it shows **Status unknown** instead and disables another arm
+attempt until current state can be checked. Collector exit
+removes its dynamic filters; existing connections may continue. Passive
+notifications remain distinct from active actions: an action is attempted only
+for the explicit, supported outbound event types above, never for snapshots,
+listeners, process-only evidence, late/incomplete chronology, or unknown process
+identity.
 Collector controls and restriction mutations return `202` with an operation
 ID; the panel polls the shared engine operation journal for the final result.
 Each submission carries a request ID so a retry cannot apply the same plan
 twice. UAC and WFP calls run on a separate engine worker, allowing monitoring
 and recipe configuration to continue while a collector operation is pending.
+The bounded journal reserves capacity for stop and release controls, and runs
+those ahead of queued previews or reactive actions. If a lane is saturated, a
+new request gets an explicit `operation_queue_full` error with HTTP 503; it is
+not silently dropped or misreported as a malformed request. Reusing a request
+ID with different contents returns HTTP 409.
 The Restrictions panel also pages through retained outcomes using
 `GET /api/restrictions/history?limit=30&cursor=...`. Reads require the session
 token. The collector keeps at most 1,024 changes; the engine copies them to
@@ -308,26 +378,48 @@ engine's persisted final cursor before exiting.
 Automations **Event history** provides explicit engine, collector/UAC, and
 event-tracking controls. Its token-protected `/api/engine/lifecycle` endpoint
 pages through retained decoded ETW evidence. The engine writes two rotating
-8 MiB segments and checkpoints its source cursor; it does not insert these
-historical observations into the live endpoint table. This experimental view
-preserves raw QPC time, payload PID, source/destination fields, provider/version
+8 MiB raw-evidence segments and checkpoints its source cursor. In parallel, it
+publishes normalized TCP establish/close, UDP send/receive, and process
+start/exit events into the shared `/api/engine/events` journal and Passive
+recipe evaluator. Engine status separates current write availability from
+cumulative storage loss: a later successful non-empty write clears a transient
+write error, but never erases the count of records previously lost. This does
+not make every event an outbound connection:
+recipes notify only for verified outbound TCP establishment or UDP send;
+explicit failures and denied attempts remain unavailable. The raw view
+preserves QPC time, payload PID, source/destination fields, provider/version
 and loss gaps. Verified live-handle lifetime intervals retain creation time and
 executable path after process exit. Events outside a proven interval remain
-unattributed. QPC-to-UTC projections are included while the capture clock stays
-stable; a detected clock discontinuity disables new time-based attribution
-until tracing restarts. The engine also records a
-`source_clock_mapping_unstable` coverage gap before the first affected
-observation in a trace epoch; raw QPC timestamps remain available even when
-UTC projection is unavailable. A bounded 250 ms reorder window correlates TCP
+unattributed. QPC-to-UTC uses piecewise mapping generations. A detected 50 ms
+or larger discontinuity starts a new generation and temporarily withholds UTC
+projection and time-based attribution. Two subsequent consistent, reliable
+clock samples restore mapping; the uncertain interval remains explicitly
+unknown, and recovered observations carry the new generation and a recovery
+marker. Collector status exposes mapping generation and recovery count. The
+engine records a `source_clock_mapping_unstable` coverage gap before the first
+affected observation in a trace epoch; raw QPC timestamps remain available
+even when UTC projection is unavailable. A bounded 250 ms reorder window correlates TCP
 flow generations and labels late, mid-session, and incomplete chronology. Source
 records remain intact; derived records reference their evidence IDs. UDP stays
 activity evidence. Publication cursors remain monotonic even when source
-sequences reorder. Source-based endpoint roles are explicitly marked and
-these records cannot yet authorize Active recipes.
+sequences reorder. Source-based endpoint roles are explicitly marked. Active
+actions require an actionable process identity, known outbound peer, supported
+event kind, and complete chronology; snapshot observations and uncertain
+attribution cannot authorize them. The engine commits the collector cursor only after raw evidence,
+normalized event records, resulting notification rows, and the cooldown
+checkpoint are durable. Retried source pages are de-duplicated by event ID in
+both the raw lifecycle store and shared event journal; a failed notification or
+cooldown write rolls the evaluator back so the page can be retried without
+silently consuming its alert.
+On a clean **Stop event tracking**, the collector consumes final ETW buffers,
+drains queued decoding, and flushes pending normalized flows before reporting
+completion; queue and ETW loss remain explicit counters rather than silently
+discarded shutdown data.
 `/api/engine`, `/api/engine/capabilities`, and `/api/engine/events` require the
 page's session token even for GET. If the process is absent they return an
-explicit unavailable response. Its current event feed is sampled endpoint
-history only; an appearance is not evidence of an attempted connection.
+explicit unavailable response. Its live event feed combines sampled endpoints
+with normalized collector events; snapshot appearance is not evidence of an
+attempted connection.
 The separate token-protected `/api/engine/history` reads retained NDJSON
 segments across engine restarts. Pages are limited to 500 records and a bounded
 response size; cursors identify a file generation and byte offset, and return
@@ -340,9 +432,13 @@ Monitor state checkpoints retain remaining cooldowns and suppressed counts in
 the engine's local storage. Restart restores those deadlines without restoring
 privileged authorization. Offline time reduces a cooldown only when monotonic
 and UTC elapsed time agree; clock uncertainty conservatively retains the
-remaining cooldown. Invalid or unwritable checkpoints are reported through
-the engine notification error field. This is not transactional exactly-once
-notification delivery across a crash between checkpoint and inbox writes.
+remaining cooldown. Fired inbox records carry private recovery metadata so a
+restart can reconstruct a fired cooldown if the inbox append completed but the
+separate checkpoint replacement did not; this metadata is not returned by the
+notification API. Invalid or unwritable checkpoints are reported through the
+engine notification error field. This narrows the crash window but does not
+claim transactional exactly-once delivery when the underlying append/flush
+result is ambiguous or an event was lost before an inbox record was committed.
 
 The tab also displays engine snapshot interval and live-ring limits. Saving
 uses a unique request ID and the displayed SHA-256 configuration revision;
