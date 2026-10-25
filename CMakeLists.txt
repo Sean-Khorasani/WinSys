@@ -102,6 +102,8 @@ wintcp/src/TrayIcon.cpp
     wintcp/src/ProcessInstanceCache.h
     wintcp/src/LifecycleFlowModel.cpp
     wintcp/src/LifecycleFlowModel.h
+    wintcp/src/IncidentRecorderModel.cpp
+    wintcp/src/IncidentRecorderModel.h
     wintcp/src/RestrictionWfp.cpp
     wintcp/src/RestrictionWfp.h
     wintcp/src/SnapshotEvents.cpp
