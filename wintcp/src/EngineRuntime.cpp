@@ -3154,9 +3154,38 @@ bool EngineStart(std::string* error) {
 
 bool EngineStop(std::string* error) {
     std::string response;
-    if (RequestRaw(2, "", &response)) return true;
-    if (error != nullptr) *error = "engine_not_reachable";
-    return false;
+    if (!RequestRaw(2, "", &response)) {
+        if (error != nullptr) *error = "engine_not_reachable";
+        return false;
+    }
+
+    // The stop reply only confirms that the engine accepted the request. It
+    // still has to drain workers and release its single-instance mutex. Do not
+    // report a completed stop while an immediate restart would collide with
+    // that mutex and exit as "already running".
+    Identity own;
+    if (!OwnIdentity(&own)) {
+        if (error != nullptr) *error = "identity_unavailable";
+        return false;
+    }
+    const std::wstring mutexName = MutexName(own);
+    const ULONGLONG deadline = ::GetTickCount64() + 10000;
+    for (;;) {
+        HANDLE instance = ::OpenMutexW(SYNCHRONIZE, FALSE, mutexName.c_str());
+        if (instance == nullptr) {
+            if (::GetLastError() == ERROR_FILE_NOT_FOUND) {
+                if (error != nullptr) error->clear();
+                return true;
+            }
+        } else {
+            ::CloseHandle(instance);
+        }
+        if (::GetTickCount64() >= deadline) {
+            if (error != nullptr) *error = "engine_shutdown_timeout";
+            return false;
+        }
+        ::Sleep(25);
+    }
 }
 
 std::string ResponseField(const std::string& json, const char* field) {
