@@ -40,6 +40,18 @@ bool ApplyRecipeChange(const std::vector<RecipeDef>& current,
 bool ValidateRecipeUpdate(const std::vector<RecipeDef>& current,
                           const std::vector<RecipeDef>& next,
                           std::string* error);
+// Returns owners whose revision-bound Active authorization must be discarded
+// after a validated recipe transition. The caller also releases broker-owned
+// grants/leases and clears any queued action for each returned owner.
+std::vector<std::string> RecipeOwnersToInvalidate(
+    const std::vector<RecipeDef>& current,
+    const std::vector<RecipeDef>& next);
+// Gate for privileged automatic actions. `sameUser` must be verified by the
+// caller against the current engine identity; ordinary Passive evaluation does
+// not require it.
+bool RecipeActionEventEligible(const RecipeDef& recipe,
+                               const NetworkEvent& event,
+                               bool sameUser);
 
 struct RecipeHit {
     bool matched = false;
@@ -47,28 +59,62 @@ struct RecipeHit {
     std::string reason;
     std::string coverage;
     std::uint64_t suppressed = 0;
+    std::string cooldownKey;
+    std::uint64_t cooldownUntilMonotonicNs = 0;
+};
+
+// Passive notification cooldown does not revoke an independently approved
+// Active action. The caller still verifies the user and broker grant.
+bool RecipeActionCandidateEligible(const RecipeHit& hit,
+                                   const RecipeDef& recipe,
+                                   const NetworkEvent& event);
+
+struct RecipeRuntimeStatus {
+    std::uint64_t revision = 0;
+    std::uint64_t lastTriggeredMonotonicNs = 0;
+    std::uint64_t cooldownUntilMonotonicNs = 0;
+    std::uint64_t suppressed = 0;
+    std::string lastEventId;
+    std::string lastOccurredAtUtc;
+    std::string lastReason;
 };
 
 std::string RecipeNotificationJson(const RecipeDef& recipe,
                                    const NetworkEvent& event,
                                    const RecipeHit& hit,
-                                   const std::string& notificationId);
+                                   const std::string& notificationId,
+                                   std::uint64_t savedMonotonicNs,
+                                   std::uint64_t savedUtcMs);
 
 // One evaluator shared by every UI. It consumes normalized evidence only;
 // callers own persistence and delivery of a fired notification.
 class RecipeEvaluator {
 public:
     RecipeHit Evaluate(const RecipeDef& recipe, const NetworkEvent& event);
+    RecipeRuntimeStatus Status(const std::string& recipeId,
+                               std::uint64_t revision) const;
     void Clear(const std::string& recipeId);
     void Reconcile(const std::vector<RecipeDef>& recipes);
     std::size_t RememberedKeys() const { return nextFireNs_.size(); }
     std::string Checkpoint(std::uint64_t nowNs, std::uint64_t utcMs) const;
     bool Restore(const std::string& text, std::uint64_t nowNs,
                  std::uint64_t utcMs, std::string* error);
+    bool RecoverFiredCooldown(const std::string& key,
+                              std::uint64_t remainingNs,
+                              std::uint64_t savedMonotonicNs,
+                              std::uint64_t savedUtcMs,
+                              std::uint64_t nowNs,
+                              std::uint64_t nowUtcMs);
 
 private:
+    struct CrossSourceObservation {
+        std::uint64_t snapshotNs = 0;
+        std::uint64_t etwNs = 0;
+    };
     std::map<std::string, std::uint64_t> nextFireNs_;
     std::map<std::string, std::uint64_t> suppressed_;
+    std::map<std::string, RecipeRuntimeStatus> runtime_;
+    std::map<std::string, CrossSourceObservation> crossSourceObservations_;
 };
 
 }  // namespace wintcp
