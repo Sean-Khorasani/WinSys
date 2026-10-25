@@ -12,6 +12,9 @@ import { createTabs } from "../ui/tabs.js";
 import { emptyState, card, cardHeader, cardTitle, cardDescription, cardContent, cardFooter } from "../ui/card.js";
 import { badge } from "../ui/badge.js";
 import { api } from "../api.js";
+import { buildIncidentExport } from "../incident-export.mjs";
+import { parseIncidentImport } from "../incident-import.mjs";
+import { buildIncidentReplay } from "../incident-replay.mjs";
 import {
   parseScript,
   scriptCommandNodes,
@@ -41,17 +44,37 @@ export function processEvidenceLabel(event) {
 function recipeFile(items) {
   const hex = (text) => Array.from(new TextEncoder().encode(text),
     (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return "WinTCP-Recipes:1\n" + items.map((item) => [
-    item.id, item.revision, item.enabled ? "1" : "0",
-    item.trigger.type, item.cooldownSeconds,
-    hex(item.name), hex(item.target.imagePaths[0]),
-  ].join("|") + "\n").join("");
+  return "WinTCP-Recipes:2\n" + items.map((item) => {
+    const schedule = item.schedule || { type: "always" };
+    return [item.id, item.revision, item.enabled ? "1" : "0",
+      item.trigger.type, item.cooldownSeconds, hex(item.name),
+      hex(item.target.imagePaths[0]), schedule.type || "always",
+      schedule.daysMask || 0, schedule.startMinute || 0,
+      schedule.endMinute || 0, hex(schedule.timeZoneId || "")].join("|") + "\n";
+  }).join("");
 }
 
 export function recipeRestrictionState(item, activeLease, inventoryKnown) {
   if (activeLease) return "armed";
   if (item?.runtime?.restrictionPreviouslyApplied !== true) return "never_armed";
   return inventoryKnown ? "needs_rearm" : "unknown";
+}
+
+function recipeScheduleLabel(schedule) {
+  if (!schedule || schedule.type === "always") return "Always";
+  if (schedule.type !== "weekly_window") return "Schedule unavailable";
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    .filter((_, day) => (Number(schedule.daysMask) & (1 << day)) !== 0);
+  const time = (minute) => `${String(Math.floor(Number(minute) / 60)).padStart(2, "0")}:${String(Number(minute) % 60).padStart(2, "0")}`;
+  return `${days.join(", ")} ${time(schedule.startMinute)}–${time(schedule.endMinute)} · ${schedule.timeZoneId || "Unknown time zone"}`;
+}
+
+function recipeScheduleTransition(runtime) {
+  const at = Number(runtime?.nextScheduleTransitionUtcMs);
+  if (!Number.isFinite(at) || at <= 0 ||
+      typeof runtime?.scheduleActiveAfterTransition !== "boolean") return "";
+  const verb = runtime.scheduleActiveAfterTransition ? "opens" : "closes";
+  return `Next window ${verb} ${new Date(at).toISOString().replace("T", " ").replace(".000Z", " UTC")}`;
 }
 
 function timeText(iso) {
@@ -253,6 +276,29 @@ export async function renderAutomations(page, store) {
       h("option", { value: "outbound_activity" }, "New remote TCP endpoint"),
       h("option", { value: "new_listener" }, "New TCP listener"));
     const cooldown = h("input", { type: "number", min: "0", max: "86400", value: "60", required: true });
+    const scheduleType = h("select", {},
+      h("option", { value: "always" }, "Always"),
+      h("option", { value: "weekly_window" }, "Weekday/time window"));
+    const weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const scheduleDays = h("select", { multiple: "", size: "7",
+      "aria-label": "Days when this monitor is active" },
+      ...weekdays.map((day, index) => h("option", {
+        value: String(index), selected: index >= 1 && index <= 5,
+      }, day)));
+    const scheduleStart = h("input", { type: "time", value: "09:00", required: true });
+    const scheduleEnd = h("input", { type: "time", value: "17:00", required: true });
+    const scheduleTimeZone = h("input", { maxlength: "128", value: "UTC",
+      placeholder: "e.g. Pacific Standard Time", required: true });
+    const scheduleFields = h("div", { class: "engine-config-form", hidden: true },
+      h("label", {}, "Active weekdays (select one or more)", scheduleDays),
+      h("label", {}, "Window start", scheduleStart),
+      h("label", {}, "Window end (exclusive)", scheduleEnd),
+      h("label", {}, "Windows time-zone ID", scheduleTimeZone),
+      h("p", { class: "settings-description" },
+        "Windows time-zone IDs are used. Overnight windows belong to the day they start; the end minute is excluded."));
+    scheduleType.addEventListener("change", () => {
+      scheduleFields.hidden = scheduleType.value !== "weekly_window";
+    });
     let current = null;
     let notificationCursor = "";
     let saving = false;
@@ -346,6 +392,13 @@ export async function renderAutomations(page, store) {
       imagePath.value = "";
       trigger.value = "outbound_activity";
       cooldown.value = "60";
+      scheduleType.value = "always";
+      scheduleFields.hidden = true;
+      for (const option of scheduleDays.options)
+        option.selected = Number(option.value) >= 1 && Number(option.value) <= 5;
+      scheduleStart.value = "09:00";
+      scheduleEnd.value = "17:00";
+      scheduleTimeZone.value = "UTC";
     }
     async function saveItems(items, successMessage) {
       if (saving || !current) return false;
@@ -429,6 +482,15 @@ export async function renderAutomations(page, store) {
               ? "TCP listener" : "Remote TCP endpoint"),
             h("span", { class: "engine-monitor-runtime" },
               `${item.runtime?.state || (item.enabled ? "running" : "disabled")} · ${item.runtime?.condition || "clear"}`),
+            h("small", { class: "muted" }, recipeScheduleLabel(item.schedule)),
+            recipeScheduleTransition(item.runtime)
+              ? h("small", { class: "muted" }, recipeScheduleTransition(item.runtime)) : null,
+            item.runtime?.scheduleLeaseReleaseState === "releasing" ||
+              item.runtime?.scheduleLeaseReleaseState === "pending"
+              ? h("small", { class: "muted" }, "Schedule closed; releasing this recipe's temporary restrictions…") : null,
+            item.runtime?.scheduleLeaseReleaseState === "error"
+              ? h("small", { class: "badge badge-warning", role: "status" },
+                `Schedule restriction release failed: ${item.runtime.scheduleLeaseReleaseError || "unknown error"}`) : null,
             item.enabled && !eventTrackingReady ? h("small", { class: "muted" },
               "Automatic actions need the collector running and event tracking enabled; no trigger is required before arming.") : null,
             activeLease ? h("small", { class: "muted" },
@@ -452,6 +514,18 @@ export async function renderAutomations(page, store) {
                 imagePath.value = path;
                 trigger.value = item.trigger.type;
                 cooldown.value = String(item.cooldownSeconds);
+                const schedule = item.schedule || { type: "always" };
+                scheduleType.value = schedule.type || "always";
+                scheduleFields.hidden = scheduleType.value !== "weekly_window";
+                const dayMask = Number(schedule.daysMask || 0);
+                for (const option of scheduleDays.options)
+                  option.selected = (dayMask & (1 << Number(option.value))) !== 0;
+                const toTime = (minute, fallback) => Number.isInteger(Number(minute))
+                  ? `${String(Math.floor(Number(minute) / 60)).padStart(2, "0")}:${String(Number(minute) % 60).padStart(2, "0")}`
+                  : fallback;
+                scheduleStart.value = toTime(schedule.startMinute, "09:00");
+                scheduleEnd.value = toTime(schedule.endMinute, "17:00");
+                scheduleTimeZone.value = schedule.timeZoneId || "UTC";
                 form.scrollIntoView({ behavior: "smooth", block: "center" });
                 name.focus();
               },
@@ -623,13 +697,32 @@ export async function renderAutomations(page, store) {
         target: { imagePaths: [imagePath.value.trim()] },
         trigger: { type: trigger.value }, cooldownSeconds: Number(cooldown.value),
       };
+      if (scheduleType.value === "weekly_window") {
+        const daysMask = Array.from(scheduleDays.selectedOptions).reduce(
+          (mask, option) => mask | (1 << Number(option.value)), 0);
+        const toMinute = (value) => {
+          const match = /^(\d{2}):(\d{2})$/.exec(value);
+          return match ? Number(match[1]) * 60 + Number(match[2]) : -1;
+        };
+        const startMinute = toMinute(scheduleStart.value);
+        const endMinute = toMinute(scheduleEnd.value);
+        if (!daysMask || startMinute < 0 || endMinute < 0 ||
+            startMinute === endMinute || !scheduleTimeZone.value.trim()) {
+          message.textContent = "Choose at least one weekday, valid distinct start/end times, and a Windows time-zone ID.";
+          return;
+        }
+        fields.schedule = { type: "weekly_window", daysMask, startMinute,
+          endMinute, timeZoneId: scheduleTimeZone.value.trim() };
+      } else fields.schedule = { type: "always" };
       if (editingId) {
         const existing = current.items.find((row) => row.id === editingId);
         if (!existing) { message.textContent = "Monitor changed; refresh before editing."; return; }
         if (!existing.enabled && existing.name === fields.name &&
             existing.target.imagePaths[0] === fields.target.imagePaths[0] &&
             existing.trigger.type === fields.trigger.type &&
-            existing.cooldownSeconds === fields.cooldownSeconds) {
+            existing.cooldownSeconds === fields.cooldownSeconds &&
+            JSON.stringify(existing.schedule || { type: "always" }) ===
+              JSON.stringify(fields.schedule)) {
           message.textContent = "No changes to save.";
           return;
         }
@@ -650,6 +743,8 @@ export async function renderAutomations(page, store) {
       h("label", {}, "Exact executable path", imagePath),
       h("label", {}, "Observe", trigger),
       h("label", {}, "Cooldown (seconds)", cooldown),
+      h("label", {}, "Schedule", scheduleType),
+      scheduleFields,
       submitButton, cancelEdit);
     try {
       const presets = await api.get("/data/monitor-recipes.json", { signal: requests.signal });
@@ -953,9 +1048,100 @@ export async function renderAutomations(page, store) {
     const archiveStatus = h("p", { class: "muted text-sm", role: "status" },
       "Saved incident archives are not loaded.");
     const archiveRecords = h("div", { class: "engine-events" });
+    const importIncidentFile = h("input", { class: "input", type: "file",
+      accept: ".json,application/json", "aria-label": "Import incident export",
+      onchange: async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        if (!file || disposed) return;
+        stopReplay();
+        replayModel = null;
+        replayPlay.disabled = true;
+        replayRange.disabled = true;
+        replayFilter.disabled = true;
+        replaySearch.disabled = true;
+        replaySpeed.disabled = true;
+        replayStatus.textContent = "Validating untrusted local incident export…";
+        replayWhy.textContent = "";
+        clear(replayState);
+        clear(archiveRecords);
+        try {
+          if (file.size > 64 * 1024 * 1024)
+            throw new Error("Incident import exceeds the 64 MiB safety limit.");
+          const imported = parseIncidentImport(await file.text());
+          if (disposed) return;
+          selectedArchiveId = "";
+          archiveSelect.value = "";
+          selectedArchivePinned = false;
+          loadArchive.disabled = true;
+          loadReplay.disabled = true;
+          pinArchive.disabled = true;
+          exportArchive.disabled = true;
+          nextArchivePage.disabled = true;
+          archiveStatus.textContent = `Imported ${file.name} as untrusted, read-only evidence. JSON exports are not authenticated; review provenance independently.`;
+          for (const record of imported.records.slice(0, 200)) {
+            archiveRecords.append(h("article", { class: "lifecycle-event" },
+              h("header", {}, badge({ variant: "warning" }, "Untrusted import / Read-only"),
+                badge({ variant: "outline" }, record.event.kind),
+                h("strong", {}, `Recorded monotonic time ${record.captureMonotonicNs} ns`)),
+              h("details", {}, h("summary", {}, "Imported evidence"),
+                h("pre", { class: "lifecycle-evidence" }, JSON.stringify(record, null, 2)))));
+          }
+          if (imported.records.length > 200)
+            archiveRecords.append(h("p", { class: "muted text-sm" },
+              `${imported.records.length - 200} additional imported record(s) are not rendered.`));
+          replayModel = buildIncidentReplay(imported.records, imported.manifest);
+          replayWhy.textContent = `Imported export (${imported.exportProfile} profile). Trigger metadata is untrusted: ${imported.manifest.triggers.map((trigger) => trigger.reason).join("; ") || "no trigger reason recorded"}`;
+          if (replayModel.checkpoints === 0 || replayModel.minNs === null || replayModel.maxNs === null) {
+            replayStatus.textContent = `Validated ${imported.records.length} untrusted record(s). No usable state checkpoint exists; captured evidence is displayed above. Nothing was uploaded or saved.`;
+            return;
+          }
+          replayRange.value = "0";
+          replayRange.disabled = false;
+          replayFilter.disabled = false;
+          replaySearch.disabled = false;
+          replaySpeed.disabled = false;
+          replayPlay.disabled = replayModel.maxNs <= replayModel.minNs;
+          replayStatus.textContent = `Loaded ${imported.records.length} untrusted record(s), including ${replayModel.checkpoints} state checkpoint(s). Data remains local, offline, and read-only; nothing was uploaded or saved.`;
+          renderReplayAtPosition();
+        } catch (error) {
+          replayModel = null;
+          replayStatus.textContent = error.message || "Incident import was refused.";
+        }
+      } });
+    const replayStatus = h("p", { class: "muted text-sm", role: "status" },
+      "Select an archive and load its offline, read-only replay.");
+    const replayWhy = h("p", { class: "muted text-sm" });
+    const replayPosition = h("p", { class: "muted text-sm" });
+    const replayState = h("div", { class: "engine-events" });
+    const replayRange = h("input", { class: "incident-replay-range", type: "range",
+      min: "0", max: "1000", value: "0", disabled: true,
+      "aria-label": "Recorded incident timeline", oninput: () => {
+        stopReplay();
+        renderReplayAtPosition();
+      } });
+    const replayFilter = h("select", { class: "select", disabled: true,
+      "aria-label": "Replay endpoint transport" },
+    h("option", { value: "all" }, "All transports"),
+    h("option", { value: "tcp" }, "TCP only"),
+    h("option", { value: "udp" }, "UDP only"));
+    const replaySearch = h("input", { class: "input", type: "search", disabled: true,
+      placeholder: "Filter app, address, or port", "aria-label": "Filter replay endpoints",
+      oninput: () => renderReplayAtPosition() });
+    const replaySpeed = h("select", { class: "select", disabled: true,
+      "aria-label": "Replay speed", onchange: () => {
+        if (replayTimer !== null) { stopReplay(); startReplay(); }
+      } },
+    h("option", { value: "1" }, "1×"),
+    h("option", { value: "2" }, "2×"),
+    h("option", { value: "4" }, "4×"));
+    let replayModel = null;
+    let replayTimer = null;
     const archiveSelect = h("select", { "aria-label": "Saved incident archive" },
       h("option", { value: "" }, "Select a saved incident"));
     let selectedArchiveId = "";
+    let selectedArchivePinned = false;
+    let archiveMetadata = new Map();
     let archiveOffset = 0;
     let incidentArmed = false;
     let incidentExists = false;
@@ -1117,6 +1303,8 @@ export async function renderAutomations(page, store) {
     }, linkedEventId ? "Find linked evidence" : "Load retained events");
     const refreshLoss = h("button", { class: "btn btn-quiet", type: "button",
       onclick: () => { void refreshLossStatus(); } }, "Refresh loss status");
+    const durationSeconds = (value) => typeof value === "string" && /^\d+$/.test(value)
+      ? `${(Number(BigInt(value)) / 1e9).toFixed(1)}s` : "unknown";
     async function refreshIncident() {
       try {
         const result = await api.get("/api/engine/incidents", { signal: requests.signal });
@@ -1125,13 +1313,16 @@ export async function renderAutomations(page, store) {
         incidentExists = !!result.incident;
         incidentActive = result.incident?.active === true;
         incidentDurable = result.durable === true;
+        const prehistory = result.incident
+          ? `Observed pre-trigger span ${durationSeconds(result.incident.prehistoryRetainedNs)} of ${durationSeconds(result.incident.prehistoryWindowNs)} requested; ${result.incident.prehistoryIncomplete ? "coverage incomplete" : "no known prehistory loss"}.`
+          : "";
         incidentStatus.textContent = !incidentExists
           ? (result.durable
-            ? `The in-memory view was cleared. Saved archive ${result.archiveId} remains on disk; offline replay is not available yet.`
+            ? `The in-memory view was cleared. Saved archive ${result.archiveId} remains on disk and can be loaded for offline replay.`
             : incidentArmed
               ? "Armed: retaining a 120-second volatile pre-trigger window of observed metadata."
               : "Not armed. No incident data is being retained.")
-          : `Incident ${result.incident.id}: ${incidentActive ? "capturing post-trigger events" : "stopped"}; ${result.incident.recordCount} records; ${result.incident.prehistoryIncomplete ? "prehistory incomplete" : "prehistory available"}; ${result.incident.postWindowIncomplete ? "post-window incomplete" : "post-window status recorded"}.${incidentDurable ? ` Saved archive ${result.archiveId}; read-only replay is not available yet.` : " Memory only; save explicitly to retain it on disk."}${result.archiveError ? ` Save error: ${result.archiveError}.` : ""}`;
+          : `Incident ${result.incident.id}: ${incidentActive ? "capturing post-trigger events" : "stopped"}; ${result.incident.recordCount} records; ${prehistory} ${result.incident.postWindowIncomplete ? "Post-window incomplete." : "Post-window status recorded."}${incidentDurable ? ` Saved archive ${result.archiveId}; load it from the library for offline replay.` : " Memory only; save explicitly to retain it on disk."}${result.archiveError ? ` Save error: ${result.archiveError}.` : ""}`;
         armIncident.disabled = incidentArmed || incidentExists;
         triggerIncident.disabled = !incidentArmed;
         disarmIncident.disabled = !incidentArmed && !incidentActive;
@@ -1158,7 +1349,7 @@ export async function renderAutomations(page, store) {
           ? "Incident recorder armed. Metadata is volatile and not yet saved to disk."
           : action === "trigger" ? "Incident triggered; collecting the post-trigger window."
             : action === "disarm" ? "Capture stopped. The remaining post-trigger window is marked incomplete."
-              : action === "save" ? `Incident saved as archive ${result.archiveId || "(ID unavailable)"}. Offline replay is not available yet.`
+              : action === "save" ? `Incident saved as archive ${result.archiveId || "(ID unavailable)"}. Load it from the library for offline replay.`
                 : "The in-memory incident was discarded.";
         if (action === "discard") clear(incidentRecords);
         await refreshIncident();
@@ -1224,6 +1415,91 @@ export async function renderAutomations(page, store) {
         await loadArchivePage();
         if (!disposed) loadArchive.disabled = false;
       } }, "Open read-only archive");
+    const loadReplay = h("button", { class: "btn btn-outline", type: "button",
+      disabled: true, onclick: async () => {
+        await loadReplayArchive();
+      } }, "Load read-only replay");
+    const replayPlay = h("button", { class: "btn btn-quiet", type: "button",
+      disabled: true, onclick: () => {
+        if (replayTimer === null) startReplay();
+        else stopReplay();
+      } }, "Play");
+    const pinArchive = h("button", { class: "btn btn-quiet", type: "button",
+      disabled: true,
+      onclick: async () => {
+        if (!selectedArchiveId || pinArchive.disabled) return;
+        pinArchive.disabled = true;
+        try {
+          const action = selectedArchivePinned ? "unpin" : "pin";
+          await api.postForm(`/api/engine/incidents/archives/${selectedArchiveId}/${action}`,
+            { requestId: crypto.randomUUID().replaceAll("-", "") },
+            { signal: requests.signal });
+          await refreshArchives();
+          archiveStatus.textContent = selectedArchivePinned
+            ? "Archive pinned. Pinned archives count toward the retention quota and are not automatically removed."
+            : "Archive unpinned. It may be removed by retention when limits are reached.";
+        } catch (error) {
+          if (!disposed) archiveStatus.textContent = error.message || "Archive pin update failed.";
+        } finally {
+          if (!disposed) pinArchive.disabled = !selectedArchiveId;
+        }
+      } }, "Pin saved incident");
+    const archiveExportMode = h("select", { class: "select", "aria-label": "Incident export privacy" },
+      h("option", { value: "private" }, "Private export (redact identity and peers)"),
+      h("option", { value: "full" }, "Full metadata export (includes paths and addresses)"));
+    const exportArchive = h("button", { class: "btn btn-outline", type: "button",
+      disabled: true,
+      onclick: async () => {
+        if (!selectedArchiveId || exportArchive.disabled) return;
+        const archiveId = selectedArchiveId;
+        const mode = archiveExportMode.value;
+        const warning = mode === "private"
+          ? "Private export omits executable names/paths and trigger reasons, and pseudonymizes process, flow, event, timebase and endpoint identifiers. Dates and event kinds remain visible."
+          : "Full metadata export can contain executable paths/names, endpoint addresses, process identifiers and trigger reasons. Treat it as sensitive. Continue?";
+        if (!confirm(warning)) return;
+        exportArchive.disabled = true;
+        try {
+          const records = [];
+          let offset = 0;
+          let manifest = null;
+          let totalBytes = 0;
+          for (;;) {
+            const page = await api.get(`/api/engine/incidents/archives/${archiveId}?offset=${offset}&limit=100`,
+              { signal: requests.signal });
+            if (disposed || selectedArchiveId !== archiveId) return;
+            manifest = page.manifest || manifest;
+            const rows = Array.isArray(page.items) ? page.items : [];
+            for (const raw of rows) {
+              const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+              const encoded = JSON.stringify(item);
+              totalBytes += new TextEncoder().encode(encoded).byteLength;
+              if (totalBytes > 64 * 1024 * 1024)
+                throw new Error("Incident exceeds the 64 MiB export safety limit.");
+              records.push(item);
+            }
+            offset = page.nextOffset || 0;
+            if (!page.hasMore) break;
+            if (!rows.length || offset === 0) throw new Error("Archive pagination did not advance.");
+          }
+          if (!manifest) throw new Error("The archive manifest is unavailable.");
+          const payload = buildIncidentExport(manifest, records, mode);
+          const blob = new Blob([JSON.stringify(payload, null, 2)],
+            { type: "application/json" });
+          const href = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = href;
+          link.rel = "noopener";
+          link.download = `wintcp-incident-${mode}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(href), 0);
+          archiveStatus.textContent = mode === "private"
+            ? "Private export downloaded. Names/reasons are omitted and identifiers/endpoints pseudonymized; event dates remain."
+            : "Full metadata export downloaded. It may contain sensitive paths, names, addresses and identifiers.";
+        } catch (error) {
+          if (!disposed) archiveStatus.textContent = error.message || "Incident export failed.";
+        } finally { if (!disposed) exportArchive.disabled = false; }
+      } }, "Export incident");
     const nextArchivePage = h("button", { class: "btn btn-quiet", type: "button",
       disabled: true,
       onclick: async () => { await loadArchivePage(); } }, "Next archive events");
@@ -1235,14 +1511,26 @@ export async function renderAutomations(page, store) {
         const previous = selectedArchiveId;
         clear(archiveSelect);
         archiveSelect.append(h("option", { value: "" }, "Select a saved incident"));
+        archiveMetadata = new Map();
         for (const archive of result.items || []) {
           const manifest = archive.manifest || {};
+          archiveMetadata.set(archive.id, archive);
+          let savedAt = "saved time unknown";
+          if (typeof archive.createdFileTime === "string" && /^\d+$/.test(archive.createdFileTime)) {
+            const unixMs = Number(BigInt(archive.createdFileTime) / 10000n - 11644473600000n);
+            if (Number.isFinite(unixMs) && unixMs >= 0)
+              savedAt = `saved ${new Date(unixMs).toLocaleString()}`;
+          }
           archiveSelect.append(h("option", { value: archive.id },
-            `${archive.id} — ${manifest.recordCount || 0} events${manifest.postWindowIncomplete ? " — partial" : ""}`));
+            `${archive.pinned ? "Pinned — " : ""}${archive.id} — ${savedAt} — ${manifest.recordCount || 0} events — ${archive.bytes || 0} bytes${manifest.postWindowIncomplete ? " — partial" : ""}`));
         }
         selectedArchiveId = (result.items || []).some((item) => item.id === previous)
           ? previous : "";
         archiveSelect.value = selectedArchiveId;
+        selectedArchivePinned = archiveMetadata.get(selectedArchiveId)?.pinned === true;
+        pinArchive.disabled = !selectedArchiveId;
+        pinArchive.textContent = selectedArchivePinned ? "Unpin saved incident" : "Pin saved incident";
+        loadReplay.disabled = !selectedArchiveId;
         archiveStatus.textContent = result.items?.length
           ? `${result.items.length} saved archive(s) found. Archives are read-only; live actions and external lookups are unavailable.`
           : "No saved incident archives found.";
@@ -1258,15 +1546,22 @@ export async function renderAutomations(page, store) {
           { signal: requests.signal });
         if (disposed) return;
         clear(archiveRecords);
-        archiveStatus.textContent = `Recorded / Read-only — archive ${selectedArchiveId}. ${page.manifest?.recordCount || 0} recorded events; replay is event inspection only because state checkpoints are not yet available.`;
+        archiveStatus.textContent = `Recorded / Read-only — archive ${selectedArchiveId}. ${page.manifest?.eventCount || 0} events and ${page.manifest?.checkpointCount || 0} snapshot-state checkpoints. Use Load read-only replay to scrub reconstructed snapshot state.`;
         for (const raw of page.items || []) {
           const item = typeof raw === "string" ? JSON.parse(raw) : raw;
           const event = item.event || {};
+          const checkpoint = event.kind === "state_checkpoint";
+          const state = event.state || {};
           archiveRecords.append(h("article", { class: "lifecycle-event" },
             h("header", {}, badge({ variant: "secondary" }, "Recorded / Read-only"),
-              badge({ variant: "outline" }, event.kind || "Recorded event"),
-              h("strong", {}, processEvidenceLabel(event))),
-            h("p", {}, event.remote?.address
+              badge({ variant: checkpoint ? "info" : "outline" },
+                checkpoint ? "Snapshot state checkpoint" : event.kind || "Recorded event"),
+              h("strong", {}, checkpoint
+                ? `${state.complete === false ? "Partial" : "Complete"} snapshot state`
+                : processEvidenceLabel(event))),
+            h("p", {}, checkpoint
+              ? `${state.includedEndpoints || 0} of ${state.totalEndpoints || 0} endpoints recorded (${state.coverage || "coverage unknown"}).`
+              : event.remote?.address
               ? `${event.remote.address}:${event.remote.port}`
               : event.lossReason || "No remote peer observed"),
             h("details", {}, h("summary", {}, "Recorded evidence"),
@@ -1283,12 +1578,197 @@ export async function renderAutomations(page, store) {
           nextArchivePage.disabled = true;
       }
     }
+    function stopReplay() {
+      if (replayTimer !== null) clearInterval(replayTimer);
+      replayTimer = null;
+      replayPlay.textContent = "Play";
+    }
+    requests.signal.addEventListener("abort", stopReplay, { once: true });
+    function replayTargetNs() {
+      if (!replayModel || replayModel.minNs === null || replayModel.maxNs === null)
+        return null;
+      const span = replayModel.maxNs - replayModel.minNs;
+      if (span <= 0n) return replayModel.minNs;
+      return replayModel.minNs + span * BigInt(Number(replayRange.value) || 0) / 1000n;
+    }
+    function renderReplayAtPosition() {
+      if (!replayModel) return;
+      const targetNs = replayTargetNs();
+      if (targetNs === null) return;
+      const state = replayModel.reconstruct(targetNs);
+      const evidence = replayModel.eventsAt(targetNs, 100);
+      const elapsedSeconds = replayModel.minNs === null ? "0.0" :
+        (Number(targetNs - replayModel.minNs) / 1e9).toFixed(1);
+      replayPosition.textContent = `Recorded position +${elapsedSeconds}s`;
+      clear(replayState);
+      if (!state.available) {
+        replayState.append(h("p", { class: "muted text-sm" },
+          "No state checkpoint exists at or before this position; endpoint state is unavailable."));
+        return;
+      }
+      const quality = state.complete ? "Complete snapshot-only state" :
+        `Partial snapshot-only state${state.reason ? ` — ${state.reason}` : ""}`;
+      replayState.append(h("p", { class: "muted text-sm" },
+        `${quality}; ${state.endpoints.length} endpoint(s), ${state.appliedDeltas} delta(s) applied. Recorded / Read-only.`));
+      const transport = replayFilter.value;
+      const needle = replaySearch.value.trim().toLocaleLowerCase();
+      const filtered = state.endpoints.filter((event) => {
+        if (transport !== "all" && event.transport !== transport) return false;
+        if (!needle) return true;
+        const searchable = [event.process?.imagePath, event.process?.observedImageName,
+          event.process?.pid, event.local?.address, event.local?.port,
+          event.remote?.address, event.remote?.port, event.transport, event.tcpState]
+          .filter((value) => value !== null && value !== undefined).join(" ").toLocaleLowerCase();
+        return searchable.includes(needle);
+      });
+      for (const event of filtered.slice(0, 200)) {
+        const process = event.process?.imagePath || event.process?.observedImageName ||
+          (event.process?.pid ? `PID ${event.process.pid}` : "Process identity unavailable");
+        const local = event.local?.address
+          ? `${event.local.address}:${event.local.port ?? "?"}` : "Local endpoint unknown";
+        const remote = event.remote?.address
+          ? `${event.remote.address}:${event.remote.port ?? "?"}` : "Remote endpoint unknown";
+        replayState.append(h("article", { class: "lifecycle-event" },
+          h("header", {}, badge({ variant: "secondary" }, "Recorded / Read-only"),
+            badge({ variant: "outline" }, event.transport || "unknown transport"),
+            h("strong", {}, process)),
+          h("p", {}, `${local} → ${remote}${event.tcpState ? ` · ${event.tcpState}` : ""}`)));
+      }
+      if (filtered.length > 200)
+        replayState.append(h("p", { class: "muted text-sm" },
+          `${filtered.length - 200} additional matching endpoint(s) are not rendered.`));
+      if (!filtered.length)
+        replayState.append(h("p", { class: "muted text-sm" },
+          "No endpoints match the current replay filters."));
+      replayState.append(h("h4", {}, "Recorded events up to this position"));
+      replayState.append(h("p", { class: "muted text-sm" },
+        `${evidence.total} non-checkpoint event(s) occurred by this replay position${evidence.truncated ? "; showing the latest 100" : ""}.`));
+      for (const record of evidence.items) {
+        const event = record.event || {};
+        const occurred = event.occurredAtUtc || "Time unknown";
+        const description = [event.source, event.kind, event.lossReason]
+          .filter((value) => typeof value === "string" && value.length).join(" · ") || "Recorded evidence";
+        replayState.append(h("article", { class: "lifecycle-event" },
+          h("header", {}, badge({ variant: "secondary" }, "Recorded / Read-only"),
+            h("strong", {}, description)),
+          h("p", {}, occurred),
+          h("details", {}, h("summary", {}, "Event evidence"),
+            h("pre", { class: "lifecycle-evidence" }, JSON.stringify(record, null, 2)))));
+      }
+    }
+    function startReplay() {
+      if (!replayModel || replayModel.minNs === null || replayModel.maxNs === null ||
+          replayModel.maxNs <= replayModel.minNs) return;
+      const initialNs = replayTargetNs();
+      const span = replayModel.maxNs - replayModel.minNs;
+      const speed = BigInt(Number(replaySpeed.value) || 1);
+      const nsPerMs = span / 60000n || 1n;
+      const startedAt = performance.now();
+      replayPlay.textContent = "Pause";
+      replayTimer = setInterval(() => {
+        if (disposed || !replayModel || !replayRange.isConnected ||
+            replayRange.closest("[hidden]")) { stopReplay(); return; }
+        const elapsedMs = BigInt(Math.max(0, Math.floor(performance.now() - startedAt)));
+        const nextNs = initialNs + elapsedMs * nsPerMs * speed;
+        if (nextNs >= replayModel.maxNs) {
+          replayRange.value = "1000";
+          renderReplayAtPosition();
+          stopReplay();
+          return;
+        }
+        replayRange.value = String(Number((nextNs - replayModel.minNs) * 1000n / span));
+        renderReplayAtPosition();
+      }, 100);
+    }
+    async function loadReplayArchive() {
+      if (!selectedArchiveId || disposed) return;
+      const archiveId = selectedArchiveId;
+      stopReplay();
+      loadReplay.disabled = true;
+      replayPlay.disabled = true;
+      replayRange.disabled = true;
+      replayFilter.disabled = true;
+      replaySearch.disabled = true;
+      replaySpeed.disabled = true;
+      replayStatus.textContent = "Verifying and loading bounded archive pages for offline reconstruction…";
+      clear(replayState);
+      try {
+        const records = [];
+        let offset = 0;
+        let manifest = null;
+        let totalBytes = 0;
+        for (let pageNumber = 0; pageNumber < 10000; pageNumber++) {
+          const page = await api.get(`/api/engine/incidents/archives/${archiveId}?offset=${offset}&limit=100`,
+            { signal: requests.signal });
+          if (disposed || selectedArchiveId !== archiveId) return;
+          manifest ||= page.manifest || null;
+          for (const raw of page.items || []) {
+            const record = typeof raw === "string" ? JSON.parse(raw) : raw;
+            totalBytes += new TextEncoder().encode(JSON.stringify(record)).byteLength;
+            if (totalBytes > 64 * 1024 * 1024)
+              throw new Error("Archive exceeds the 64 MiB offline replay safety limit.");
+            records.push(record);
+          }
+          if (!page.hasMore) break;
+          const next = Number(page.nextOffset);
+          if (!(page.items || []).length || !Number.isSafeInteger(next) || next <= offset)
+            throw new Error("Archive pagination did not advance safely.");
+          offset = next;
+          if (pageNumber === 9999) throw new Error("Archive exceeds the replay page limit.");
+        }
+        if (!manifest) throw new Error("The archive manifest is unavailable.");
+        if (Number.isFinite(Number(manifest.recordCount)) &&
+            Number(manifest.recordCount) !== records.length)
+          throw new Error("Archive pagination returned an incomplete record set.");
+        replayModel = buildIncidentReplay(records, manifest);
+        if (replayModel.checkpoints === 0 || replayModel.minNs === null || replayModel.maxNs === null) {
+          replayStatus.textContent = "This archive has no usable state checkpoint; recorded evidence can still be inspected above.";
+          return;
+        }
+        replayRange.value = "0";
+        replayRange.disabled = false;
+        replayFilter.disabled = false;
+        replaySearch.disabled = false;
+        replaySpeed.disabled = false;
+        replayPlay.disabled = replayModel.maxNs <= replayModel.minNs;
+        const triggerText = Array.isArray(manifest.triggers) && manifest.triggers.length
+          ? manifest.triggers.map((trigger) => trigger.reason || trigger.id || "Recorded trigger").join("; ")
+          : "Trigger reason was not recorded.";
+        replayWhy.textContent = `Why this was captured: ${triggerText}`;
+        replayStatus.textContent = `Loaded ${records.length} verified record(s), including ${replayModel.checkpoints} state checkpoint(s). Reconstruction is local, offline, and read-only; ${replayModel.malformedCount} malformed row(s) were ignored.`;
+        renderReplayAtPosition();
+      } catch (error) {
+        if (!disposed && selectedArchiveId === archiveId) {
+          replayModel = null;
+          replayStatus.textContent = error.message || "Offline replay could not load this archive.";
+        }
+      } finally {
+        if (!disposed) loadReplay.disabled = !selectedArchiveId;
+      }
+    }
+    replayFilter.addEventListener("change", renderReplayAtPosition);
     archiveSelect.addEventListener("change", () => {
+      stopReplay();
       selectedArchiveId = archiveSelect.value;
+      selectedArchivePinned = archiveMetadata.get(selectedArchiveId)?.pinned === true;
       archiveOffset = 0;
       clear(archiveRecords);
       loadArchive.disabled = !selectedArchiveId;
+      exportArchive.disabled = !selectedArchiveId;
+      pinArchive.disabled = !selectedArchiveId;
+      pinArchive.textContent = selectedArchivePinned ? "Unpin saved incident" : "Pin saved incident";
       nextArchivePage.disabled = true;
+      replayModel = null;
+      loadReplay.disabled = !selectedArchiveId;
+      replayPlay.disabled = true;
+      replayRange.disabled = true;
+      replayFilter.disabled = true;
+      replaySearch.disabled = true;
+      replaySpeed.disabled = true;
+      replayStatus.textContent = "Select an archive and load its offline, read-only replay.";
+      replayWhy.textContent = "";
+      replayPosition.textContent = "";
+      clear(replayState);
       if (selectedArchiveId) archiveStatus.textContent = "Selected archive. Open it to verify and read its recorded events.";
     });
     void refreshLossStatus();
@@ -1296,7 +1776,7 @@ export async function renderAutomations(page, store) {
     void refreshArchives();
     return h("div", { class: "tab-panel-body" },
       card({}, cardHeader({}, cardTitle({}, "Incident flight recorder"),
-        cardDescription({}, "Optional in-memory metadata window. Nothing is exported yet.")),
+        cardDescription({}, "Optional in-memory metadata window. Captures stay local until you explicitly save or export them.")),
         cardContent({}, incidentStatus,
           h("div", { class: "template-actions" }, armIncident, triggerIncident,
             disarmIncident, saveIncident, discardIncident, loadIncident), incidentRecords)),
@@ -1311,12 +1791,18 @@ export async function renderAutomations(page, store) {
             controlButton("Stop event tracking", "events-stop"), refreshLoss), status,
           lossStatus)),
       card({}, cardHeader({}, cardTitle({}, "Saved incident library"),
-        cardDescription({}, "Integrity-checked, recorded evidence. This view is read-only and performs no DNS or live process lookup.")),
+        cardDescription({}, "Saved archives are integrity-checked by the local engine. Imported JSON is untrusted, never uploaded or saved, and is limited to offline read-only evidence/replay. Neither path performs DNS, external lookup, or live action.")),
         cardContent({}, archiveStatus,
           h("div", { class: "template-actions" }, archiveSelect,
             h("button", { class: "btn btn-quiet", type: "button",
               onclick: () => { void refreshArchives(); } }, "Refresh archives"),
-            loadArchive, nextArchivePage), archiveRecords)),
+            loadArchive, loadReplay, pinArchive, archiveExportMode, exportArchive, nextArchivePage,
+            importIncidentFile), archiveRecords,
+          h("section", { class: "incident-replay", "aria-label": "Offline incident replay" },
+            h("h3", {}, "Offline state replay"), replayStatus, replayWhy,
+            h("div", { class: "incident-replay-controls" }, replayPlay,
+              replaySpeed, replayFilter, replaySearch), replayRange, replayPosition,
+            replayState))),
       card({}, cardHeader({}, cardTitle({}, "Retained lifecycle history")),
         cardContent({}, linkedEventStatus, history), cardFooter({}, load)));
   }
