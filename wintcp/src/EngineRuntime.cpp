@@ -23,6 +23,8 @@
 #include <deque>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -34,6 +36,8 @@
 #include "EngineClock.h"
 #include "CollectorLossModel.h"
 #include "EngineStore.h"
+#include "IncidentArchive.h"
+#include "IncidentRecorderModel.h"
 #include "EngineOperations.h"
 #include "CollectorRuntime.h"
 #include "RecipeModel.h"
@@ -505,6 +509,17 @@ struct State {
     std::mutex recipeCommitMutex;
     std::mutex notificationMutex;
     std::mutex eventEvidenceMutex;
+    std::mutex incidentMutex;
+    std::unique_ptr<IncidentRecorderModel> incidentRecorder;
+    std::atomic<bool> incidentCaptureEnabled{false};
+    bool incidentArmed = false;
+    bool incidentArchiveAttempted = false;
+    std::wstring incidentArchiveDirectory;
+    SECURITY_ATTRIBUTES* incidentSecurity = nullptr;
+    std::string incidentArchiveId;
+    std::string incidentArchiveError;
+    std::deque<std::string> incidentRequestOrder;
+    std::map<std::string, std::pair<std::string, std::string>> incidentRequests;
     std::mutex actionGrantsMutex;
     std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> armedActionRecipes;
     std::set<std::string> pendingActionRecipes;
@@ -612,6 +627,299 @@ bool ParseUnsignedField(const std::string& text, std::uint64_t* value) {
     }
     *value = parsed;
     return true;
+}
+
+std::string IncidentJson(bool armed, const IncidentRecorderModel* recorder,
+                        std::size_t offset = 0, std::size_t limit = 0,
+                        const std::string& archiveId = "",
+                        const std::string& archiveError = "") {
+    std::string result = "{\"schemaVersion\":1,\"armed\":" +
+        std::string(armed ? "true" : "false") + ",\"captureEnabled\":" +
+        ((armed || (recorder != nullptr && recorder->IsActive())) ? "true" : "false") +
+        ",\"durable\":" + std::string(archiveId.empty() ? "false" : "true") +
+        ",\"storage\":\"" + std::string(archiveId.empty() ? "memory_only" : "archive") +
+        "\",\"archiveId\":" + (archiveId.empty() ? "null" : NetworkJsonQuote(archiveId)) +
+        ",\"archiveError\":" + (archiveError.empty() ? "null" : NetworkJsonQuote(archiveError)) +
+        ",\"incident\":";
+    if (recorder == nullptr || !recorder->HasIncident())
+        return result + "null}";
+
+    IncidentRecordPage page;
+    if (limit != 0) page = recorder->ReadPage(offset, limit, 160000);
+    const IncidentSnapshot summary = limit == 0 ? recorder->Summary() : page.incident;
+    if (!page.error.empty())
+        return "{\"schemaVersion\":1,\"code\":" +
+            NetworkJsonQuote(page.error) + "}";
+    result += "{\"id\":" + NetworkJsonQuote(summary.id) +
+        ",\"active\":" + (summary.active ? "true" : "false") +
+        ",\"startMonotonicNs\":\"" +
+            std::to_string(summary.startMonotonicNs) + "\"" +
+        ",\"firstTriggerMonotonicNs\":\"" +
+            std::to_string(summary.firstTriggerMonotonicNs) + "\"" +
+        ",\"postDeadlineMonotonicNs\":\"" +
+            std::to_string(summary.postDeadlineMonotonicNs) + "\"" +
+        ",\"endMonotonicNs\":\"" +
+            std::to_string(summary.endMonotonicNs) + "\"" +
+        ",\"postWindowIncomplete\":" +
+            (summary.postWindowIncomplete ? "true" : "false") +
+        ",\"prehistoryIncomplete\":" +
+            (summary.prehistoryIncomplete ? "true" : "false") +
+        ",\"recordsTruncated\":" +
+            (summary.recordsTruncated ? "true" : "false") +
+        ",\"triggersTruncated\":" +
+            (summary.triggersTruncated ? "true" : "false") +
+        ",\"lostRecords\":\"" + std::to_string(summary.lostRecords) +
+        "\",\"lostTriggers\":\"" + std::to_string(summary.lostTriggers) +
+        "\",\"recordCount\":" + std::to_string(recorder->IncidentRecordCount()) +
+        ",\"triggerCount\":" + std::to_string(summary.triggers.size());
+    if (!summary.triggers.empty()) {
+        const IncidentTrigger& trigger = summary.triggers.front();
+        result += ",\"whyCaptured\":{\"id\":" +
+            NetworkJsonQuote(trigger.id) + ",\"reason\":" +
+            NetworkJsonQuote(trigger.reason) + "}";
+    } else {
+        result += ",\"whyCaptured\":null";
+    }
+    if (limit != 0) {
+        result += ",\"items\":[";
+        for (const IncidentRecord& record : page.incident.records) {
+            if (result.back() != '[') result += ',';
+            result += "{\"captureMonotonicNs\":\"" +
+                std::to_string(record.monotonicNs) + "\",\"eventId\":" +
+                NetworkJsonQuote(record.eventId) + ",\"event\":" +
+                record.payload + "}";
+        }
+        result += "],\"nextOffset\":" + std::to_string(page.nextOffset) +
+            ",\"hasMore\":" + (page.hasMore ? "true" : "false");
+    }
+    result += "}}";
+    return result;
+}
+
+bool PersistFinalizedIncident(State* state) {
+    if (state->incidentArchiveAttempted || state->incidentRecorder == nullptr ||
+        !state->incidentRecorder->HasIncident() ||
+        state->incidentRecorder->IsActive()) return false;
+    const IncidentSnapshot snapshot = state->incidentRecorder->Snapshot();
+    if (state->incidentSecurity == nullptr || state->incidentArchiveDirectory.empty()) {
+        state->incidentArchiveError = "incident_archive_storage_unavailable";
+        return false;
+    }
+    const bool saved = SaveIncidentArchive(state->incidentArchiveDirectory,
+            *state->incidentSecurity, snapshot, &state->incidentArchiveId,
+            &state->incidentArchiveError);
+    if (saved) state->incidentArchiveAttempted = true;
+    else if (state->incidentArchiveError.empty())
+        state->incidentArchiveError = "incident_archive_write_failed";
+    return saved;
+}
+
+std::string IncidentArchivesJson(State* state, unsigned limit) {
+    std::string error;
+    const std::vector<IncidentArchiveInfo> archives = ListIncidentArchives(
+        state->incidentArchiveDirectory, limit, &error);
+    if (!error.empty()) return "{\"schemaVersion\":1,\"code\":" +
+        NetworkJsonQuote(error) + "}";
+    std::string response = "{\"schemaVersion\":1,\"items\":[";
+    for (const IncidentArchiveInfo& archive : archives) {
+        if (response.back() != '[') response += ',';
+        response += "{\"id\":" + NetworkJsonQuote(archive.id) +
+            ",\"manifest\":" + archive.manifestJson + "}";
+    }
+    return response + "]}";
+}
+
+std::string IncidentArchivePageJson(State* state, const std::string& id,
+                                    std::uint64_t offset, unsigned limit) {
+    const IncidentArchivePage page = ReadIncidentArchivePage(
+        state->incidentArchiveDirectory, id, static_cast<std::size_t>(offset),
+        limit, 160000);
+    if (!page.error.empty()) return "{\"schemaVersion\":1,\"code\":" +
+        NetworkJsonQuote(page.error) + "}";
+    std::string response = "{\"schemaVersion\":1,\"id\":" +
+        NetworkJsonQuote(id) + ",\"manifest\":" + page.manifestJson +
+        ",\"items\":[";
+    for (const std::string& item : page.records) {
+        if (response.back() != '[') response += ',';
+        response += item;
+    }
+    return response + "],\"nextOffset\":" + std::to_string(page.nextOffset) +
+        ",\"hasMore\":" + (page.hasMore ? "true" : "false") + "}";
+}
+
+std::string IncidentControlJson(State* state, const std::string& payload) {
+    std::vector<std::string> fields;
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t end = payload.find('\n', start);
+        fields.push_back(payload.substr(start, end == std::string::npos
+            ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    if (fields.size() != 6) return "{\"schemaVersion\":1,\"code\":\"bad_request\"}";
+    const std::string& action = fields[0];
+    const std::string& requestId = fields[1];
+    const std::string& triggerId = fields[2];
+    const std::string& reason = fields[3];
+    std::uint64_t offset = 0, limit = 0;
+    if (!ParseUnsignedField(fields[4], &offset) || offset > 1000000 ||
+        !ParseUnsignedField(fields[5], &limit) || limit > 100)
+        return "{\"schemaVersion\":1,\"code\":\"bad_request\"}";
+    const bool archiveRead = action == "archiveRead";
+    const bool readOnly = action == "status" || action == "read" ||
+        action == "archives" || archiveRead;
+    if ((action != "status" && action != "read" && action != "arm" &&
+         action != "disarm" && action != "trigger" && action != "discard" &&
+         action != "save" && action != "archives" && !archiveRead) ||
+        (readOnly ? (!requestId.empty() || !reason.empty() ||
+            (!archiveRead && !triggerId.empty()))
+                  : !SafeId(requestId, 64)) ||
+        (action == "trigger" && (!SafeId(triggerId, 64) || reason.empty() ||
+            reason.size() > 512 || reason.find_first_of("\r\n") != std::string::npos)) ||
+        (action != "trigger" && !reason.empty()) ||
+        (action != "trigger" && !archiveRead && !triggerId.empty()) ||
+        (action == "read" ? (limit == 0) :
+         ((action == "archives" || archiveRead) ?
+            (limit == 0 || (action == "archives" && offset != 0) ||
+             (archiveRead && !SafeId(triggerId, 32))) :
+            (limit != 0 || offset != 0))))
+        return "{\"schemaVersion\":1,\"code\":\"bad_request\"}";
+
+    if (action == "archives") return IncidentArchivesJson(state,
+        static_cast<unsigned>(limit));
+    if (archiveRead) return IncidentArchivePageJson(state, triggerId, offset,
+        static_cast<unsigned>(limit));
+
+    std::lock_guard<std::mutex> lock(state->incidentMutex);
+    const std::string signature = action + '\n' + triggerId + '\n' + reason +
+        '\n' + fields[4] + '\n' + fields[5];
+    if (!readOnly) {
+        const auto previous = state->incidentRequests.find(requestId);
+        if (previous != state->incidentRequests.end())
+            return previous->second.first == signature ? previous->second.second
+                : "{\"schemaVersion\":1,\"code\":\"request_id_reused\"}";
+    }
+
+    std::string response;
+    if (action == "arm") {
+        if (state->incidentRecorder && state->incidentRecorder->HasIncident())
+            response = "{\"schemaVersion\":1,\"code\":\"incident_exists\"}";
+        else {
+            if (!state->incidentRecorder)
+                state->incidentRecorder = std::make_unique<IncidentRecorderModel>();
+            state->incidentArmed = true;
+            state->incidentArchiveAttempted = false;
+            state->incidentArchiveId.clear();
+            state->incidentArchiveError.clear();
+            state->incidentCaptureEnabled.store(true, std::memory_order_release);
+            response = IncidentJson(true, state->incidentRecorder.get());
+        }
+    } else if (action == "disarm") {
+        state->incidentArmed = false;
+        if (state->incidentRecorder && state->incidentRecorder->IsActive())
+            state->incidentRecorder->Stop(SampleClock().monotonicMs * 1000000ULL);
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        response = IncidentJson(false, state->incidentRecorder.get(), 0, 0,
+            state->incidentArchiveId, state->incidentArchiveError);
+    } else if (action == "trigger") {
+        if (!state->incidentRecorder || !state->incidentArmed) {
+            response = "{\"schemaVersion\":1,\"code\":\"incident_recorder_not_armed\"}";
+        } else {
+            const std::uint64_t now = SampleClock().monotonicMs * 1000000ULL;
+            const bool accepted = state->incidentRecorder->Trigger(
+                {now, triggerId, reason});
+            response = accepted ? IncidentJson(true, state->incidentRecorder.get())
+                : "{\"schemaVersion\":1,\"code\":\"incident_trigger_refused\"}";
+        }
+    } else if (action == "discard") {
+        if (state->incidentRecorder && state->incidentRecorder->IsActive())
+            response = "{\"schemaVersion\":1,\"code\":\"incident_active\"}";
+        else {
+            state->incidentRecorder.reset();
+            state->incidentArmed = false;
+            state->incidentCaptureEnabled.store(false, std::memory_order_release);
+            response = IncidentJson(false, nullptr);
+        }
+    } else if (action == "save") {
+        if (!state->incidentRecorder || !state->incidentRecorder->HasIncident())
+            response = "{\"schemaVersion\":1,\"code\":\"incident_not_found\"}";
+        else if (state->incidentRecorder->IsActive())
+            response = "{\"schemaVersion\":1,\"code\":\"incident_active\"}";
+        else if (state->incidentArchiveAttempted)
+            response = IncidentJson(state->incidentArmed,
+                state->incidentRecorder.get(), 0, 0, state->incidentArchiveId,
+                state->incidentArchiveError);
+        else {
+            (void)PersistFinalizedIncident(state);
+            response = IncidentJson(state->incidentArmed,
+                state->incidentRecorder.get(), 0, 0, state->incidentArchiveId,
+                state->incidentArchiveError);
+        }
+    } else if (action == "read") {
+        if (!state->incidentRecorder || !state->incidentRecorder->HasIncident())
+            response = "{\"schemaVersion\":1,\"code\":\"incident_not_found\"}";
+        else response = IncidentJson(state->incidentArmed,
+            state->incidentRecorder.get(), static_cast<std::size_t>(offset),
+            static_cast<std::size_t>(limit), state->incidentArchiveId,
+            state->incidentArchiveError);
+    } else {
+        response = IncidentJson(state->incidentArmed,
+                                state->incidentRecorder.get(), 0, 0,
+                                state->incidentArchiveId,
+                                state->incidentArchiveError);
+    }
+    if (!readOnly) {
+        constexpr std::size_t kIncidentRequestLimit = 256;
+        while (state->incidentRequestOrder.size() >= kIncidentRequestLimit) {
+            state->incidentRequests.erase(state->incidentRequestOrder.front());
+            state->incidentRequestOrder.pop_front();
+        }
+        state->incidentRequestOrder.push_back(requestId);
+        state->incidentRequests.emplace(requestId,
+            std::make_pair(signature, response));
+    }
+    return response;
+}
+
+void IncidentObserve(State* state, const NetworkEvent& event) {
+    if (state == nullptr ||
+        !state->incidentCaptureEnabled.load(std::memory_order_acquire)) return;
+    const std::uint64_t captureNs = SampleClock().monotonicMs * 1000000ULL;
+    const std::string payload = NetworkEventJson(event);
+    std::lock_guard<std::mutex> lock(state->incidentMutex);
+    if (!state->incidentRecorder) {
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        return;
+    }
+    if (!state->incidentArmed && state->incidentRecorder->IsActive() &&
+        captureNs > state->incidentRecorder->Summary().postDeadlineMonotonicNs) {
+        state->incidentRecorder->Close(captureNs);
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        return;
+    }
+    if (!state->incidentArmed && !state->incidentRecorder->IsActive()) {
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        return;
+    }
+    (void)state->incidentRecorder->Observe(
+        {captureNs, event.eventId, payload});
+    state->incidentRecorder->Close(captureNs);
+    if (!state->incidentArmed && !state->incidentRecorder->IsActive())
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+}
+
+void IncidentTick(State* state, std::uint64_t nowNs) {
+    if (state == nullptr ||
+        !state->incidentCaptureEnabled.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(state->incidentMutex);
+    if (!state->incidentRecorder) {
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
+        return;
+    }
+    state->incidentRecorder->Close(nowNs);
+    if (!state->incidentArmed && !state->incidentRecorder->IsActive())
+        state->incidentCaptureEnabled.store(false, std::memory_order_release);
 }
 
 std::string NotificationEvidenceKey(const std::string& recipeId,
@@ -1677,6 +1985,8 @@ void SampleLoop(State* state, const std::wstring& directory, SECURITY_ATTRIBUTES
             state->recipeCooldownDirty = true;
         }
         recipeCommitLock.unlock();
+        for (const NetworkEvent& event : events) IncidentObserve(state, event);
+        IncidentTick(state, sampled.monotonicMs * 1000000ULL);
         {
             std::lock_guard<std::mutex> lock(state->mutex);
             if (saved) {
@@ -2207,6 +2517,8 @@ void LifecycleIngestLoop(State* state, const std::wstring& directory,
                 }
                 if (added) accepted.push_back(event);
             }
+            for (const NetworkEvent& event : accepted)
+                IncidentObserve(state, event);
             std::vector<std::string> notices, noticeKeys;
             std::vector<std::pair<RecipeDef, NetworkEvent>> reactiveCandidates;
             std::string cooldownCheckpoint;
@@ -2722,6 +3034,11 @@ int Run(State* state, const Identity& own) {
         return 1;
     }
     SECURITY_ATTRIBUTES security = {sizeof(security), descriptor, FALSE};
+    const std::wstring incidentDirectory = storageDirectory + L"\\Incidents";
+    if (EnsureDirectory(incidentDirectory, &security)) {
+        state->incidentArchiveDirectory = incidentDirectory;
+        state->incidentSecurity = &security;
+    }
     if (!state->eventStore.Open(storageDirectory, L"events", 32 * 1024 * 1024,
                                 security, &configError) ||
         !state->notificationStore.Open(storageDirectory, L"notifications",
@@ -2878,6 +3195,11 @@ int Run(State* state, const Identity& own) {
                             cursor.find_first_not_of("0123456789abcdef:") ==
                                 std::string::npos)
                             reply = HistoryJson(state, cursor, limit, message[1] == 16, message[1] == 17);
+                    } else if (message[1] == 18 &&
+                               message.size() > 2 + kChallengeBytes &&
+                               message.size() <= 1200 + 2 + kChallengeBytes) {
+                        reply = IncidentControlJson(state,
+                            std::string(message.begin() + 18, message.end()));
                     } else if (message[1] == 8 && message.size() == 2 + kChallengeBytes) {
                         reply = RecipesJson(state);
                     } else if (message[1] == 9 &&
@@ -3016,6 +3338,34 @@ bool EngineRequestRestrictionHistory(const std::string& cursor, unsigned limit,
 bool EngineRequestLifecycleHistory(const std::string& cursor, unsigned limit,
                                    std::string* response) {
     return limit != 0 && Request(17, cursor, limit, response);
+}
+
+bool EngineIncidentRequest(const std::string& action,
+                           const std::string& requestId,
+                           const std::string& triggerId,
+                           const std::string& reason,
+                           std::uint64_t offset, unsigned limit,
+                           std::string* response) {
+    const bool archiveRead = action == "archiveRead";
+    const bool readOnly = action == "status" || action == "read" ||
+        action == "archives" || archiveRead;
+    if ((action != "status" && action != "read" && action != "arm" &&
+         action != "disarm" && action != "trigger" && action != "discard" &&
+         action != "save" && action != "archives" && !archiveRead) ||
+        (readOnly ? (!requestId.empty() ||
+            (!archiveRead && !triggerId.empty())) : !SafeId(requestId, 64)) ||
+        (action == "trigger" ? (!SafeId(triggerId, 64) || reason.empty() ||
+            reason.size() > 512 || reason.find_first_of("\r\n") != std::string::npos)
+            : !reason.empty()) ||
+        (action == "archiveRead" && !SafeId(triggerId, 32)) ||
+        (action == "read" ? (limit == 0 || limit > 100 || offset > 1000000) :
+         archiveRead ? (limit == 0 || limit > 100 || offset > 1000000) :
+         action == "archives" ? (limit == 0 || limit > 100 || offset != 0) :
+            (offset != 0 || limit != 0))) return false;
+    const std::string payload = action + '\n' + requestId + '\n' + triggerId +
+        '\n' + reason + '\n' + std::to_string(offset) + '\n' +
+        std::to_string(limit);
+    return RequestRaw(18, payload, response);
 }
 
 bool EngineRequestConfig(std::string* response) {
