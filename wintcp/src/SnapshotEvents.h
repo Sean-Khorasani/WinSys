@@ -20,6 +20,11 @@ public:
     std::vector<NetworkEvent> Observe(const std::vector<Connection>& rows,
                                       const std::string& utc,
                                       std::uint64_t monotonicNs);
+    // Full, bounded snapshot-only state at a sample time. The result is
+    // checkpoint evidence, not a synthesized sequence of connection events.
+    std::string CheckpointJson(const std::string& utc,
+                               std::uint64_t monotonicNs,
+                               std::size_t maxBytes = 128 * 1024);
     void Reset();
 
 private:
