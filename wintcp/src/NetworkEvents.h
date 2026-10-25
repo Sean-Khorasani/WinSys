@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace wintcp {
@@ -33,6 +34,7 @@ struct NetworkProcessIdentity {
     std::uint64_t creationTimeFileTime = 0;
     bool creationTimeKnown = false;
     std::string imagePath;           // UTF-8; empty if unresolved
+    std::string observedImageName;    // Source label only; not a verified executable path.
 };
 
 // No event kind implies another kind. A snapshot appearance is never an
@@ -71,6 +73,10 @@ struct NetworkEvent {
 
 std::string NetworkEventJson(const NetworkEvent& event);
 std::string NetworkJsonQuote(const std::string& value);
+// Parses the collector's flat normalizedFields object embedded in one raw
+// lifecycle record. Raw evidence remains separately retained if this fails.
+bool ParseLifecycleDerivedEvent(const std::string& traceJson,
+                                NetworkEvent* event, std::string* error);
 bool ProcessActionable(const NetworkProcessIdentity& process);
 
 struct NetworkCapability {
@@ -101,7 +107,7 @@ class NetworkEventJournal {
 public:
     explicit NetworkEventJournal(std::size_t maxRecords = 16384,
                                  std::size_t maxBytes = 8 * 1024 * 1024);
-    void Append(NetworkEvent event);
+    bool Append(NetworkEvent event);
     NetworkEventPage Read(const std::string& cursor, std::size_t limit) const;
     std::size_t Size() const { return records_.size(); }
     std::uint64_t EvictedRecords() const { return evictedRecords_; }
@@ -113,6 +119,7 @@ private:
         NetworkEvent event;
     };
     std::deque<Record> records_;
+    std::unordered_set<std::string> retainedIds_;
     std::string epoch_;
     std::uint64_t nextSequence_ = 1;
     std::uint64_t evictedRecords_ = 0;
