@@ -186,8 +186,12 @@ firewall permits access or that the endpoint is externally reachable.
 
 Choose **Units**, **Density**, and **Refresh interval** in Settings to change the
 current view. Process sizes use readable units while their tooltips retain the
-exact values. Desktop notifications require browser permission; denied or later
-revoked permission turns the option off and saves the disabled state.
+exact values. Desktop notifications require browser permission and cover both
+new connection sightings and newly recorded recipe inbox entries while the Web
+UI is open. Denied or later revoked permission turns the option off and saves
+the disabled state. Browser delivery is best-effort: the local engine inbox is
+the durable record and remains available when the browser is closed or
+notifications are unavailable.
 Saved preference changes are synchronized to other open Settings tabs. Incoming
 updates do not replace fields currently being edited or saved locally.
 
@@ -289,11 +293,40 @@ The Monitors list shows whether each rule is disabled, starting, running, or
 degraded, its current cooldown state, and the latest trigger recorded in this
 engine session. Suppression counts cover matching observations skipped by that
 rule's cooldown; the inbox remains the durable trigger history across restarts.
+Recipes may run always or in a weekly local-time window using a Windows
+time-zone ID. The weekday selection names the day on which a window starts;
+overnight windows continue into the next day and the end time is exclusive.
+UTC event time is converted with Windows dynamic time-zone rules, so both
+occurrences of a repeated fall-back hour are evaluated consistently and a
+spring-forward local time that never occurs cannot trigger. Unknown time-zone
+IDs are rejected on save; if a saved zone becomes unavailable, that recipe is
+degraded and does not fire. Scheduled evaluation ignores live events more than
+10 seconds old, preventing stale collector backlog from replaying after sleep;
+the side-effect-free Test action evaluates retained evidence at its original
+event time without that live freshness cutoff. The runtime reports the next
+window transition in UTC and whether the window opens or closes. When an
+enabled recipe leaves its window, WinTCP queues a recipe-owner release through
+the optional collector, which also invalidates that recipe's in-memory Active
+grant. A failed release is shown with its error and retried with a short
+backoff; it is never silently reported as released. Returning to an active
+window resumes Passive evaluation, but does not restore an Active grant.
+Passive matching requires a nonzero PID, a resolved full executable path,
+and the trigger-specific endpoint evidence. When the process creation time is
+unknown, cooldowns are tied to that evidence event rather than treating a
+reused PID as the same process instance; cross-source deduplication requires a
+verified process instance. Such evidence can therefore produce separate
+notifications when identity cannot be joined safely.
 `deliveryStatus: "inbox"` means the notice was appended to WinTCP's local
 durable inbox; it does not claim that a browser or operating-system toast was
 shown. Older retained rows that used to say `pending` are normalized to `inbox`
 in the read view; the append-only on-disk history is not rewritten.
-Acknowledgment is a separate persisted user action.
+Acknowledgment is a separate persisted user action. When desktop notifications
+are enabled and permission is granted, the open Web UI polls the durable inbox
+and offers new recipe notices through the browser Notification API. A shared
+Web Lock (with a short local-storage lease fallback) coordinates open tabs;
+existing inbox rows are silently baselined on first use or after history
+rotation, and bursts are capped at three toasts per poll. This adapter is
+best-effort only and never changes inbox persistence or acknowledgment state.
 Lifecycle capability becomes available when event tracking is running, before
 any matching connection has occurred, so an active recipe can be armed in
 advance.
@@ -410,7 +443,14 @@ unknown, and recovered observations carry the new generation and a recovery
 marker. Collector status exposes mapping generation and recovery count. The
 engine records a `source_clock_mapping_unstable` coverage gap before the first
 affected observation in a trace epoch; raw QPC timestamps remain available
-even when UTC projection is unavailable. A bounded 250 ms reorder window correlates TCP
+even when UTC projection is unavailable. The elevated dev-only check
+`powershell -ExecutionPolicy Bypass -File tools/webui-e2e/lifecycle-exit-check.ps1 -Url http://127.0.0.1:PORT/`
+also starts a uniquely named unrelated real-time ETW session, confirms its
+owner GUID remains unchanged across WinTCP event-trace start/stop and collector
+shutdown, then stops only that test-owned session. It uses twelve disposable
+short-lived local clients and preserves explicit loss/identity uncertainty;
+the collector requires elevation and the test refuses to alter an existing
+recipe or collector. A bounded 250 ms reorder window correlates TCP
 flow generations and labels late, mid-session, and incomplete chronology. Source
 records remain intact; derived records reference their evidence IDs. UDP stays
 activity evidence. Publication cursors remain monotonic even when source
@@ -457,35 +497,122 @@ The experimental incident-window API is separate from durable history:
 `save`, or `discard` actions; `GET /api/engine/incidents` reports state, and adding
 `?offset=N&limit=N` reads a bounded page from the current incident. Arm begins
 a 120-second rolling pre-trigger window; a manual trigger captures 30 seconds
-afterward and related triggers extend that window up to 120 seconds. It records
-observed snapshot and normalized lifecycle events with their original evidence
-JSON and a separate engine capture timestamp. Capture remains in memory until
+afterward and related triggers extend that window up to 120 seconds. While the
+recorder is armed, a fired enabled Passive recipe also starts/extends an
+incident with its recipe name and trigger reason; the ordinary inbox
+notification remains independent of recorder availability. It records observed
+snapshot and normalized lifecycle events with their original evidence
+JSON and a separate engine capture timestamp. The recorder reports the
+requested pre-trigger window and the measured span from its earliest retained
+pre-trigger record to the trigger, alongside a separate incomplete-coverage
+flag; this span is not a claim of continuous event visibility. While armed, the sampler also
+records a complete snapshot-only state checkpoint at least every five seconds;
+each checkpoint is capped at 128 KiB and explicitly reports included/total
+endpoints when truncated. It does not claim ETW, adapter, route, or other
+sources that are not present in that snapshot. Capture remains in memory until
 the user explicitly saves a finalized incident. Save writes a generated,
 per-user directory under `%LOCALAPPDATA%\WinTCP\Engine\Incidents` containing
 `manifest.json`, `events.ndjson`, `checkpoints.ndjson`, and `index.json`; files
 are flushed in a temporary directory and exposed by same-volume rename, and
-the manifest includes SHA-256 hashes. The current archive is intentionally
-marked `replayReady: false`: periodic state checkpoints, state reconstruction,
-privacy-filtered export, and safe import validation are not implemented yet.
-Saved archives survive engine restart; the live capture and
+the manifest includes SHA-256 hashes for event, checkpoint, and index files.
+Checkpoint rows are stored separately and returned in the bounded archive
+pages; the manifest records their count and whether each captured snapshot was
+complete. The manifest also records the WinTCP build version, observed source
+coverage and loss counts, coverage-gap reasons, and per-timebase monotonic/UTC
+anchor pairs. These are observations from the captured records, not claims that
+an unobserved source was active or that coverage was continuous. The manifest
+sets `replayReady` only when checkpoint data exists.
+Offline replay seeks to the nearest prior checkpoint and applies later snapshot
+appearance/disappearance deltas in monotonic capture order. A coverage gap or
+truncated checkpoint makes the displayed state partial; a later complete
+checkpoint restores a known baseline. The UI provides scrub, play/pause, speed,
+transport/search filters, and recorded trigger reasons. As the replay position
+moves, a separate historical-evidence list shows the non-checkpoint archive
+events at or before that position (latest 100, with an explicit truncation
+count); this is a time-filtered view, not reconstructed state. Replay still
+reconstructs only snapshot endpoint state. Import accepts
+the versioned JSON export envelope and validates schema, counts, timestamps,
+checkpoint shape, nesting, object keys, and the 64 MiB/100,000-record bounds
+before rendering it as local read-only evidence. Imported JSON is always
+untrusted and unauthenticated, is never uploaded or written to the archive
+store, and cannot invoke actions; users must review its provenance. The Saved
+incident library can export a verified archive as JSON:
+**Private export** is the default and
+omits executable paths/names and free-form trigger reasons while consistently
+pseudonymizing process, flow, event, timebase, and endpoint identifiers;
+timestamps and event kinds remain visible. **Full metadata export** retains
+paths, names, addresses, and identifiers and requires an explicit confirmation.
+Export reads all bounded pages from the integrity-checked archive and enforces
+a 64 MiB client-side safety cap. It does not modify the saved archive. Imported
+JSON is evidence only, not an authenticated native archive, and cannot be
+re-exported or used to alter archive retention/pinning.
+Saved archives are retained up to 20 incidents and 1 GiB by default. When a
+new save needs room, the oldest valid unpinned archive(s) are removed first;
+pinned archives count toward both limits. If corrupt inventory prevents a safe
+retention decision, or every candidate is pinned, the save fails visibly and
+existing archives are preserved. The library reports each archive's byte size
+and pin state, and offers explicit pin/unpin controls. Saved archives survive
+engine restart; the live capture and
 its in-session view do not. `disarm` stops early and marks the post-window
 incomplete; `discard` clears only the in-memory incident and does not erase a
 saved archive. The token-protected `GET /api/engine/incidents/archives?limit=N`
 lists finalized archives; `GET /api/engine/incidents/archives/{id}?offset=N&limit=N`
 validates file hashes and JSON structure before returning a bounded event page.
+`POST /api/engine/incidents/archives/{id}/pin` and `/unpin` require a unique
+request ID and the same session-token/origin checks as other mutations.
 Automations > Event history exposes a Saved incident library labeled
-**Recorded / Read-only**. It inspects recorded event rows only; it is not yet a
-state-reconstruction replay, and offers no live actions or external lookups.
-These controls never enable ETW or apply firewall actions by themselves. The
+**Recorded / Read-only**. It distinguishes snapshot-state checkpoints from
+event deltas and provides offline scrub/playback with transport/search filters.
+It reports partial state honestly and offers no live actions or external
+lookups. These controls never enable ETW or apply firewall actions by themselves. The
 endpoints require the session token; POST also uses the normal same-origin
 mutation checks.
 The focused disposable-loopback integration check is
 `node tools/webui-e2e/incident-recorder-check.mjs --url http://127.0.0.1:PORT/`.
-It requires an unarmed recorder with no retained incident, briefly arms and
+It requires an unarmed recorder with no retained incident, arms and
 triggers the recorder, opens a local loopback TCP connection, verifies a
 snapshot observation is readable, explicitly saves and verifies archive file
-hashes, then removes only the generated test archive and discards its fixture.
+hashes plus checkpoint shape/completeness metadata (without assuming the host's
+full endpoint set fits the checkpoint cap), then removes only the generated
+test archive and discards its fixture. It waits across one five-second capture
+interval and verifies that the periodic checkpoint follows the arm-time base.
+Use optional `--soak-seconds 6..120` for a longer run; related manual triggers
+extend the post-trigger window within the recorder's configured maximum.
 It does not enable ETW or require administrator privileges.
+The headless browser replay acceptance test is
+`node tools/webui-e2e/incident-replay-ui-check.mjs --url http://127.0.0.1:PORT/`
+(or `npm run incident-replay` from `tools/webui-e2e`). It creates and removes
+its own loopback-only archive fixture, exercises load/scrub/playback/search,
+checks historical evidence follows the selected replay time, and verifies that
+replay makes only same-origin reads and exposes no actions. The bounded pure
+reducer check `node tools/webui-e2e/incident-replay-check.mjs` also covers
+timeline filtering, gap inclusion, and the event-list limit.
+The schedule parser/runtime acceptance check is
+`node tools/webui-e2e/recipe-schedule-check.mjs --url http://127.0.0.1:PORT/`
+(or `npm --prefix tools/webui-e2e run recipe-schedule -- --url http://127.0.0.1:PORT/`).
+It refuses to proceed unless the recipe store is empty, verifies unknown-zone
+rejection, a valid UTC schedule round trip, and runtime transition/lease-state
+fields, then removes its fixture. Native unit tests also cover next-transition
+calculation across the spring-forward gap and fall-back repeated hour.
+The elevated active-recipe integration is
+`node tools/webui-e2e/active-recipe-check.mjs --url http://127.0.0.1:PORT/`
+(or `npm run active-recipe -- --url http://127.0.0.1:PORT/`). It uses only a
+copied disposable PowerShell image and a loopback listener, and refuses to run
+when recipes, a collector, or restriction inventory are already present. It
+also verifies a real recipe-owned lease is removed when its short UTC window
+closes, before the lease TTL, and that the same test flow works afterward.
+The browser recipe-notification adapter has a deterministic headless check at
+`node tools/webui-e2e/recipe-notification-delivery-check.mjs --url http://127.0.0.1:PORT/`
+(or `npm run recipe-notification-delivery -- --url http://127.0.0.1:PORT/`
+from `tools/webui-e2e`). It covers
+silent initial inbox baselining, once-only delivery, denied permission, and
+cross-tab coordination without changing the engine inbox.
+`node tools/webui-e2e/incident-import-check.mjs` exercises strict import
+validation; the browser replay test also covers imported-file UI behavior.
+`node tools/webui-e2e/incident-recipe-trigger-check.mjs --url http://127.0.0.1:PORT/`
+uses a disposable same-host non-loopback TCP peer to verify a Passive recipe
+triggers an armed recorder, retains the evidence and inbox notice, and restores
+the initially empty recipe store.
 Monitor state checkpoints retain remaining cooldowns and suppressed counts in
 the engine's local storage. Restart restores those deadlines without restoring
 privileged authorization. Offline time reduces a cooldown only when monotonic
